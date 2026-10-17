@@ -1,0 +1,154 @@
+# Aletheia
+
+Aletheia is a claim-level news credibility desk. Paste an article or give it a URL. It splits the piece into sentences and claims, labels each one, and explains the label. Checkable claims are compared with live web search results. The page then shows a 0–100 credibility score, four sub-scores, and one sentence on why the article holds up or does not.
+
+Labels: **True**, **False**, **Misleading**, **Unverifiable**, **Opinion**, **Rhetorical / emotional language**.
+
+The interface is English and Greek. A language toggle translates the whole UI, and explanations come back in the language you selected. The article language is detected separately, so a Greek article can be explained in English and the reverse.
+
+It does not invent sources. A URL is cited only when that page was returned by search for that claim. If the evidence is thin, the claim stays **Unverifiable**.
+
+## Pipeline
+
+1. **Extract.** A URL is sent to [Firecrawl](https://firecrawl.dev) scrape with markdown output and main content only. The title, source domain, and date come from the scrape metadata when the page exposes them. Pasted text is used as-is. A short first line followed by a blank line is treated as the title. If `FIRECRAWL_API_KEY` is missing, the worker reads a public HTML page directly and says so.
+2. **Segment and classify.** The model splits the body into exact substrings and marks each as checkable, mixed, opinion, or rhetorical. Offsets are checked against the article. If the model’s excerpts do not line up, Aletheia falls back to a deterministic sentence split.
+3. **Retrieve evidence.** Checkable claims get a search query. Firecrawl’s search endpoint returns the pages. At most 8 searches run per article.
+4. **Verify.** The model judges only the retrieved snippets, at temperature 0, and must return JSON. The reply is validated and retried up to three times. Citations that were not in the search results are dropped. A True, False, or Misleading label with no surviving citation is downgraded to Unverifiable.
+5. **Score.** The gauge is computed in code from the labels, not by asking the model for a number. A second model call only looks for direct contradictions, and unknown claim ids are ignored.
+
+If `FIRECRAWL_API_KEY` is not set, search is skipped. Factual labels are marked **model knowledge only**, recent or numeric claims are left Unverifiable, no URLs are attached, and the score is capped at 68. URL fetches fall back to a direct HTML read.
+
+## Score
+
+Weights in `shared/score.ts`:
+
+| Part | Weight |
+| --- | --- |
+| Factual accuracy | 58% |
+| Sourcing | 16% |
+| Tone / neutrality | 12% |
+| Logical consistency | 14% |
+
+True counts as 100, Misleading as 35, False as 0, weighted by confidence. Unverifiable claims do not pretend to be confirmed. Each False claim subtracts 14 and each Misleading claim subtracts 6, up to 36 points. A direct contradiction subtracts 30 from logical consistency. A piece that is only opinion or rhetoric is capped at 64.
+
+## Layout
+
+```
+index.html              static site entry
+src/                    dashboard (Vite + TypeScript)
+src/config.ts           backend URL — edit this before a Pages build
+shared/                 scoring, citations, highlighting, JSON parsing
+backend/                Cloudflare Worker
+.github/workflows/      tests and GitHub Pages
+```
+
+The Worker calls an OpenAI-compatible chat API. `OPENAI_BASE_URL` defaults to `https://api.reflection.ai/openai/v1` and `OPENAI_MODEL` defaults to `Beam-501B-A23B` when unset. The key is the `OPENAI_API_KEY` secret.
+
+## Run it locally
+
+You need Node.js 20 or newer.
+
+```bash
+npm install
+npm install --prefix backend
+```
+
+Frontend, from the repo root:
+
+```bash
+npm run dev
+```
+
+Open `http://localhost:5173`. **Sample report** loads a fixture analysis with no API keys, so you can see the desk before the worker is configured.
+
+Worker, from `backend/`:
+
+```bash
+cp .dev.vars.example .dev.vars
+# put real keys in .dev.vars — that file is gitignored
+npx wrangler dev
+```
+
+`src/config.ts` already points at `http://127.0.0.1:8787`.
+
+## Secrets
+
+From `backend/`, log in once with `npx wrangler login`, then:
+
+```bash
+npx wrangler secret put OPENAI_API_KEY
+npx wrangler secret put FIRECRAWL_API_KEY
+```
+
+| Name | Required | Purpose |
+| --- | --- | --- |
+| `OPENAI_API_KEY` | yes | Bearer token for the chat completions API |
+| `FIRECRAWL_API_KEY` | no | Firecrawl key for search and for scraping article URLs |
+
+Never commit either key. Do not put them in `wrangler.toml` or in the frontend.
+
+## Worker variables
+
+Set in `backend/wrangler.toml`. Change them there, or override per environment in the Cloudflare dashboard.
+
+| Variable | Default |
+| --- | --- |
+| `OPENAI_BASE_URL` | `https://api.reflection.ai/openai/v1` |
+| `OPENAI_MODEL` | `Beam-501B-A23B` |
+| `ALLOWED_ORIGINS` | `https://hellenicdev.github.io` plus localhost ports used in development |
+| `RATE_LIMIT_PER_IP` | `30` |
+| `RATE_LIMIT_WINDOW_SEC` | `600` |
+
+Deploy:
+
+```bash
+cd backend
+npx wrangler deploy
+```
+
+The command prints the worker URL, something like `https://aletheia.<account>.workers.dev`.
+
+## Point the site at the worker
+
+Edit the single export in `src/config.ts`:
+
+```ts
+export const BACKEND_URL = "https://aletheia.<account>.workers.dev";
+```
+
+Rebuild after changing it. The Pages workflow does not inject this value.
+
+## GitHub Pages
+
+The site is a static Vite build. Project Pages for this repo are served at `https://hellenicdev.github.io/aletheia/`, so the workflow sets `PAGES_BASE=/aletheia/`.
+
+1. On GitHub, open **Settings → Pages**.
+2. Under **Build and deployment**, set **Source** to **GitHub Actions**.
+3. Merge to `main`. `.github/workflows/pages.yml` builds `dist/` and deploys it.
+
+The browser origin is `https://hellenicdev.github.io` (no path). That origin is already on the worker’s allow list. Add any other origin to `ALLOWED_ORIGINS` before you use it. Requests with a different `Origin` header are rejected. `http://localhost:5173` and `http://127.0.0.1:5173` stay allowed for local development.
+
+If the repository name changes, update `PAGES_BASE` in the workflow to `/<repo>/`.
+
+## Limits
+
+- Article text: 40 to 12,000 characters.
+- Request body: 80 KB.
+- Article URLs: public `http`/`https` only. Local, private, and link-local addresses are refused before anything is sent to Firecrawl. The direct fallback, used only when the Firecrawl key is absent, reads at most 1 MB of HTML and follows four redirects.
+- 20 claims audited per article, 8 live searches, 4 analyses in flight on a worker isolate.
+- 30 analyses per IP per 10 minutes. The counter lives in the isolate, so it resets when the isolate recycles. It is a basic guard, not a global quota.
+
+## Tests
+
+```bash
+npm test
+npm run typecheck
+npm test --prefix backend
+npm run typecheck --prefix backend
+```
+
+Frontend tests cover scoring inputs via the sample report, highlighting, and the English/Greek string table. Worker tests cover extraction, Firecrawl search and scrape parsing, SSRF checks, rate limiting, JSON retries, citation filtering, and a full analysis with the model and Firecrawl HTTP calls mocked. No live API key is required.
+
+## Honesty limits
+
+Search snippets are short. A supported label means those snippets agree with the claim, not that every fact in the world was checked. Opinion and rhetorical passages are not “false”; they are not factual claims. When search is off, treat every factual label as unverified model knowledge.

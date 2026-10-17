@@ -1,0 +1,13 @@
+name = "aletheia"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+
+# Set secrets with:
+#   npx wrangler secret put OPENAI_API_KEY
+#   npx wrangler secret put FIRECRAWL_API_KEY
+[vars]
+OPENAI_BASE_URL = "https://api.reflection.ai/openai/v1"
+OPENAI_MODEL = "Beam-501B-A23B"
+ALLOWED_ORIGINS = "https://hellenicdev.github.io,http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173,http://localhost:8787,http://127.0.0.1:8787"
+RATE_LIMIT_PER_IP = "30"
+RATE_LIMIT_WINDOW_SEC = "600"
