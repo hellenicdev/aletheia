@@ -1,0 +1,6 @@
+# Copy to .dev.vars for `wrangler dev`. Never commit .dev.vars.
+OPENAI_API_KEY=
+FIRECRAWL_API_KEY=
+# Optional. wrangler.toml already sets these; an empty value is ignored.
+# OPENAI_BASE_URL=https://api.reflection.ai/openai/v1
+# OPENAI_MODEL=Beam-501B-A23B
