@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyEvidence, canonicalUrl, isWireCopy } from "./citations";
+import { applyEvidence, canonicalUrl, isSyndicatedCopy, isWireCopy } from "./citations";
 
 const minutes = {
   url: "https://example.com/minutes/",
@@ -153,6 +153,58 @@ describe("wire reprints and entity match", () => {
     expect(isWireCopy("https://www.reuters.com/world/energy")).toBe(false);
     expect(wire.label).toBe("Unverifiable");
     expect(wire.explanation).toContain("not independently verified");
+
+    const titled = "Coast Guard rescues sixteen people off the Baja coast";
+    expect(
+      isSyndicatedCopy(
+        {
+          title: titled,
+          snippet: "Stations carried the same wire story about the rescue.",
+        },
+        titled,
+        "An original report about the rescue and the crew that stayed out overnight.",
+      ),
+    ).toBe(true);
+    const copy = applyEvidence({
+      label: "True",
+      confidence: 0.8,
+      explanation: "A local station carried the wire.",
+      claimText: claim,
+      sourceUrls: ["https://www.opb.org/article/rescue"],
+      evidence: [
+        {
+          url: "https://www.opb.org/article/rescue",
+          title: titled,
+          snippet: "WASHINGTON (AP) — The coastal plant received financing for the restart.",
+        },
+      ],
+      searchEnabled: true,
+      uiLanguage: "en",
+      articleDomain: "apnews.com",
+      articleTitle: titled,
+      articleText: "An original AP story about the coastal plant and its financing.",
+    });
+    expect(copy.label).toBe("Unverifiable");
+    const reuters = applyEvidence({
+      label: "True",
+      confidence: 0.9,
+      explanation: "A separate newsroom reported the loan.",
+      claimText: claim,
+      sourceUrls: ["https://www.reuters.com/world/energy"],
+      evidence: [
+        {
+          url: "https://www.reuters.com/world/energy",
+          title: "Energy loan",
+          snippet: "Officials described a federal loan for the coastal plant after a separate review.",
+        },
+      ],
+      searchEnabled: true,
+      uiLanguage: "en",
+      articleDomain: "apnews.com",
+      articleTitle: titled,
+      articleText: "An original AP story about the coastal plant and its financing.",
+    });
+    expect(reuters.label).toBe("True");
 
     const sameFamily = applyEvidence({
       label: "True",

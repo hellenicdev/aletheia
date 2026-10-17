@@ -192,6 +192,7 @@ describe("analyze", () => {
     expect(seen.some((call) => call.url.includes("/chat/completions") && call.body?.temperature === 0)).toBe(
       true,
     );
+    expect(seen.some((call) => call.url.includes("/chat/completions") && call.body?.seed === 7)).toBe(true);
   });
 
   it("returns Greek explanations when the interface language is Greek", async () => {
@@ -533,7 +534,166 @@ describe("analyze", () => {
     );
     expect(result.meta.outlet).toBe("opinion");
     expect(result.score.verdict.toLowerCase()).toContain("mostly opinion");
-    expect(result.score.overall).toBeLessThanOrEqual(74);
+    expect(result.score.overall).toBeLessThanOrEqual(65);
+  });
+
+  it("returns a scored result when the post-verify consistency call hangs", async () => {
+    const fact = "The council voted 7 to 2 on Monday and published the minutes for residents.";
+    const other = "Twelve boats remain on the waiting list after the harbour master signs the notice.";
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev/v2/search")) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            data: {
+              web: [
+                {
+                  url: "https://www.reuters.com/world/harbour",
+                  title: "Harbour notice",
+                  description: "Councillors approved the harbour measure and left twelve boats waiting.",
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(classifyPayload(user, () => ({ claimType: "checkable_factual", note: "A recorded claim." })));
+      }
+      if (system.startsWith("TASK:queries")) {
+        return llmPayload({
+          queries: [
+            { id: "s1", query: "council vote Monday" },
+            { id: "s2", query: "boats waiting list" },
+          ],
+        });
+      }
+      if (system.startsWith("TASK:verify")) {
+        const payload = JSON.parse(user) as { claims: { id: string }[] };
+        return llmPayload({
+          results: payload.claims.map((claim) => ({
+            id: claim.id,
+            label: "True",
+            confidence: 0.9,
+            explanation: "Reuters recorded the same harbour facts.",
+            sourceUrls: ["https://www.reuters.com/world/harbour"],
+          })),
+        });
+      }
+      if (system.startsWith("TASK:consistency")) {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 30_000);
+          timer.unref?.();
+        });
+        return llmPayload({ contradictions: [] });
+      }
+      throw new Error(system.slice(0, 24));
+    };
+    const started = Date.now();
+    const result = await analyze(
+      { text: `${fact} ${other}`, uiLanguage: "en" },
+      { env, fetchImpl, consistencyTimeoutMs: 300 },
+    );
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(result.contradictions).toEqual([]);
+    expect(result.score.verdict).toContain("/100");
+    expect(result.score.verdict.toLowerCase()).toContain("outlet is unknown");
+    expect(result.meta.outlet).toBe("unknown");
+    expect(result.meta.warnings.some((warning) => /consistency timed out/i.test(warning))).toBe(true);
+  });
+
+  it("treats an ERT news URL as opinion when the article category is Απόψεις", async () => {
+    const fact = "The council voted 7 to 2 on Monday and published the minutes for residents.";
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev/v2/search")) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            data: {
+              web: [
+                {
+                  url: "https://www.reuters.com/world/harbour-vote",
+                  title: "Reuters",
+                  description: "Councillors approved the harbour measure by seven votes to two.",
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes("api.firecrawl.dev/v2/scrape")) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            data: {
+              markdown: fact,
+              html: '<article class="post category-apopseis category-eidiseis"><script type="application/ld+json">{"articleSection":["ΑΠΟΨΕΙΣ","ΕΙΔΗΣΕΙΣ"]}</script><p>' +
+                fact +
+                "</p></article>",
+              metadata: {
+                title: "Η Ευρώπη έχει καύσιμα",
+                sourceURL:
+                  "https://www.ertnews.gr/eidiseis/diethni/i-eyropi-exei-kaysima-alla-oxi-anosia-sto-sok-ton-timon/",
+              },
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload({
+          ...classifyPayload(user, () => ({ claimType: "checkable_factual", note: "A recorded claim." })),
+          genre: "news",
+        });
+      }
+      if (system.startsWith("TASK:queries")) {
+        return llmPayload({ queries: [{ id: "s1", query: "council vote Monday" }] });
+      }
+      if (system.startsWith("TASK:verify")) {
+        const payload = JSON.parse(user) as { claims: { id: string }[] };
+        return llmPayload({
+          results: payload.claims.map((claim) => ({
+            id: claim.id,
+            label: "True",
+            confidence: 0.9,
+            explanation: "Reuters recorded the same seven to two vote.",
+            sourceUrls: ["https://www.reuters.com/world/harbour-vote"],
+          })),
+        });
+      }
+      if (system.startsWith("TASK:consistency")) return llmPayload({ contradictions: [] });
+      throw new Error(system.slice(0, 24));
+    };
+    const result = await analyze(
+      {
+        url: "https://www.ertnews.gr/eidiseis/diethni/i-eyropi-exei-kaysima-alla-oxi-anosia-sto-sok-ton-timon/",
+        uiLanguage: "en",
+      },
+      { env, fetchImpl },
+    );
+    expect(result.meta.outlet).toBe("opinion");
+    expect(result.score.verdict.toLowerCase()).toContain("mostly opinion");
+    expect(result.score.overall).toBeLessThanOrEqual(65);
+  });
+
+  it("drops a caption that repeats the previous sentence", async () => {
+    const line = "A researcher examines the reconstructed skull in the cave.";
+    const { fetchImpl } = scriptedFetch();
+    const result = await analyze(
+      { text: `${line} Caption: ${line}`, uiLanguage: "en" },
+      { env, fetchImpl },
+    );
+    expect(result.segments.filter((segment) => segment.text.includes("reconstructed"))).toHaveLength(1);
   });
 
   it("rejects private URLs before any fetch", async () => {

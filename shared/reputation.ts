@@ -1,4 +1,4 @@
-export type OutletKind = "news" | "opinion" | "satire" | "low-credibility";
+export type OutletKind = "news" | "opinion" | "satire" | "low-credibility" | "unknown";
 
 const SATIRE = [
   "theonion.com",
@@ -121,5 +121,6 @@ export function resolveOutlet(options: {
   if (options.genre === "satire" && options.tone < 75) return "satire";
   if (options.genre === "unreliable" && options.tone < 85) return "low-credibility";
   if (options.genre === "opinion") return "opinion";
+  if (!options.domain) return "unknown";
   return "news";
 }

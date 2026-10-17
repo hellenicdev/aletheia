@@ -11,6 +11,7 @@ claimType is one of:
 - rhetorical: a slogan, insult, profanity, emotional appeal, or rhetorical question with no discrete factual proposition
 - mixed: a factual proposition wrapped in loaded language
 A value judgement (willingness, ought, deserves, debilitating) or an insult is not checkable_factual.
+Quoted testimony and attributed statements (said, told, according to, είπε, δήλωσε, σύμφωνα με) are the speaker's claim, not the author's opinion. Classify those as checkable_factual or mixed. Opinion is only the author's own evaluation.
 genre is one of news, opinion, satire, unreliable. Use satire for jokes presented as news, and unreliable for conspiracy or fabricated health claims.
 detectedLanguage is "el" for Greek, "en" for English, otherwise "other".
 note is at most 12 words in ${languageName(lang)}. Do not include a URL.

@@ -124,6 +124,17 @@ export async function handleRequest(
       };
       ping();
       heartbeat = setInterval(ping, 10_000);
+      let settled = false;
+      const hardStop = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        send("error", { message: "The analysis timed out before a verdict could be sent." });
+        try {
+          controller.close();
+        } catch {
+          /* The stream is already closed. */
+        }
+      }, LIMITS.analysisDeadlineMs + 15_000);
       try {
         const result = await analyze(input, {
           env,
@@ -132,13 +143,20 @@ export async function handleRequest(
           onPreview: (article: ArticlePreview) => send("preview", article),
           onTick: ping,
         });
-        send("result", result);
+        if (!settled) {
+          settled = true;
+          send("result", result);
+        }
       } catch (error) {
         const message =
           error instanceof HttpError ? error.message : "The analysis could not be completed.";
         if (!(error instanceof HttpError)) console.error(error);
-        send("error", { message });
+        if (!settled) {
+          settled = true;
+          send("error", { message });
+        }
       } finally {
+        clearTimeout(hardStop);
         clearInterval(heartbeat);
         rate.inFlight.count = Math.max(0, rate.inFlight.count - 1);
         controller.close();

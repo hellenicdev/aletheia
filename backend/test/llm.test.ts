@@ -128,6 +128,33 @@ describe("completeJson", () => {
     expect(bodies[1]).not.toHaveProperty("max_completion_tokens");
   });
 
+  it("sends temperature 0 and a fixed seed, and drops a seed the API rejects", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      bodies.push(body);
+      if ("seed" in body) return new Response("unsupported parameter seed", { status: 400 });
+      return new Response(
+        JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: '{"ok":true}' } }] }),
+        { status: 200 },
+      );
+    };
+    const value = await completeJson({
+      config: resolveConfig({ OPENAI_API_KEY: "test-key" }),
+      apiKey: "test-key",
+      system: "TASK:segment",
+      user: "article",
+      fetchImpl,
+      attempts: 1,
+      validate: (data) => data as { ok: boolean },
+    });
+    expect(value.ok).toBe(true);
+    expect(bodies[0]?.temperature).toBe(0);
+    expect(bodies[0]?.seed).toBe(7);
+    expect(bodies[1]).not.toHaveProperty("seed");
+    expect(bodies[1]?.temperature).toBe(0);
+  });
+
   it("joins text parts from array content", async () => {
     const fetchImpl: typeof fetch = async () =>
       new Response(

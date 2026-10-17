@@ -8,7 +8,10 @@ const MENU_BLOB =
   /\b(?:Εκδόσεις|Reimagine Tourism|Our personalization engine|Get email alerts|Popular articles|Google Tag Manager|Essential cookies)\b/i;
 
 const REFERENCE_HEADING =
-  /^(?:references|sources|popular articles|related articles|you may also like|σχετικά άρθρα|διαβάστε επίσης)\b/i;
+  /^(?:references|sources|popular articles|related articles|you may also like|read more|also read|more stories|σχετικά άρθρα|σχετικά θέματα|διαβάστε επίσης|διαβάστε περισσότερα|δείτε επίσης|περισσότερα άρθρα)(?=$|[^\p{L}])/iu;
+
+const SECTION_LABEL =
+  /^(?:opinion|opinions|comment|άποψη|αποψη|σχόλιο|σχολιο|απόψεις|αποψεις|γνώμες|γνωμες|δημόσιο βήμα|δημοσιο βημα|αρθρογραφία|αρθρογραφια)$/iu;
 
 const DATELINE =
   /^(?:\d{1,2},\s+\d{4},\s+in\s+\p{Lu}[\p{L} .'-]{1,48}\.?|(?:[\p{Lu}][\p{L} .'-]{0,40},\s+)?(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{1,2},?\s+\d{4}\b.*)$/u;
@@ -28,6 +31,7 @@ export function stripCredits(raw: string): string {
 export function isSkippableFragment(text: string): boolean {
   const value = text.replace(/\s+/g, " ").trim();
   if (!value) return true;
+  if (SECTION_LABEL.test(value)) return true;
   if (value.length < 25) return true;
   if (MENU.test(value)) return true;
   if (isDateline(value) || isPhotoCredit(value)) return true;
@@ -40,19 +44,19 @@ export function cleanArticleText(raw: string): string {
   const lines = stripCredits(raw).replace(/\r\n/g, "\n").split("\n");
   const seenLines = new Set<string>();
   let droppingReferences = false;
+  let droppedReferenceBody = false;
   let keptProse = false;
   const kept = lines.filter((line) => {
     const trimmed = line.trim();
     if (keptProse && REFERENCE_HEADING.test(trimmed)) {
       droppingReferences = true;
+      droppedReferenceBody = false;
       return false;
     }
     if (droppingReferences) {
-      if (proseWeight(trimmed) >= 12 && /[.!?…]/.test(trimmed) && !MENU_BLOB.test(trimmed)) {
-        droppingReferences = false;
-      } else {
-        return false;
-      }
+      if (!trimmed && droppedReferenceBody) droppingReferences = false;
+      else if (trimmed) droppedReferenceBody = true;
+      return false;
     }
     if (looksLikeBoilerplate(line)) return false;
     const key = line.replace(/\s+/g, " ").trim().toLowerCase();
@@ -109,6 +113,7 @@ function isPhotoCredit(text: string): boolean {
 function looksLikeBoilerplate(line: string): boolean {
   const text = line.trim();
   if (!text) return false;
+  if (SECTION_LABEL.test(text)) return false;
   if (MENU.test(text)) return true;
   if (isDateline(text) || isPhotoCredit(text)) return true;
   if (text.length < 25) return true;

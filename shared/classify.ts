@@ -12,11 +12,26 @@ const OPINION =
  * Used only when the model did not classify a sentence. Factual anchors win
  * over tone, so a dated claim is not treated as rhetoric.
  */
+const ATTRIBUTED =
+  /(?:^|[^\p{L}])(?:said|says|told|according to|reported that|wrote that|είπε|δήλωσε|ανέφερε|σύμφωνα με)(?=$|[^\p{L}])/iu;
+
+/** A reported quote is the speaker's claim, not the author's opinion. */
+export function isAttributedClaim(text: string): boolean {
+  const value = text.replace(/\s+/g, " ").trim();
+  if (ATTRIBUTED.test(value)) return true;
+  const quoted = value.match(/["“«]([^"”»]{12,})["”»]/);
+  return Boolean(quoted && quoted[1].length >= value.length * 0.45);
+}
+
 export function inferClaimType(text: string): ClaimType {
   const value = text.replace(/\s+/g, " ").trim();
   const factual = FACTUAL.test(value) || FACTUAL_FIGURE.test(value);
   const rhetorical = RHETORICAL.test(value);
-  const opinion = OPINION.test(value);
+  const opinion = OPINION.test(value) && !isAttributedClaim(value);
+  if (isAttributedClaim(value)) {
+    if (rhetorical && !factual) return "rhetorical";
+    return "checkable_factual";
+  }
   if ((rhetorical || opinion) && factual) return "mixed";
   if (rhetorical) return "rhetorical";
   if (opinion) return "opinion";
@@ -25,6 +40,7 @@ export function inferClaimType(text: string): ClaimType {
 
 /** Keep a local opinion or insult label when the model treated it as a fact. */
 export function reconcileClaimType(text: string, model: ClaimType): ClaimType {
+  if (isAttributedClaim(text) && model === "opinion") return "checkable_factual";
   const local = inferClaimType(text);
   if (local === "rhetorical" || local === "opinion") return local;
   if (local === "mixed" && model === "checkable_factual") return "mixed";
@@ -32,10 +48,10 @@ export function reconcileClaimType(text: string, model: ClaimType): ClaimType {
 }
 
 const OPINION_PATH =
-  /\/(?:opinions?|commentisfree|comments?|columns|columnists|op-eds?|oped|apopseis|gnomes|απόψεις|αποψεις|γνώμες|γνωμες)(?:\/|$)/iu;
+  /\/(?:opinions?|commentisfree|comments?|columns|columnists|op-eds?|oped|apopseis|apopsi|gnomes|gnomi|sxolio|sxolia|dimosio-vima|arthrografia|απόψεις|αποψεις|άποψη|αποψη|γνώμες|γνωμες|σχόλιο|σχολιο)(?:\/|$)/iu;
 
 const OPINION_KICKER =
-  /(?:^|[\n|:—–])\s*(?:opinions?|commentisfree|columns|columnists|op-eds?|oped|apopseis|gnomes|απόψεις|αποψεις|γνώμες|γνωμες|δημόσιο\s+βήμα|δημοσιο\s+βημα)(?=$|[\n|:—–.,\s])/iu;
+  /(?:^|[\n|:—–])\s*(?:opinions?|commentisfree|columns|columnists|op-eds?|oped|apopseis|gnomes|απόψεις|αποψεις|άποψη|αποψη|γνώμες|γνωμες|σχόλιο|σχολιο|δημόσιο\s+βήμα|δημοσιο\s+βημα|αρθρογραφία|αρθρογραφια|γράφει\s+(?:ο|η)|γραφει\s+(?:ο|η))(?=$|[\n|:—–.,\s])/iu;
 
 /** URL path or a section kicker, in English or Greek. A mention of "opinion" mid-sentence does not count. */
 export function looksLikeOpinionSection(url: string | null, title: string | null, text: string): boolean {
@@ -48,8 +64,33 @@ export function looksLikeOpinionSection(url: string | null, title: string | null
     }
   }
   if (OPINION_PATH.test(`/${path}`)) return true;
-  const firstLine = text.split("\n")[0]?.slice(0, 180) ?? "";
-  return OPINION_KICKER.test(`${title ?? ""}\n${firstLine}`);
+  const head = text.split("\n").slice(0, 4).join("\n").slice(0, 400);
+  return OPINION_KICKER.test(`${title ?? ""}\n${head}`);
+}
+
+const OPINION_SECTION =
+  /αποψεις|αποψη|σχολιο|γνωμες|δημοσιο\s*βημα|αρθρογραφια|\bopinions?\b|\bapopseis\b|\bgnomes?\b|\bcommentisfree\b|\bcolumns?\b/;
+
+function withoutMarks(value: string): string {
+  return value.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+}
+
+/** Article-scoped category markup. A site-wide menu link to Απόψεις does not count. */
+export function opinionCueFromHtml(html: string): boolean {
+  const section = html.match(/"articleSection"\s*:\s*(\[[\s\S]*?\]|"[^"]*")/);
+  if (section && OPINION_SECTION.test(withoutMarks(section[1]))) return true;
+  for (const hit of html.matchAll(/class\s*=\s*["']([^"']+)["']/gi)) {
+    const cls = hit[1];
+    if (/\bmenu-item\b/.test(cls)) continue;
+    if (
+      /\bcategory-(?:apopseis|apopsi|dimosio-vima|arthrografia|opinions?|commentisfree|gnomes?|gnomi|sxolio|columns?)\b/i.test(
+        cls,
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** A column, not a news story that quotes a few people. Needs several evaluative sentences. */

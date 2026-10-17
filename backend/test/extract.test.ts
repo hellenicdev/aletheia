@@ -75,6 +75,22 @@ describe("extractArticle", () => {
     expect(page.text).toContain("voted 7 to 2");
     expect(page.text).not.toContain("politics desk");
   });
+
+  it("drops a related-story block that sits beside the article", () => {
+    const page = extractArticle(
+      `<body>
+        <div class="entry-content">
+          <p>The wreck was found off Antalya and is described as the oldest shipwreck known to archaeologists.</p>
+        </div>
+        <div class="k-read-more-wrapper">
+          <p>A different wreck off Sicily was found by another team last year and is not this story at all.</p>
+        </div>
+      </body>`,
+      "https://www.kathimerini.gr/world/564520936/story",
+    );
+    expect(page.text).toContain("Antalya");
+    expect(page.text).not.toContain("Sicily");
+  });
 });
 
 describe("fetchArticle", () => {
