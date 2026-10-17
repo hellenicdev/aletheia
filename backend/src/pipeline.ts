@@ -399,7 +399,6 @@ async function buildQueries(
       fetchImpl,
       system: querySystem(),
       user: queryUser(segments.map((segment) => ({ id: segment.id, text: segment.text }))),
-      maxTokens: 1200,
       validate: (data) => validateQueries(data, new Set(segments.map((segment) => segment.id))),
     });
     for (const item of parsed) queries.set(item.id, item.query);
@@ -541,7 +540,6 @@ async function findContradictions(options: {
           label: segment.label,
         })),
       ),
-      maxTokens: 800,
       validate: (data) => validateContradictions(data, options.uiLanguage),
     });
     const known = new Set(factual.map((segment) => segment.id));
