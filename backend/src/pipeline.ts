@@ -1,5 +1,6 @@
 import { isSkippableFragment, stripCredits } from "../../shared/articleText";
 import { evaluativeDensity, inferClaimType, looksLikeOpinionSection, reconcileClaimType } from "../../shared/classify";
+import { acceptContradiction } from "../../shared/consistency";
 import { applyEvidence, independentEvidence, type EvidenceItem } from "../../shared/citations";
 import { detectLanguage, languageMatches } from "../../shared/language";
 import type { ClaimType, DetectedLanguage, Label, UiLanguage } from "../../shared/labels";
@@ -9,7 +10,7 @@ import {
   rhetoricalExplanation,
   unverifiableExplanation,
 } from "../../shared/messages";
-import { claimImportance, tokenOverlap } from "../../shared/rank";
+import { claimImportance, compareClaims, tokenOverlap } from "../../shared/rank";
 import { resolveOutlet } from "../../shared/reputation";
 import { aggregateScore } from "../../shared/score";
 import { splitPastedTitle, splitSentences } from "../../shared/sentences";
@@ -33,7 +34,7 @@ import {
   verifyUser,
 } from "./prompts";
 import { createSubrequestBudget, SUBREQUEST_RESERVE, trackFetch, type SubrequestBudget } from "./budget";
-import { searchWeb } from "./firecrawl";
+import { readVerification, searchWeb, verificationCacheKey, writeVerification } from "./firecrawl";
 import { expectNumber, expectOneOf, expectString, isRecord } from "../../shared/json";
 
 export interface AnalyzeInput {
@@ -50,6 +51,8 @@ export interface AnalyzeDeps {
   onTick?: () => void;
   requestId?: string;
   budgetMs?: number;
+  /** Aborted by the request deadline. In-flight scrapes and searches must observe it. */
+  signal?: AbortSignal;
   /** Test hook. Production caps the post-verify consistency call at a few seconds. */
   consistencyTimeoutMs?: number;
   /** Test hook. Production uses the worker subrequest ceiling. */
@@ -80,11 +83,17 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   const llmKey = deps.env.OPENAI_API_KEY?.trim() ?? "";
   const searchKey = deps.env.FIRECRAWL_API_KEY?.trim() ?? "";
   const deadline = Date.now() + (deps.budgetMs ?? LIMITS.analysisDeadlineMs);
+  const owned = new AbortController();
+  const abortOwned = () => owned.abort();
+  deps.signal?.addEventListener("abort", abortOwned);
+  const budgetTimer = setTimeout(abortOwned, Math.max(1, deadline - Date.now()));
+  const signal = owned.signal;
+  try {
   const stage = (name: StageName, status: "start" | "done" | "progress", done?: number, total?: number) =>
     deps.onStage?.(name, status, done, total);
 
   stage("ingest", "start");
-  const ingested = await ingest(input, fetchImpl, searchKey, warnings);
+  const ingested = await ingest(input, fetchImpl, searchKey, warnings, signal);
   stage("ingest", "done");
   deps.onPreview?.({
     title: ingested.title,
@@ -103,6 +112,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     fetchImpl,
     warnings,
     deadline,
+    signal,
   });
   stage("segment", "done");
   if (
@@ -121,23 +131,21 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
 
   stage("evidence", "start");
   const searchable = segmented.segments.filter((segment) => isSearchable(segment.claimType));
-  const budgeted = [...searchable]
-    .sort((a, b) => b.importance - a.importance || a.start - b.start)
-    .slice(0, LIMITS.maxSearches);
+  const budgeted = [...searchable].sort(compareClaims).slice(0, LIMITS.maxSearches);
   const budgetedIds = new Set(budgeted.map((segment) => segment.id));
   const overBudget = new Set(searchable.filter((segment) => !budgetedIds.has(segment.id)).map((segment) => segment.id));
   const echoOnly = new Set<string>();
   const searchFailed = new Set<string>();
 
   if (searchEnabled && searchKey) {
-    const queries = await buildQueries(budgeted, config, llmKey, fetchImpl, warnings, deadline, budget);
+    const queries = await buildQueries(budgeted, config, llmKey, fetchImpl, warnings, deadline, budget, signal);
     let finishedSearches = 0;
     for (let index = 0; index < budgeted.length; index++) {
       const segment = budgeted[index];
       tick();
-      if (Date.now() > deadline - 3_000 || !budget.canSpend(SUBREQUEST_RESERVE)) {
+      if (signal.aborted || Date.now() > deadline - 3_000 || !budget.canSpend(SUBREQUEST_RESERVE)) {
         const reason =
-          Date.now() > deadline - 3_000
+          signal.aborted || Date.now() > deadline - 3_000
             ? "analysis deadline reached before search finished"
             : "search stopped to stay within the worker subrequest limit";
         abandonSearches(budgeted, index, evidence, searchFailed, warnings, reason);
@@ -156,6 +164,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
               fetchImpl,
               timeoutMs,
               canSpend: () => budget.canSpend(1),
+              signal,
             }),
             timeoutMs + 750,
             "search timed out",
@@ -213,7 +222,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   let cursor = 0;
   while (cursor < groups.length) {
     tick();
-    if (Date.now() > deadline || !budget.canSpend(2)) {
+    if (signal.aborted || Date.now() > deadline || !budget.canSpend(2)) {
       remember(warnings, new Error("analysis deadline reached before verification finished"), "llm");
       for (const group of groups.slice(cursor)) {
         for (const segment of group) {
@@ -247,6 +256,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
               articleTitle: ingested.title,
               attempts,
               timeoutMs,
+              signal,
             }),
             timeoutMs + 750,
             "verification timed out",
@@ -328,7 +338,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   const consistencyMs =
     deps.consistencyTimeoutMs ?? Math.min(8_000, deadline - Date.now() - 500);
   let contradictions: Contradiction[] = [];
-  if (consistencyMs >= 200) {
+  if (!signal.aborted && consistencyMs >= 200) {
     try {
       contradictions = await withTimeout(
         findContradictions({
@@ -340,6 +350,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
           warnings,
           deadline,
           timeoutMs: consistencyMs,
+          signal,
         }),
         consistencyMs + 400,
         "consistency timed out",
@@ -399,6 +410,10 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       outlet,
     },
   };
+  } finally {
+    clearTimeout(budgetTimer);
+    deps.signal?.removeEventListener("abort", abortOwned);
+  }
 }
 
 async function ingest(
@@ -406,6 +421,7 @@ async function ingest(
   fetchImpl: typeof fetch,
   firecrawlKey: string | undefined,
   warnings: string[],
+  signal?: AbortSignal,
 ) {
   const hasText = typeof input.text === "string" && input.text.trim().length > 0;
   const hasUrl = typeof input.url === "string" && input.url.trim().length > 0;
@@ -421,7 +437,7 @@ async function ingest(
     if (url.length > LIMITS.maxUrlChars) {
       throw new HttpError(400, "That URL is too long.");
     }
-    const extracted = await fetchArticle(url, fetchImpl, firecrawlKey);
+    const extracted = await fetchArticle(url, fetchImpl, firecrawlKey, signal);
     let hostname: string | null = null;
     try {
       hostname = new URL(extracted.finalUrl).hostname.replace(/^www\./, "");
@@ -475,6 +491,7 @@ async function segmentArticle(options: {
   fetchImpl: typeof fetch;
   warnings: string[];
   deadline: number;
+  signal?: AbortSignal;
 }): Promise<{
   segments: DraftSegment[];
   detectedLanguage: DetectedLanguage;
@@ -485,7 +502,10 @@ async function segmentArticle(options: {
   const spans = uniqueSpans(splitSentences(options.text).filter((span) => !isSkippableFragment(span.text)));
   const ranked = spans
     .map((span, index) => ({ span, importance: claimImportance(span.text, options.title, index) }))
-    .sort((a, b) => b.importance - a.importance || a.span.start - b.span.start);
+    .sort((a, b) => compareClaims(
+      { importance: a.importance, start: a.span.start, text: a.span.text },
+      { importance: b.importance, start: b.span.start, text: b.span.text },
+    ));
   const truncated = ranked.length > LIMITS.maxSegments;
   const kept = ranked.slice(0, LIMITS.maxSegments).sort((a, b) => a.span.start - b.span.start);
   const drafts = kept.map((item, index) => ({
@@ -518,6 +538,7 @@ async function segmentArticle(options: {
         reasoningEffort: "low",
         maxTokens: 4096,
         timeoutMs: remainingMs(options.deadline, 22_000),
+        signal: options.signal,
       });
       genre = parsed.genre;
       detected = localLanguage === "other" ? parsed.detectedLanguage : localLanguage;
@@ -576,6 +597,7 @@ async function buildQueries(
   warnings: string[],
   deadline: number,
   budget: SubrequestBudget,
+  signal?: AbortSignal,
 ): Promise<Map<string, string>> {
   const queries = new Map<string, string>();
   if (segments.length === 0) return queries;
@@ -596,6 +618,7 @@ async function buildQueries(
         maxTokens: 4096,
         attempts: 1,
         timeoutMs: remainingMs(deadline, 16_000),
+        signal,
       });
       for (const item of parsed) queries.set(item.id, item.query);
     } catch (error) {
@@ -635,15 +658,48 @@ async function judgeGroup(options: {
   articleTitle: string | null;
   attempts: number;
   timeoutMs: number;
+  signal?: AbortSignal;
 }): Promise<Map<string, SegmentResult>> {
-  const ids = new Set(options.group.map((segment) => segment.id));
+  const results = new Map<string, SegmentResult>();
+  const pending: DraftSegment[] = [];
+  for (const segment of options.group) {
+    const urls = (options.evidence.get(segment.id) ?? []).map((item) => item.url);
+    const key = verificationCacheKey(segment.text, urls, options.uiLanguage);
+    const cached = await readVerification(key);
+    if (!cached || !(LABELS as readonly string[]).includes(cached.label)) {
+      pending.push(segment);
+      continue;
+    }
+    results.set(
+      segment.id,
+      finishSegment(
+        segment,
+        applyEvidence({
+          label: cached.label as Label,
+          confidence: cached.confidence,
+          explanation: cached.explanation,
+          claimText: segment.text,
+          sourceUrls: cached.sourceUrls,
+          evidence: options.evidence.get(segment.id) ?? [],
+          searchEnabled: options.searchEnabled,
+          uiLanguage: options.uiLanguage,
+          articleDomain: options.articleDomain,
+          articleText: options.articleText,
+          articleTitle: options.articleTitle,
+          allowModelKnowledge: options.searchEnabled && urls.length === 0,
+        }),
+      ),
+    );
+  }
+  if (pending.length === 0) return results;
+  const pendingIds = new Set(pending.map((segment) => segment.id));
   const parsed = await completeJson({
     config: options.config,
     apiKey: options.apiKey,
     fetchImpl: options.fetchImpl,
     system: verifySystem(options.uiLanguage, options.searchEnabled),
     user: verifyUser(
-      options.group.map((segment) => ({
+      pending.map((segment) => ({
         id: segment.id,
         claim: segment.text,
         context: surroundingParagraph(options.articleText, segment.start, segment.end),
@@ -655,14 +711,14 @@ async function judgeGroup(options: {
       })),
       options.publishedAt,
     ),
-    validate: (data) => validateVerdicts(data, ids, options.uiLanguage),
+    validate: (data) => validateVerdicts(data, pendingIds, options.uiLanguage),
     reasoningEffort: "medium",
     attempts: options.attempts,
     timeoutMs: options.timeoutMs,
+    signal: options.signal,
   });
 
-  const results = new Map<string, SegmentResult>();
-  for (const segment of options.group) {
+  for (const segment of pending) {
     const verdict = parsed.find((item) => item.id === segment.id);
     if (!verdict) {
       results.set(
@@ -692,6 +748,13 @@ async function judgeGroup(options: {
       allowModelKnowledge: options.searchEnabled && (options.evidence.get(segment.id)?.length ?? 0) === 0,
     });
     results.set(segment.id, finishSegment(segment, applied));
+    const urls = (options.evidence.get(segment.id) ?? []).map((item) => item.url);
+    await writeVerification(verificationCacheKey(segment.text, urls, options.uiLanguage), {
+      label: verdict.label,
+      confidence: verdict.confidence,
+      explanation: verdict.explanation,
+      sourceUrls: verdict.sourceUrls,
+    });
   }
   return results;
 }
@@ -737,6 +800,7 @@ async function findContradictions(options: {
   warnings: string[];
   deadline: number;
   timeoutMs: number;
+  signal?: AbortSignal;
 }): Promise<Contradiction[]> {
   const factual = options.segments.filter((segment) =>
     ["True", "False", "Misleading", "Unverifiable"].includes(segment.label),
@@ -752,6 +816,7 @@ async function findContradictions(options: {
       maxTokens: 2048,
       attempts: 1,
       timeoutMs: options.timeoutMs,
+      signal: options.signal,
       user: consistencyUser(
         factual.map((segment) => ({
           id: segment.id,
@@ -761,11 +826,11 @@ async function findContradictions(options: {
       ),
       validate: (data) => validateContradictions(data, options.uiLanguage),
     });
-    const known = new Set(factual.map((segment) => segment.id));
+    const known = factual.map((segment) => ({ id: segment.id, text: segment.text }));
     const unique: Contradiction[] = [];
     const seen = new Set<string>();
     for (const item of parsed) {
-      if (!known.has(item.a) || !known.has(item.b) || item.a === item.b) continue;
+      if (!acceptContradiction(item, known)) continue;
       const key = [item.a, item.b].sort().join(":");
       if (seen.has(key)) continue;
       seen.add(key);

@@ -1,7 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { combineTone } from "../../shared/tone";
 import { EVAL_FIXTURES } from "../../shared/evalFixtures";
+import { clearSearchCache } from "../src/firecrawl";
 import { analyze } from "../src/pipeline";
+
+beforeEach(() => {
+  clearSearchCache();
+});
 
 const env = {
   OPENAI_API_KEY: "test-key",

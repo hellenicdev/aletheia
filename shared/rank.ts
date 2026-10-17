@@ -1,3 +1,15 @@
+/** Higher importance first, then earlier text, then the claim itself. Equal scores do not depend on insertion order. */
+export function compareClaims(
+  a: { importance: number; start: number; text: string },
+  b: { importance: number; start: number; text: string },
+): number {
+  if (a.importance !== b.importance) return b.importance - a.importance;
+  if (a.start !== b.start) return a.start - b.start;
+  if (a.text < b.text) return -1;
+  if (a.text > b.text) return 1;
+  return 0;
+}
+
 export function claimImportance(text: string, title: string | null, index: number): number {
   let score = 0;
   if (/\d/.test(text)) score += 4;

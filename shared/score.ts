@@ -27,7 +27,8 @@ const OPINION_CAP = 65;
 const SATIRE_CAP = 42;
 const LOW_CREDIBILITY_CAP = 44;
 const SOURCING_CAP_NO_SEARCH = 30;
-const CONTRADICTION_PENALTY = 30;
+const CONTRADICTION_PENALTY = 15;
+const CONTRADICTION_CAP = 30;
 const NEUTRAL_FACTUAL = 50;
 const COMMENTARY_FACTUAL = 60;
 
@@ -128,9 +129,12 @@ export function aggregateScore(
   const toneNeutrality = round(averageTone * 0.7 + worstTone * 0.3);
 
   const logicalConsistency =
-    segments.length < 2
+    segments.length < 2 || options.contradictionCount <= 0
       ? 100
-      : Math.max(0, 100 - options.contradictionCount * CONTRADICTION_PENALTY);
+      : Math.max(
+          0,
+          100 - Math.min(CONTRADICTION_CAP, options.contradictionCount * CONTRADICTION_PENALTY),
+        );
 
   const outlet = options.outlet ?? "news";
   const opinionPiece = options.outlet === "opinion" || isMostlyOpinion(counts, segments.length);
