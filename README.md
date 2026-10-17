@@ -134,7 +134,7 @@ If the repository name changes, update `PAGES_BASE` in the workflow to `/<repo>/
 
 `GET /api/health` reports whether the secrets are present. It does not call the providers.
 
-`GET /api/health?probe=1` makes one small chat completion and one Firecrawl search (`eiffel tower`, limit 1). The JSON `probe.llm` and `probe.search` fields are `{ ok: true, status: 200 }` or `{ ok: false, status, error }`. `error` is a short upstream status and body, with secrets removed. The same lines are written with `console.error` for `wrangler tail`. Probes are limited to 10 per IP per window.
+`GET /api/health?probe=1` makes one chat completion and one Firecrawl search (`eiffel tower`, limit 1). The chat budget is 4096 tokens because Beam spends tokens on reasoning before the answer. `probe.llm` is `{ ok, status }` plus `finishReason`, `field`, and a `preview` of the first 300 characters of the raw model text (secrets removed). `field` is where that text lived (`content`, `reasoning_content`, `thinking`, `reasoning`, or `refusal`). Analysis calls use the same parser with an 8192-token budget sent as `max_completion_tokens`. `probe.search` is `{ ok, status }` or `{ ok: false, status, error }`. Failures are also written with `console.error` for `wrangler tail`. Probes are limited to 10 per IP per window.
 
 A finished analysis also puts those lines on `meta.warnings` when a model or search call fails and the audit continues without it. Opinion and rhetorical sentences are not relabelled Unverifiable because search failed.
 

@@ -1,20 +1,88 @@
 export function parseModelJson(raw: string): unknown {
-  const trimmed = raw.trim();
+  const trimmed = raw.trim().replace(/^\uFEFF/, "");
   if (!trimmed) throw new Error("empty model response");
 
-  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const body = (fenced ? fenced[1] : trimmed).trim();
-  const start = body.search(/[\[{]/);
-  if (start < 0) throw new Error("model response did not contain JSON");
+  const candidates = [unwrapModelText(trimmed)];
+  if (candidates[0] !== trimmed) candidates.push(trimmed);
 
-  const slice = body.slice(start);
-  try {
-    return JSON.parse(slice);
-  } catch {
-    const end = Math.max(slice.lastIndexOf("}"), slice.lastIndexOf("]"));
-    if (end <= 0) throw new Error("model response was not valid JSON");
-    return JSON.parse(slice.slice(0, end + 1));
+  let sawJson = false;
+  for (const candidate of candidates) {
+    const extracted = firstBalancedJson(candidate);
+    if (extracted === "none") continue;
+    sawJson = true;
+    if (extracted === "open") continue;
+    try {
+      return JSON.parse(extracted);
+    } catch {
+      /* A later candidate may still hold a complete value. */
+    }
   }
+  throw new Error(sawJson ? "model response was not valid JSON" : "model response did not contain JSON");
+}
+
+function unwrapModelText(text: string): string {
+  const withoutThink = text
+    .replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, "")
+    .replace(/<thinking\b[^>]*>[\s\S]*?<\/thinking>/gi, "")
+    .replace(/<analysis\b[^>]*>[\s\S]*?<\/analysis>/gi, "")
+    .trim();
+  const fenced = withoutThink.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  return (fenced ? fenced[1] : withoutThink).trim();
+}
+
+function firstBalancedJson(text: string): string | "none" | "open" {
+  let sawStart = false;
+  for (let start = 0; start < text.length; start++) {
+    const opener = text[start];
+    if (opener !== "{" && opener !== "[") continue;
+    sawStart = true;
+    const slice = balancedSlice(text, start);
+    if (!slice) continue;
+    try {
+      JSON.parse(slice);
+      return slice;
+    } catch {
+      /* Keep scanning. A brace inside prose is not the payload. */
+    }
+  }
+  if (!sawStart) return "none";
+  return "open";
+}
+
+function balancedSlice(text: string, start: number): string | null {
+  const stack: string[] = [];
+  let inString = false;
+  let escape = false;
+  for (let index = start; index < text.length; index++) {
+    const char = text[index];
+    if (inString) {
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (char === "\\") {
+        escape = true;
+        continue;
+      }
+      if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === "{" || char === "[") {
+      stack.push(char);
+      continue;
+    }
+    if (char === "}" || char === "]") {
+      const open = stack.pop();
+      const expected = open === "{" ? "}" : open === "[" ? "]" : "";
+      if (!open || char !== expected) return null;
+      if (stack.length === 0) return text.slice(start, index + 1);
+    }
+  }
+  return null;
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

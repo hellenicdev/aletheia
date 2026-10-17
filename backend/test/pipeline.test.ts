@@ -352,6 +352,82 @@ describe("handleRequest", () => {
     expect(JSON.stringify(body)).not.toContain("firecrawl-test-key");
   });
 
+  it("reports the field, finish reason, and a short preview of Beam output", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    let llmCalls = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        return new Response(JSON.stringify({ success: true, data: [] }), { status: 200 });
+      }
+      llmCalls += 1;
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      const message =
+        llmCalls === 1
+          ? {
+              content: `<think>The brace { inside reasoning is not the payload.</think>\n{"ok":true}`,
+              reasoning_content: "draft only",
+            }
+          : llmCalls === 2
+            ? { content: null, reasoning_content: 'Answer follows. {"ok":true}' }
+            : { content: `{"ok":${"x".repeat(400)}`, reasoning_content: null };
+      const finish = llmCalls === 3 ? "length" : "stop";
+      return new Response(
+        JSON.stringify({ choices: [{ finish_reason: finish, message }] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    const probe = async () => {
+      const response = await handleRequest(
+        new Request("https://worker.test/api/health?probe=1"),
+        env,
+        { fetchImpl, rate: { buckets: new Map(), inFlight: { count: 0 } }, now: () => 2 },
+      );
+      expect(response.status).toBe(200);
+      return (await response.json()) as {
+        ok: boolean;
+        probe: {
+          llm: { ok: boolean; status: number; error?: string; finishReason?: string; field?: string; preview?: string };
+          search: { ok: boolean };
+        };
+      };
+    };
+
+    const wrapped = await probe();
+    expect(wrapped.ok).toBe(true);
+    expect(wrapped.probe.llm).toMatchObject({
+      ok: true,
+      status: 200,
+      finishReason: "stop",
+      field: "content",
+    });
+    expect(wrapped.probe.llm.preview).toContain("<think>");
+    expect(wrapped.probe.llm.preview?.length).toBeLessThanOrEqual(300);
+    expect(bodies[0]?.max_completion_tokens).toBe(4096);
+    expect(bodies[0]).not.toHaveProperty("max_tokens");
+
+    const reasoned = await probe();
+    expect(reasoned.probe.llm).toMatchObject({
+      ok: true,
+      field: "reasoning_content",
+      finishReason: "stop",
+    });
+    expect(reasoned.probe.llm.preview).toContain('{"ok":true}');
+
+    const truncated = await probe();
+    expect(truncated.ok).toBe(false);
+    expect(truncated.probe.llm).toMatchObject({
+      ok: false,
+      status: 502,
+      finishReason: "length",
+      field: "content",
+    });
+    expect(truncated.probe.llm.error).toContain("not valid JSON");
+    expect(truncated.probe.llm.preview).toHaveLength(300);
+    expect(truncated.probe.llm.preview?.startsWith('{"ok":')).toBe(true);
+    expect(JSON.stringify(truncated)).not.toContain("test-key");
+  });
+
 
   it("allows the GitHub Pages origin and hides the worker from other sites", async () => {
     const health = await handleRequest(
