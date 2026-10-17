@@ -159,6 +159,10 @@ npm run typecheck --prefix backend
 
 Frontend tests cover scoring inputs via the sample report, highlighting, and the English/Greek string table. Worker tests cover extraction, Firecrawl search and scrape parsing, SSRF checks, rate limiting, JSON retries, citation filtering, and a full analysis with the model and Firecrawl HTTP calls mocked. No live API key is required.
 
+## How a live score behaves
+
+Extraction strips menus, cookie banners, and image leftovers before the 12,000-character cap, and the page shows that text while the audit runs. Sentences are split in code. The model only classifies them, and the search budget goes to the most specific claims rather than the first ones. Unchecked claims pull factual accuracy toward 50, and coverage under 40% caps the overall score at 70. A True label needs a source that is not the article itself, a copy of it, or a social repost. Known satire and low-credibility domains cap the score under 50. Loaded language lowers the tone score even when the sentence is not labelled Rhetorical.
+
 ## Honesty limits
 
 Search snippets are short. A supported label means those snippets agree with the claim, not that every fact in the world was checked. Opinion and rhetorical passages are not “false”; they are not factual claims. When search is off, treat every factual label as unverified model knowledge.

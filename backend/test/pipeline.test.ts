@@ -19,6 +19,19 @@ const fees = {
   description: "Marina fees rose by 2 percent, not double.",
 };
 
+function classifyPayload(
+  user: string,
+  classify: (text: string) => { claimType: string; note: string },
+) {
+  const start = user.indexOf("[");
+  const sentences = JSON.parse(user.slice(start)) as { id: string; text: string }[];
+  return {
+    detectedLanguage: "en",
+    genre: "news",
+    segments: sentences.map((sentence) => ({ id: sentence.id, ...classify(sentence.text) })),
+  };
+}
+
 function llmPayload(content: unknown, status = 200): Response {
   return new Response(
     JSON.stringify({
@@ -54,14 +67,12 @@ function scriptedFetch(options?: {
           segmentFailures -= 1;
           return llmPayload("nope");
         }
-        return llmPayload({
-          detectedLanguage: "en",
-          segments: [
-            { text: vote, claimType: "checkable_factual", note: "A recorded vote." },
-            { text: fee, claimType: "checkable_factual", note: "A numeric claim." },
-            { text: rhetoric, claimType: "rhetorical", note: "Loaded language without a fact." },
-          ],
-        });
+        return llmPayload(classifyPayload(user, (text) => {
+          if (text.includes("betrayal") || text.includes("breathtaking")) {
+            return { claimType: "rhetorical", note: "Loaded language without a fact." };
+          }
+          return { claimType: "checkable_factual", note: "A recorded claim." };
+        }));
       }
       if (system.startsWith("TASK:queries")) {
         return llmPayload({
@@ -130,7 +141,7 @@ function scriptedFetch(options?: {
         JSON.stringify({
           success: true,
           data: {
-            markdown: `# Harbour vote\n\n${vote}\n\n${fee}\n\n${rhetoric}`,
+            markdown: `Enable accessibility\nSee All Newsletters\nIgnore me please\n\n# Harbour vote\n\n${vote}\n\n${fee}\n\n${rhetoric}`,
             metadata: {
               title: "Harbour vote",
               sourceURL: "https://news.example/harbour",
@@ -197,14 +208,12 @@ describe("analyze", () => {
     const fetchImpl: typeof fetch = async (_input, init) => {
       const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
       const system = body.messages[0].content;
+      const user = body.messages[1]?.content ?? "";
       if (system.startsWith("TASK:segment")) {
-        return llmPayload({
-          detectedLanguage: "en",
-          segments: [
-            { text: stable, claimType: "checkable_factual", note: "A stable geographic fact." },
-            { text: news, claimType: "checkable_factual", note: "A recent numeric claim." },
-          ],
-        });
+        return llmPayload(classifyPayload(user, () => ({
+          claimType: "checkable_factual",
+          note: "A recorded claim.",
+        })));
       }
       if (system.startsWith("TASK:verify")) {
         return llmPayload({
@@ -259,8 +268,9 @@ describe("analyze", () => {
     const scrape = seen.find((call) => call.url.includes("/v2/scrape"));
     expect(scrape?.body).toMatchObject({
       url: "https://news.example/harbour",
-      formats: ["markdown"],
+      formats: ["markdown", "html"],
       onlyMainContent: true,
+      excludeTags: expect.arrayContaining(["nav", "header", "footer", "aside", "form"]),
     });
     expect(JSON.stringify(scrape?.body)).not.toContain("firecrawl-test-key");
   });
@@ -288,14 +298,12 @@ describe("analyze", () => {
       }
       const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
       const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
       if (system.startsWith("TASK:segment")) {
-        return llmPayload({
-          detectedLanguage: "en",
-          segments: [
-            { text: fact, claimType: "checkable_factual", note: "A place and a year." },
-            { text: slogan, claimType: "rhetorical", note: "Praise without a discrete fact." },
-          ],
-        });
+        return llmPayload(classifyPayload(user, (text) => ({
+          claimType: text.includes("without doubt") ? "rhetorical" : "checkable_factual",
+          note: text.includes("without doubt") ? "Praise without a discrete fact." : "A place and a year.",
+        })));
       }
       if (system.startsWith("TASK:queries")) {
         return llmPayload({ queries: [{ id: "s1", query: "Eiffel Tower Berlin 1889" }] });
@@ -489,23 +497,21 @@ describe("handleRequest", () => {
     expect(second.status).toBe(429);
   });
 
-  it("rejects an oversized article before calling the model", async () => {
-    let called = false;
-    const response = await handleRequest(
-      post("A".repeat(13_000)),
-      env,
-      {
-        fetchImpl: async () => {
-          called = true;
-          return new Response("no");
-        },
-      },
-    );
-    const events = parseSse(await response.text());
-    expect(events.find((event) => event.event === "error")?.data).toMatchObject({
-      message: expect.stringContaining("12000"),
+  it("truncates pasted text over the character budget and still returns a result", async () => {
+    const { fetchImpl } = scriptedFetch();
+    const response = await handleRequest(post(`${"The council voted 7 to 2 on Monday. ".repeat(400)}`), env, {
+      fetchImpl,
+      rate: { buckets: new Map(), inFlight: { count: 0 } },
+      now: () => 9_000,
     });
-    expect(called).toBe(false);
+    const events = parseSse(await response.text());
+    const result = events.find((event) => event.event === "result")?.data as {
+      truncated: boolean;
+      article: { text: string };
+    };
+    expect(result.truncated).toBe(true);
+    expect(result.article.text.length).toBeLessThanOrEqual(12_000);
+    expect(events.some((event) => event.event === "preview")).toBe(true);
   });
 });
 

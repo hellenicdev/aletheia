@@ -1,9 +1,30 @@
+import { cleanArticleText } from "../../shared/articleText";
 import type { EvidenceItem } from "../../shared/citations";
 import { HttpError, UpstreamError, redactSecret } from "./errors";
 import { LIMITS } from "./limits";
 import { assertPublicHttpUrl, isBlockedHost } from "./ssrf";
 
 const FIRECRAWL_API = "https://api.firecrawl.dev";
+const searchCache = new Map<string, { at: number; hits: EvidenceItem[] }>();
+let queue: Promise<unknown> = Promise.resolve();
+
+export function clearSearchCache(): void {
+  searchCache.clear();
+}
+
+function enqueue<T>(job: () => Promise<T>): Promise<T> {
+  const run = queue.then(job, job);
+  queue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+async function pause(ms: number): Promise<void> {
+  if (ms <= 0) return;
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export async function searchWeb(options: {
   apiKey: string;
@@ -11,9 +32,13 @@ export async function searchWeb(options: {
   language: "en" | "el" | "other";
   fetchImpl: typeof fetch;
   limit?: number;
+  retryDelayMs?: number;
 }): Promise<EvidenceItem[]> {
   const query = options.query.trim().slice(0, 240);
   if (!query) return [];
+  const cacheKey = `${options.language}:${query}`;
+  const cached = searchCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < 10 * 60_000) return cached.hits;
 
   const payload: Record<string, unknown> = {
     query,
@@ -24,23 +49,9 @@ export async function searchWeb(options: {
   };
   if (options.language === "el") payload.country = "GR";
 
-  let response: Response;
-  try {
-    response = await options.fetchImpl(`${FIRECRAWL_API}/v2/search`, {
-      method: "POST",
-      headers: firecrawlHeaders(options.apiKey.trim()),
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(12_000),
-    });
-  } catch (error) {
-    const failure = new UpstreamError(
-      "search",
-      null,
-      redactSecret(error instanceof Error ? error.message : "request failed", options.apiKey),
-    );
-    console.error(failure.message);
-    throw failure;
-  }
+  const response = await enqueue(() =>
+    firecrawlPost(`${FIRECRAWL_API}/v2/search`, payload, options.apiKey, options.fetchImpl, 12_000, options.retryDelayMs ?? 500),
+  );
   const text = await response.text();
   if (!response.ok) {
     const failure = new UpstreamError("search", response.status, redactSecret(text, options.apiKey));
@@ -58,10 +69,49 @@ export async function searchWeb(options: {
     throw new Error("Firecrawl search did not succeed.");
   }
 
-  return readHits(parsed)
+  const hits = readHits(parsed)
     .map((hit) => toEvidence(hit))
     .filter((item): item is EvidenceItem => item !== null)
     .slice(0, 4);
+  searchCache.set(cacheKey, { at: Date.now(), hits });
+  return hits;
+}
+
+async function firecrawlPost(
+  url: string,
+  payload: Record<string, unknown>,
+  apiKey: string,
+  fetchImpl: typeof fetch,
+  timeoutMs: number,
+  retryDelayMs: number,
+): Promise<Response> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await pause(retryDelayMs * 2 ** (attempt - 1));
+    try {
+      const response = await fetchImpl(url, {
+        method: "POST",
+        headers: firecrawlHeaders(apiKey.trim()),
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (response.status === 429 && attempt < 2) {
+        await response.text().catch(() => "");
+        continue;
+      }
+      return response;
+    } catch (error) {
+      lastError = error;
+      break;
+    }
+  }
+  const failure = new UpstreamError(
+    "search",
+    null,
+    redactSecret(lastError instanceof Error ? lastError.message : "request failed", apiKey),
+  );
+  console.error(failure.message);
+  throw failure;
 }
 
 export interface ScrapedPage {
@@ -69,6 +119,7 @@ export interface ScrapedPage {
   text: string;
   publishedAt: string | null;
   finalUrl: string;
+  rawHtml: string | null;
 }
 
 export async function scrapeArticle(options: {
@@ -77,17 +128,22 @@ export async function scrapeArticle(options: {
   fetchImpl: typeof fetch;
 }): Promise<ScrapedPage> {
   const pageUrl = assertPublicHttpUrl(options.url);
-  const response = await options.fetchImpl(`${FIRECRAWL_API}/v2/scrape`, {
-    method: "POST",
-    headers: firecrawlHeaders(options.apiKey),
-    body: JSON.stringify({
-      url: pageUrl.toString(),
-      formats: ["markdown"],
-      onlyMainContent: true,
-      timeout: 20_000,
-    }),
-    signal: AbortSignal.timeout(25_000),
-  });
+  const response = await enqueue(() =>
+    firecrawlPost(
+      `${FIRECRAWL_API}/v2/scrape`,
+      {
+        url: pageUrl.toString(),
+        formats: ["markdown", "html"],
+        onlyMainContent: true,
+        excludeTags: ["nav", "header", "footer", "aside", "form", "script", "style", "noscript"],
+        timeout: 20_000,
+      },
+      options.apiKey,
+      options.fetchImpl,
+      20_000,
+      500,
+    ),
+  );
   const text = await response.text();
   if (!response.ok) {
     if (response.status === 401 || response.status === 403) {
@@ -109,7 +165,7 @@ export async function scrapeArticle(options: {
   const data = parsed.data;
   const markdown = typeof data.markdown === "string" ? data.markdown : "";
   const metadata = isRecord(data.metadata) ? data.metadata : {};
-  const article = markdownToText(markdown);
+  const article = cleanArticleText(markdownToText(markdown));
   if (article.length < LIMITS.minArticleChars) {
     throw new HttpError(
       422,
@@ -138,6 +194,7 @@ export async function scrapeArticle(options: {
     text: article.slice(0, LIMITS.maxArticleChars),
     publishedAt,
     finalUrl,
+    rawHtml: typeof data.html === "string" ? data.html : null,
   };
 }
 

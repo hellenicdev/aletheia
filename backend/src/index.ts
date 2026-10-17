@@ -1,4 +1,4 @@
-import type { StageName } from "../../shared/types";
+import type { ArticlePreview, StageName } from "../../shared/types";
 import { resolveConfig, type Env } from "./config";
 import { corsHeaders, jsonResponse } from "./cors";
 import { HttpError } from "./errors";
@@ -114,11 +114,19 @@ export async function handleRequest(
       const send = (event: string, data: unknown) => {
         controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
       };
+      const heartbeat = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode(`: ping\n\n`));
+        } catch {
+          clearInterval(heartbeat);
+        }
+      }, 10_000);
       try {
         const result = await analyze(input, {
           env,
           fetchImpl: deps.fetchImpl,
-          onStage: (stage: StageName, status) => send("stage", { stage, status }),
+          onStage: (stage: StageName, status, done, total) => send("stage", { stage, status, done, total }),
+          onPreview: (article: ArticlePreview) => send("preview", article),
         });
         send("result", result);
       } catch (error) {
@@ -127,6 +135,7 @@ export async function handleRequest(
         if (!(error instanceof HttpError)) console.error(error);
         send("error", { message });
       } finally {
+        clearInterval(heartbeat);
         rate.inFlight.count = Math.max(0, rate.inFlight.count - 1);
         controller.close();
       }
