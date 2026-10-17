@@ -18,6 +18,7 @@ export interface AppConfig {
 }
 
 export const DEFAULT_ORIGINS = [
+  "https://hellenicdev.eu",
   "https://hellenicdev.github.io",
   "http://localhost:5173",
   "http://127.0.0.1:5173",

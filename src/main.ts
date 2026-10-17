@@ -45,6 +45,8 @@ const mount = document.querySelector<HTMLElement>("#app");
 if (!mount) throw new Error("Missing #app");
 const app: HTMLElement = mount;
 
+app.classList.add("app");
+app.dataset.phase = "idle";
 app.innerHTML = `
   <a class="skip" href="#composer" data-i18n="skip"></a>
   <header class="top">
@@ -118,7 +120,7 @@ app.innerHTML = `
         <div class="article-body" id="article-body"></div>
       </article>
     </div>
-    <aside class="rail">
+    <aside class="rail" id="rail" hidden>
       <section class="card scorecard" aria-labelledby="score-label">
         <div class="score-top">
           <div class="gauge" id="gauge" data-band="mid">
@@ -138,6 +140,8 @@ app.innerHTML = `
         <p class="section-label verdict-label" data-i18n="verdict"></p>
         <p class="verdict" id="verdict" tabindex="-1"></p>
         <ul class="notes" id="score-notes" hidden></ul>
+        <p class="section-label" id="warnings-label" data-i18n="warnings" hidden></p>
+        <ul class="warnings" id="warnings" hidden></ul>
         <div class="subs" id="subscores"></div>
       </section>
       <section class="card detail" id="detail" aria-live="polite">
@@ -174,6 +178,7 @@ const errorBox = $<HTMLParagraphElement>("#form-error");
 const analyzeButton = $<HTMLButtonElement>("#analyze-button");
 const charCount = $<HTMLElement>("#char-count");
 const layout = $<HTMLElement>("#layout");
+const rail = $<HTMLElement>("#rail");
 const stagesEl = $<HTMLElement>("#stages");
 const stageList = $<HTMLOListElement>("#stage-list");
 const paper = $<HTMLElement>("#paper");
@@ -339,6 +344,8 @@ function renderScore() {
     gaugeNumber.textContent = "—";
     verdictEl.textContent = t(state.lang, state.running ? "runningVerdict" : "idleVerdict");
     notes.hidden = true;
+    $<HTMLElement>("#warnings").hidden = true;
+    $<HTMLElement>("#warnings-label").hidden = true;
     renderSubs(null);
     return;
   }
@@ -355,6 +362,17 @@ function renderScore() {
     const li = document.createElement("li");
     li.textContent = line;
     notes.append(li);
+  }
+  const warnings = $<HTMLElement>("#warnings");
+  const warningsLabel = $<HTMLElement>("#warnings-label");
+  warnings.replaceChildren();
+  const lines = result?.meta.warnings ?? [];
+  warnings.hidden = lines.length === 0;
+  warningsLabel.hidden = lines.length === 0;
+  for (const line of lines) {
+    const item = document.createElement("li");
+    item.textContent = line;
+    warnings.append(item);
   }
   renderSubs(result);
 }
@@ -587,14 +605,35 @@ function showReport(result: AnalysisResult, sample: boolean) {
   state.sample = sample;
   state.running = false;
   state.selectedId = result.segments[0]?.id ?? null;
-  stagesEl.hidden = true;
   $<HTMLElement>("#composer-full").hidden = true;
   $<HTMLElement>("#composer-compact").hidden = false;
-  layout.classList.add("has-result");
   analyzeButton.disabled = false;
   analyzeButton.textContent = t(state.lang, "analyze");
+  setPhase("result");
   applyI18n();
   verdictEl.focus();
+}
+
+function returnToInput() {
+  state.result = null;
+  state.sample = false;
+  state.running = false;
+  state.selectedId = null;
+  $<HTMLElement>("#composer-full").hidden = false;
+  $<HTMLElement>("#composer-compact").hidden = true;
+  showError(null);
+  setPhase("idle");
+  applyI18n();
+  textInput.focus();
+}
+
+function setPhase(phase: "idle" | "running" | "result") {
+  app.dataset.phase = phase;
+  layout.classList.toggle("has-result", phase === "result");
+  layout.classList.toggle("is-running", phase === "running");
+  rail.hidden = phase !== "result";
+  stagesEl.hidden = phase !== "running";
+  if (phase !== "result") paper.hidden = true;
 }
 
 async function runSample(instant: boolean) {
@@ -604,8 +643,7 @@ async function runSample(instant: boolean) {
   state.result = null;
   state.sample = true;
   analyzeButton.disabled = true;
-  stagesEl.hidden = false;
-  paper.hidden = true;
+  setPhase("running");
   resetStages();
   renderScore();
   const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -646,9 +684,7 @@ async function runAnalysis() {
   state.selectedId = null;
   analyzeButton.disabled = true;
   analyzeButton.textContent = t(state.lang, "analyzing");
-  stagesEl.hidden = false;
-  paper.hidden = true;
-  layout.classList.remove("has-result");
+  setPhase("running");
   resetStages();
   renderScore();
   renderDetail();
@@ -662,7 +698,7 @@ async function runAnalysis() {
     state.running = false;
     analyzeButton.disabled = false;
     analyzeButton.textContent = t(state.lang, "analyze");
-    stagesEl.hidden = true;
+    setPhase("idle");
     renderScore();
     showError(error instanceof Error ? error.message : t(state.lang, "errorEmpty"));
   }
@@ -676,9 +712,7 @@ $<HTMLButtonElement>("#tab-paste").addEventListener("click", () => setMode("past
 $<HTMLButtonElement>("#tab-url").addEventListener("click", () => setMode("url"));
 $<HTMLButtonElement>("#sample-button").addEventListener("click", () => void runSample(false));
 $<HTMLButtonElement>("#expand-button").addEventListener("click", () => {
-  $<HTMLElement>("#composer-full").hidden = false;
-  $<HTMLElement>("#composer-compact").hidden = true;
-  textInput.focus();
+  returnToInput();
 });
 form.addEventListener("submit", (event) => {
   event.preventDefault();

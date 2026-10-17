@@ -3,7 +3,9 @@ import { resolveConfig, type Env } from "./config";
 import { corsHeaders, jsonResponse } from "./cors";
 import { HttpError } from "./errors";
 import { LIMITS, allowRequest, type RateState } from "./limits";
+import { probeUpstreams } from "./probe";
 import { analyze, type AnalyzeInput } from "./pipeline";
+import { resolveFetch } from "./runtime";
 
 export interface HandlerDeps {
   fetchImpl?: typeof fetch;
@@ -42,16 +44,21 @@ export async function handleRequest(
   const path = url.pathname.replace(/\/$/, "") || "/";
 
   if (request.method === "GET" && path === "/api/health") {
-    return jsonResponse(
-      {
-        ok: true,
-        searchConfigured: config.searchConfigured,
-        model: config.llmModel,
-        searchProvider: "firecrawl",
-      },
-      200,
-      cors,
-    );
+    const base = {
+      searchConfigured: config.searchConfigured,
+      model: config.llmModel,
+      searchProvider: "firecrawl",
+    };
+    if (url.searchParams.get("probe") !== "1") {
+      return jsonResponse({ ok: true, ...base }, 200, cors);
+    }
+    const rate = deps.rate ?? isolateRate;
+    const now = deps.now ?? Date.now;
+    if (!allowRequest(rate, `${clientKey(request)}:probe`, now(), 10, config.rateWindowMs)) {
+      return jsonResponse({ error: "Too many health probes from this network. Try again shortly." }, 429, cors);
+    }
+    const probe = await probeUpstreams(env, resolveFetch(deps.fetchImpl));
+    return jsonResponse({ ok: probe.llm.ok && probe.search.ok, ...base, probe }, 200, cors);
   }
 
   if (path !== "/api/analyze") {

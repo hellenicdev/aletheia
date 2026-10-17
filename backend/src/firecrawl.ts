@@ -1,5 +1,5 @@
 import type { EvidenceItem } from "../../shared/citations";
-import { HttpError } from "./errors";
+import { HttpError, UpstreamError, redactSecret } from "./errors";
 import { LIMITS } from "./limits";
 import { assertPublicHttpUrl, isBlockedHost } from "./ssrf";
 
@@ -10,28 +10,42 @@ export async function searchWeb(options: {
   query: string;
   language: "en" | "el" | "other";
   fetchImpl: typeof fetch;
+  limit?: number;
 }): Promise<EvidenceItem[]> {
   const query = options.query.trim().slice(0, 240);
   if (!query) return [];
 
   const payload: Record<string, unknown> = {
     query,
-    limit: 5,
+    limit: options.limit ?? 5,
     sources: ["web"],
     timeout: 10_000,
     highlights: false,
   };
   if (options.language === "el") payload.country = "GR";
 
-  const response = await options.fetchImpl(`${FIRECRAWL_API}/v2/search`, {
-    method: "POST",
-    headers: firecrawlHeaders(options.apiKey),
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(12_000),
-  });
+  let response: Response;
+  try {
+    response = await options.fetchImpl(`${FIRECRAWL_API}/v2/search`, {
+      method: "POST",
+      headers: firecrawlHeaders(options.apiKey.trim()),
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(12_000),
+    });
+  } catch (error) {
+    const failure = new UpstreamError(
+      "search",
+      null,
+      redactSecret(error instanceof Error ? error.message : "request failed", options.apiKey),
+    );
+    console.error(failure.message);
+    throw failure;
+  }
   const text = await response.text();
   if (!response.ok) {
-    throw new Error(failureMessage("search", response.status, text, options.apiKey));
+    const failure = new UpstreamError("search", response.status, redactSecret(text, options.apiKey));
+    console.error(failure.message);
+    throw failure;
   }
 
   let parsed: unknown;
@@ -145,7 +159,7 @@ export function markdownToText(markdown: string): string {
 
 function firecrawlHeaders(apiKey: string): HeadersInit {
   return {
-    Authorization: `Bearer ${apiKey}`,
+    Authorization: `Bearer ${apiKey.trim()}`,
     "Content-Type": "application/json",
     Accept: "application/json",
   };

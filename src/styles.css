@@ -155,6 +155,75 @@ h1 {
   align-items: start;
 }
 
+.app[data-phase="idle"] .top,
+.app[data-phase="running"] .top {
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  border-bottom: 0;
+  margin-bottom: 8px;
+}
+
+.app[data-phase="idle"] .brand,
+.app[data-phase="running"] .brand {
+  flex-direction: column;
+  text-align: center;
+}
+
+.app[data-phase="idle"] .header-side,
+.app[data-phase="running"] .header-side {
+  align-items: center;
+}
+
+.app[data-phase="idle"] h1,
+.app[data-phase="running"] h1 {
+  font-size: clamp(40px, 6vw, 64px);
+}
+
+.app[data-phase="idle"] .tagline,
+.app[data-phase="running"] .tagline {
+  font-size: 18px;
+}
+
+.app[data-phase="idle"] .layout,
+.app[data-phase="running"] .layout {
+  display: flex;
+  justify-content: center;
+}
+
+.app[data-phase="idle"] .layout {
+  align-items: center;
+  min-height: calc(100vh - 280px);
+}
+
+.app[data-phase="running"] .layout {
+  align-items: flex-start;
+}
+
+.app[data-phase="idle"] .stack,
+.app[data-phase="running"] .stack {
+  width: min(720px, 100%);
+}
+
+.app[data-phase="idle"] .composer,
+.app[data-phase="running"] .composer {
+  padding: 22px 22px 18px;
+}
+
+.app[data-phase="result"] .paper,
+.app[data-phase="result"] .rail .card {
+  animation: reveal 460ms ease both;
+}
+
+.app[data-phase="result"] .rail .card:nth-child(2) { animation-delay: 60ms; }
+.app[data-phase="result"] .rail .card:nth-child(3) { animation-delay: 110ms; }
+.app[data-phase="result"] .rail .card:nth-child(4) { animation-delay: 160ms; }
+
+@keyframes reveal {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: none; }
+}
+
 .stack, .rail { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 
 .rail {
@@ -406,8 +475,9 @@ textarea { min-height: 220px; resize: vertical; line-height: 1.55; }
   line-height: 1.45;
 }
 
-.notes { margin: 8px 0 0; padding-left: 18px; color: var(--muted); }
-.notes li + li { margin-top: 4px; }
+.notes, .warnings { margin: 8px 0 0; padding-left: 18px; color: var(--muted); }
+.notes li + li, .warnings li + li { margin-top: 4px; }
+.warnings { color: var(--misleading); font-size: 13px; }
 
 .subs { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
 

@@ -95,7 +95,7 @@ Set in `backend/wrangler.toml`. Change them there, or override per environment i
 | --- | --- |
 | `OPENAI_BASE_URL` | `https://api.reflection.ai/openai/v1` |
 | `OPENAI_MODEL` | `Beam-501B-A23B` |
-| `ALLOWED_ORIGINS` | `https://hellenicdev.github.io` plus localhost ports used in development |
+| `ALLOWED_ORIGINS` | `https://hellenicdev.eu`, `https://hellenicdev.github.io`, plus localhost ports used in development |
 | `RATE_LIMIT_PER_IP` | `30` |
 | `RATE_LIMIT_WINDOW_SEC` | `600` |
 
@@ -110,25 +110,35 @@ The command prints the worker URL, something like `https://aletheia.<account>.wo
 
 ## Point the site at the worker
 
-Edit the single export in `src/config.ts`:
+`src/config.ts` is the only place the static site learns the worker URL. It is set to the deployed worker:
 
 ```ts
-export const BACKEND_URL = "https://aletheia.<account>.workers.dev";
+export const BACKEND_URL = "https://aletheia.hellenicdev.workers.dev";
 ```
 
-Rebuild after changing it. The Pages workflow does not inject this value.
+For local `wrangler dev`, change that one line to `http://127.0.0.1:8787` and rebuild. The Pages workflow does not inject this value.
 
 ## GitHub Pages
 
-The site is a static Vite build. Project Pages for this repo are served at `https://hellenicdev.github.io/aletheia/`, so the workflow sets `PAGES_BASE=/aletheia/`.
+The site is a static Vite build. It is served at `https://hellenicdev.eu/aletheia/` and at `https://hellenicdev.github.io/aletheia/`. Both paths use the same base, so the workflow sets `PAGES_BASE=/aletheia/`. Asset URLs in the built `index.html` start with `/aletheia/`.
 
 1. On GitHub, open **Settings → Pages**.
 2. Under **Build and deployment**, set **Source** to **GitHub Actions**.
 3. Merge to `main`. `.github/workflows/pages.yml` builds `dist/` and deploys it.
 
-The browser origin is `https://hellenicdev.github.io` (no path). That origin is already on the worker’s allow list. Add any other origin to `ALLOWED_ORIGINS` before you use it. Requests with a different `Origin` header are rejected. `http://localhost:5173` and `http://127.0.0.1:5173` stay allowed for local development.
+The browser origins are `https://hellenicdev.eu` and `https://hellenicdev.github.io` (no path). Both are on the worker’s allow list. Add any other origin to `ALLOWED_ORIGINS` before you use it. Requests with a different `Origin` header are rejected. `http://localhost:5173` and `http://127.0.0.1:5173` stay allowed for local development.
 
 If the repository name changes, update `PAGES_BASE` in the workflow to `/<repo>/`.
+
+## Diagnosing a live worker
+
+`GET /api/health` reports whether the secrets are present. It does not call the providers.
+
+`GET /api/health?probe=1` makes one small chat completion and one Firecrawl search (`eiffel tower`, limit 1). The JSON `probe.llm` and `probe.search` fields are `{ ok: true, status: 200 }` or `{ ok: false, status, error }`. `error` is a short upstream status and body, with secrets removed. The same lines are written with `console.error` for `wrangler tail`. Probes are limited to 10 per IP per window.
+
+A finished analysis also puts those lines on `meta.warnings` when a model or search call fails and the audit continues without it. Opinion and rhetorical sentences are not relabelled Unverifiable because search failed.
+
+`OPENAI_MODEL` is sent as configured. The default in `wrangler.toml` is `Beam-501B-A23B`. Reflection's chat docs currently show `Beam-1.0-501B-A23B`. If the probe's llm error is HTTP 400, the body says whether that id was rejected.
 
 ## Limits
 
