@@ -253,6 +253,70 @@ describe("analyze", () => {
     expect(result.score.verdict).toContain("model-knowledge-only");
   });
 
+  it("asks the model when search returns nothing and keeps only a stable fact", async () => {
+    const stable = "Paris is the capital of France and has been for generations.";
+    const news = "The marina fee doubled in 2024 according to the mayor.";
+    let verifyUser = "";
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev/v2/search")) {
+        return new Response(JSON.stringify({ success: true, data: { web: [] } }), { status: 200 });
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0].content;
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(classifyPayload(user, () => ({
+          claimType: "checkable_factual",
+          note: "A recorded claim.",
+        })));
+      }
+      if (system.startsWith("TASK:queries")) {
+        return llmPayload({
+          queries: [
+            { id: "s1", query: "Paris capital of France" },
+            { id: "s2", query: "marina fee 2024" },
+          ],
+        });
+      }
+      if (system.startsWith("TASK:verify")) {
+        verifyUser = user;
+        expect(system).toContain("core");
+        expect(system).toContain("same plant");
+        return llmPayload({
+          results: [
+            {
+              id: "s1",
+              label: "True",
+              confidence: 0.9,
+              explanation: "Paris is the capital of France.",
+              sourceUrls: [],
+            },
+            {
+              id: "s2",
+              label: "True",
+              confidence: 0.8,
+              explanation: "Reports described a doubling in 2024.",
+              sourceUrls: [],
+            },
+          ],
+        });
+      }
+      if (system.startsWith("TASK:consistency")) return llmPayload({ contradictions: [] });
+      throw new Error(system.slice(0, 24));
+    };
+
+    const result = await analyze(
+      { text: `${stable} ${news}`, uiLanguage: "en" },
+      { env, fetchImpl },
+    );
+    expect(verifyUser).toContain("context");
+    expect(result.segments[0].label).toBe("True");
+    expect(result.segments[0].evidenceMode).toBe("model-knowledge-only");
+    expect(result.segments[0].confidence).toBeLessThanOrEqual(0.55);
+    expect(result.segments[1].label).toBe("Unverifiable");
+  });
+
   it("extracts a fetched article before auditing it", async () => {
     const { fetchImpl, seen } = scriptedFetch();
     const result = await analyze(

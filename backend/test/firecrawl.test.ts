@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { markdownToText, scrapeArticle, searchWeb } from "../src/firecrawl";
+import { clearSearchCache, markdownToText, scrapeArticle, searchWeb } from "../src/firecrawl";
 import { fetchArticle } from "../src/extract";
 import { HttpError } from "../src/errors";
 
@@ -206,6 +206,48 @@ describe("fetchArticle fallback", () => {
     const local = await fetchArticle("https://news.example/story", fetchImpl);
     expect(local.via).toBe("local");
     expect(local.text).toContain("full minutes");
+  });
+});
+
+describe("result cache", () => {
+  it("reuses a cached search without calling Firecrawl again", async () => {
+    clearSearchCache();
+    const store = new Map<string, string>();
+    const previous = (globalThis as { caches?: unknown }).caches;
+    (globalThis as { caches?: unknown }).caches = {
+      default: {
+        async match(request: Request) {
+          const hit = store.get(request.url);
+          return hit ? new Response(hit) : undefined;
+        },
+        async put(request: Request, response: Response) {
+          store.set(request.url, await response.text());
+        },
+      },
+    };
+    let calls = 0;
+    const fetchImpl: typeof fetch = async () => {
+      calls += 1;
+      return new Response(
+        JSON.stringify({
+          success: true,
+          data: [{ url: "https://example.com/a", title: "A", description: "Cached hit" }],
+        }),
+      );
+    };
+    try {
+      const first = await searchWeb({ apiKey: "k", query: "cache me please", language: "en", fetchImpl });
+      clearSearchCache();
+      const second = await searchWeb({ apiKey: "k", query: "cache me please", language: "en", fetchImpl });
+      expect(first[0]?.snippet).toBe("Cached hit");
+      expect(second).toEqual(first);
+      expect(calls).toBe(1);
+      expect(store.size).toBe(1);
+    } finally {
+      if (previous === undefined) delete (globalThis as { caches?: unknown }).caches;
+      else (globalThis as { caches?: unknown }).caches = previous;
+      clearSearchCache();
+    }
   });
 });
 

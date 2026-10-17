@@ -12,8 +12,8 @@ It does not invent sources. A URL is cited only when that page was returned by s
 
 1. **Extract.** A URL is sent to [Firecrawl](https://firecrawl.dev) scrape with markdown output and main content only. The title, source domain, and date come from the scrape metadata when the page exposes them. Pasted text is used as-is. A short first line followed by a blank line is treated as the title. If `FIRECRAWL_API_KEY` is missing, the worker reads a public HTML page directly and says so.
 2. **Segment and classify.** The model splits the body into exact substrings and marks each as checkable, mixed, opinion, or rhetorical. Offsets are checked against the article. If the model’s excerpts do not line up, Aletheia falls back to a deterministic sentence split.
-3. **Retrieve evidence.** Checkable claims get a search query. Firecrawl’s search endpoint returns the pages. At most 8 searches run per article.
-4. **Verify.** The model judges only the retrieved snippets, at temperature 0, and must return JSON. The reply is validated and retried up to three times. Citations that were not in the search results are dropped. A True, False, or Misleading label with no surviving citation is downgraded to Unverifiable.
+3. **Retrieve evidence.** Checkable claims get a search query. Firecrawl’s search endpoint returns the pages. At most 12 searches run per article, paced by a per-isolate limit of about 10 Firecrawl calls a minute. Successful searches and scrapes are cached for 24 hours.
+4. **Verify.** The model judges the core claim against the retrieved snippets and the surrounding paragraph. The reply is validated and retried. Citations that were not in the search results are dropped. A firm label needs an independent source: not the article itself, a wire reprint, or a social repost. Evidence about a different person, plant, or event cannot make a claim False. When search returns nothing, only a stable, well-known fact may keep a low-confidence model label.
 5. **Score.** The gauge is computed in code from the labels, not by asking the model for a number. A second model call only looks for direct contradictions, and unknown claim ids are ignored.
 
 If `FIRECRAWL_API_KEY` is not set, search is skipped. Factual labels are marked **model knowledge only**, recent or numeric claims are left Unverifiable, no URLs are attached, and the score is capped at 68. URL fetches fall back to a direct HTML read.
@@ -29,7 +29,7 @@ Weights in `shared/score.ts`:
 | Tone / neutrality | 12% |
 | Logical consistency | 14% |
 
-True counts as 100, Misleading as 35, False as 0, weighted by confidence. Unverifiable claims do not pretend to be confirmed. Each False claim subtracts 14 and each Misleading claim subtracts 6, up to 36 points. A direct contradiction subtracts 30 from logical consistency. A piece that is only opinion or rhetoric is capped at 64.
+True counts as 100, Misleading as 35, False as 0, weighted by confidence. Coverage is the share of the claims that were actually selected for verification, not every sentence in the article. Selected claims that stay unverified pull factual accuracy toward 50, and coverage under 25% caps the overall score at 70. Each False claim subtracts 14 and each Misleading claim subtracts 6, up to 36 points. A direct contradiction subtracts 30 from logical consistency. A piece that is only opinion or rhetoric is capped at 64. A column with a large share of opinion passages is described as mostly opinion and capped at 74, with less weight on sourcing and consistency.
 
 ## Layout
 
@@ -161,7 +161,7 @@ Frontend tests cover scoring inputs via the sample report, highlighting, and the
 
 ## How a live score behaves
 
-Extraction strips menus, cookie banners, and image leftovers before the 12,000-character cap, and the page shows that text while the audit runs. Sentences are split in code. The model only classifies them, and the search budget goes to the most specific claims rather than the first ones. Unchecked claims pull factual accuracy toward 50, and coverage under 40% caps the overall score at 70. A True label needs a source that is not the article itself, a copy of it, or a social repost. Known satire and low-credibility domains cap the score under 50. Loaded language lowers the tone score even when the sentence is not labelled Rhetorical.
+Extraction uses the article body on AP, the Onion, BBC, the Guardian, Kathimerini, and ERT, then strips menus, cookie banners, datelines, photo credits, and repeated lines before the 12,000-character cap. The page shows that text while the audit runs. Sentences are split in code. Fragments under about 25 characters, and other boilerplate, are left out of the score. The model only classifies the remaining sentences, and up to 12 searches go to the most specific claims. Coverage is measured on those selected claims. Coverage under 25% caps the overall score at 70. A True label needs a source that is not the article itself, a wire reprint, or a social repost. Known satire and low-credibility domains cap the score under 50. Loaded language, in English and Greek, lowers the tone score, and a rhetorical label lowers it further. A piece that is mostly opinion says so and is scored apart from straight news.
 
 ## Honesty limits
 

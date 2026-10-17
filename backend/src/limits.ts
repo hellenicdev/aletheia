@@ -4,7 +4,7 @@ export const LIMITS = {
   minArticleChars: 40,
   maxUrlChars: 2_000,
   maxSegments: 24,
-  maxSearches: 8,
+  maxSearches: 12,
   analysisDeadlineMs: 140_000,
   maxInFlight: 4,
   maxPageBytes: 1_000_000,
