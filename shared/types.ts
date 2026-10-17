@@ -65,6 +65,7 @@ export interface AnalysisResult {
     uiLanguage: UiLanguage;
     requestId: string;
     extraction: "pasted" | "firecrawl" | "local";
+    warnings: string[];
   };
 }
 

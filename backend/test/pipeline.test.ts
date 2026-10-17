@@ -265,6 +265,53 @@ describe("analyze", () => {
     expect(JSON.stringify(scrape?.body)).not.toContain("firecrawl-test-key");
   });
 
+  it("records upstream failures and does not treat a slogan as unverifiable", async () => {
+    const text =
+      "The Eiffel Tower is located in Berlin and was completed in 1889. It is, without doubt, the most breathtaking structure humanity has ever built.";
+    const fetchImpl: typeof fetch = async () => {
+      throw new TypeError("Illegal invocation: function called with incorrect this");
+    };
+    const result = await analyze({ text, uiLanguage: "en" }, { env, fetchImpl });
+    expect(result.segments.map((segment) => segment.label)).toEqual(["Unverifiable", "Rhetorical"]);
+    expect(result.segments[1].explanation).not.toContain("Evidence retrieval failed");
+    expect(result.meta.warnings.some((warning) => warning.startsWith("llm:"))).toBe(true);
+    expect(result.meta.warnings.some((warning) => warning.startsWith("search:"))).toBe(true);
+  });
+
+  it("keeps a model-classified rhetorical sentence when search returns HTTP 401", async () => {
+    const fact = "The Eiffel Tower is located in Berlin and was completed in 1889.";
+    const slogan = "It is, without doubt, the most breathtaking structure humanity has ever built.";
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        return new Response("Unauthorized: Invalid token", { status: 401 });
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload({
+          detectedLanguage: "en",
+          segments: [
+            { text: fact, claimType: "checkable_factual", note: "A place and a year." },
+            { text: slogan, claimType: "rhetorical", note: "Praise without a discrete fact." },
+          ],
+        });
+      }
+      if (system.startsWith("TASK:queries")) {
+        return llmPayload({ queries: [{ id: "s1", query: "Eiffel Tower Berlin 1889" }] });
+      }
+      throw new Error(system.slice(0, 24));
+    };
+    const result = await analyze(
+      { text: `${fact} ${slogan}`, uiLanguage: "en" },
+      { env, fetchImpl },
+    );
+    expect(result.segments.map((segment) => segment.label)).toEqual(["Unverifiable", "Rhetorical"]);
+    expect(result.meta.searchDegraded).toBe(true);
+    expect(result.meta.warnings.some((warning) => warning.includes("search: HTTP 401"))).toBe(true);
+    expect(result.meta.warnings.join(" ")).not.toContain("firecrawl-test-key");
+  });
+
   it("rejects private URLs before any fetch", async () => {
     const fetchImpl: typeof fetch = async () => {
       throw new Error("should not fetch");
@@ -276,6 +323,36 @@ describe("analyze", () => {
 });
 
 describe("handleRequest", () => {
+  it("probes the model and Firecrawl without echoing secrets", async () => {
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        return new Response("Unauthorized token firecrawl-test-key", { status: 401 });
+      }
+      return new Response(JSON.stringify({ error: { message: "unknown model test-key" } }), {
+        status: 400,
+      });
+    };
+    const response = await handleRequest(
+      new Request("https://worker.test/api/health?probe=1"),
+      env,
+      { fetchImpl, rate: { buckets: new Map(), inFlight: { count: 0 } }, now: () => 1 },
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      probe: { llm: { ok: boolean; status: number; error: string }; search: { ok: boolean; status: number; error: string } };
+    };
+    expect(body.ok).toBe(false);
+    expect(body.probe.llm).toMatchObject({ ok: false, status: 400 });
+    expect(body.probe.llm.error).toContain("llm: HTTP 400");
+    expect(body.probe.search).toMatchObject({ ok: false, status: 401 });
+    expect(body.probe.search.error).toContain("search: HTTP 401");
+    expect(JSON.stringify(body)).not.toContain("test-key");
+    expect(JSON.stringify(body)).not.toContain("firecrawl-test-key");
+  });
+
+
   it("allows the GitHub Pages origin and hides the worker from other sites", async () => {
     const health = await handleRequest(
       new Request("https://worker.test/api/health", {
@@ -285,6 +362,15 @@ describe("handleRequest", () => {
     );
     expect(health.status).toBe(200);
     expect(health.headers.get("access-control-allow-origin")).toBe("https://hellenicdev.github.io");
+
+    const custom = await handleRequest(
+      new Request("https://worker.test/api/health", {
+        headers: { Origin: "https://hellenicdev.eu" },
+      }),
+      env,
+    );
+    expect(custom.status).toBe(200);
+    expect(custom.headers.get("access-control-allow-origin")).toBe("https://hellenicdev.eu");
 
     const blocked = await handleRequest(
       new Request("https://worker.test/api/health", {

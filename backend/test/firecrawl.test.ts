@@ -70,6 +70,29 @@ describe("searchWeb", () => {
   });
 });
 
+describe("searchWeb failures", () => {
+  it("includes the HTTP status and strips the key", async () => {
+    const fetchImpl: typeof fetch = async () =>
+      new Response("bad token secret-firecrawl-key", { status: 401 });
+    await expect(
+      searchWeb({
+        apiKey: "secret-firecrawl-key",
+        query: "eiffel tower",
+        language: "en",
+        fetchImpl,
+      }),
+    ).rejects.toThrow(/search: HTTP 401/);
+    await expect(
+      searchWeb({
+        apiKey: "secret-firecrawl-key",
+        query: "eiffel tower",
+        language: "en",
+        fetchImpl,
+      }),
+    ).rejects.toThrow(/\[redacted\]/);
+  });
+});
+
 describe("scrapeArticle", () => {
   it("asks for markdown main content and keeps title, date, and body", async () => {
     let payload: Record<string, unknown> = {};

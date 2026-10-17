@@ -1,3 +1,4 @@
+import { inferClaimType } from "../../shared/classify";
 import { applyEvidence, type EvidenceItem } from "../../shared/citations";
 import { detectLanguage, languageMatches } from "../../shared/language";
 import type { ClaimType, DetectedLanguage, Label, UiLanguage } from "../../shared/labels";
@@ -12,8 +13,9 @@ import { alignSegments, splitPastedTitle } from "../../shared/sentences";
 import type { AnalysisResult, Contradiction, SegmentResult, StageName } from "../../shared/types";
 import type { Env } from "./config";
 import { resolveConfig } from "./config";
-import { HttpError } from "./errors";
+import { HttpError, UpstreamError } from "./errors";
 import { fetchArticle } from "./extract";
+import { resolveFetch } from "./runtime";
 import { completeJson } from "./llm";
 import { LIMITS } from "./limits";
 import {
@@ -57,12 +59,15 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     throw new HttpError(503, "OPENAI_API_KEY is not configured on the worker.");
   }
   const uiLanguage: UiLanguage = isUiLanguage(input.uiLanguage) ? input.uiLanguage : "en";
-  const fetchImpl = deps.fetchImpl ?? fetch;
+  const fetchImpl = resolveFetch(deps.fetchImpl);
   const requestId = deps.requestId ?? crypto.randomUUID();
+  const warnings: string[] = [];
+  const llmKey = deps.env.OPENAI_API_KEY?.trim() ?? "";
+  const searchKey = deps.env.FIRECRAWL_API_KEY?.trim() ?? "";
   const stage = (name: StageName, status: "start" | "done") => deps.onStage?.(name, status);
 
   stage("ingest", "start");
-  const ingested = await ingest(input, fetchImpl, deps.env.FIRECRAWL_API_KEY);
+  const ingested = await ingest(input, fetchImpl, searchKey);
   stage("ingest", "done");
 
   stage("segment", "start");
@@ -70,8 +75,9 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     text: ingested.text,
     uiLanguage,
     config,
-    apiKey: deps.env.OPENAI_API_KEY,
+    apiKey: llmKey,
     fetchImpl,
+    warnings,
   });
   stage("segment", "done");
 
@@ -84,20 +90,20 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   const budgeted = searchable.slice(0, LIMITS.maxSearches);
   const overBudget = new Set(searchable.slice(LIMITS.maxSearches).map((segment) => segment.id));
 
-  if (searchEnabled && deps.env.FIRECRAWL_API_KEY) {
-    const queries = await buildQueries(budgeted, config, deps.env.OPENAI_API_KEY, fetchImpl);
+  if (searchEnabled && searchKey) {
+    const queries = await buildQueries(budgeted, config, llmKey, fetchImpl, warnings);
     for (const segment of budgeted) {
       const query = queries.get(segment.id) || segment.text.slice(0, 180);
       try {
         const hits = await searchWeb({
-          apiKey: deps.env.FIRECRAWL_API_KEY,
+          apiKey: searchKey,
           query,
           language: segmented.detectedLanguage,
           fetchImpl,
         });
         evidence.set(segment.id, dedupeEvidence(hits));
       } catch (error) {
-        console.error("search failed", error instanceof Error ? error.message : "error");
+        remember(warnings, error, "search");
         searchDegraded = true;
         evidence.set(segment.id, []);
       }
@@ -140,13 +146,13 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
         uiLanguage,
         searchEnabled,
         config,
-        apiKey: deps.env.OPENAI_API_KEY,
+        apiKey: llmKey,
         fetchImpl,
       });
       for (const [id, result] of judged) verified.set(id, result);
     } catch (error) {
       if (isModelAuthError(error)) throw error;
-      console.error("verify failed", error instanceof Error ? error.message : "error");
+      remember(warnings, error, "llm");
       for (const segment of group) {
         verified.set(
           segment.id,
@@ -204,8 +210,9 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     segments: ordered,
     uiLanguage,
     config,
-    apiKey: deps.env.OPENAI_API_KEY,
+    apiKey: llmKey,
     fetchImpl,
+    warnings,
   });
 
   const score = aggregateScore(
@@ -242,6 +249,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       uiLanguage,
       requestId,
       extraction: ingested.extraction,
+      warnings,
     },
   };
 }
@@ -305,6 +313,7 @@ async function segmentArticle(options: {
   config: ReturnType<typeof resolveConfig>;
   apiKey: string;
   fetchImpl: typeof fetch;
+  warnings: string[];
 }): Promise<{ segments: DraftSegment[]; detectedLanguage: DetectedLanguage; truncated: boolean }> {
   const localLanguage = detectLanguage(options.text);
   let proposed: { text: string; claimType: ClaimType; note: string }[] = [];
@@ -323,7 +332,7 @@ async function segmentArticle(options: {
     detected = localLanguage === "other" ? parsed.detectedLanguage : localLanguage;
   } catch (error) {
     if (isModelAuthError(error)) throw error;
-    console.error("segment failed", error instanceof Error ? error.message : "error");
+    remember(options.warnings, error, "llm");
   }
 
   const spans = alignSegments(
@@ -339,7 +348,7 @@ async function segmentArticle(options: {
       text: span.text,
       start: span.start,
       end: span.end,
-      claimType: match?.claimType ?? "checkable_factual",
+      claimType: match?.claimType ?? inferClaimType(span.text),
       note: match?.note ?? "",
     };
   });
@@ -379,6 +388,7 @@ async function buildQueries(
   config: ReturnType<typeof resolveConfig>,
   apiKey: string,
   fetchImpl: typeof fetch,
+  warnings: string[],
 ): Promise<Map<string, string>> {
   const queries = new Map<string, string>();
   if (segments.length === 0) return queries;
@@ -394,7 +404,7 @@ async function buildQueries(
     });
     for (const item of parsed) queries.set(item.id, item.query);
   } catch (error) {
-    console.error("queries failed", error instanceof Error ? error.message : "error");
+    remember(warnings, error, "llm");
   }
   return queries;
 }
@@ -512,6 +522,7 @@ async function findContradictions(options: {
   config: ReturnType<typeof resolveConfig>;
   apiKey: string;
   fetchImpl: typeof fetch;
+  warnings: string[];
 }): Promise<Contradiction[]> {
   const factual = options.segments.filter((segment) =>
     ["True", "False", "Misleading", "Unverifiable"].includes(segment.label),
@@ -546,9 +557,19 @@ async function findContradictions(options: {
     }
     return unique;
   } catch (error) {
-    console.error("consistency failed", error instanceof Error ? error.message : "error");
+    remember(options.warnings, error, "llm");
     return [];
   }
+}
+
+function remember(warnings: string[], error: unknown, source: "llm" | "search") {
+  const message =
+    error instanceof UpstreamError
+      ? error.message
+      : `${source}: ${error instanceof Error ? error.message : "request failed"}`;
+  const warning = message.slice(0, 240);
+  if (!warnings.includes(warning)) warnings.push(warning);
+  if (!(error instanceof UpstreamError)) console.error(warning);
 }
 
 function validateContradictions(data: unknown, uiLanguage: UiLanguage): Contradiction[] {

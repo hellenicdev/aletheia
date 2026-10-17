@@ -228,6 +228,7 @@ export function buildSample(lang: UiLanguage): AnalysisResult {
       uiLanguage: lang,
       requestId: "sample",
       extraction: "pasted",
+      warnings: [],
     },
   };
 }
