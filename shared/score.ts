@@ -195,7 +195,7 @@ function buildVerdict(
   } else {
     sentence =
       lang === "el"
-        ? `Το κείμενο βαθμολογείται με ${overall}/100, με μεικτή εικόνα: ${counts.True} αληθείς, ${counts.False} ψευδείς και ${counts.Unverifiable} μη επαληθεύσιμοι ισχυρισμοί.`
+        ? `Το κείμενο βαθμολογείται με ${overall}/100, με μεικτή εικόνα: ${elAdj(counts.True, "αληθής", "αληθείς")}, ${elAdj(counts.False, "ψευδής", "ψευδείς")} και ${elAdj(counts.Unverifiable, "μη επαληθεύσιμος", "μη επαληθεύσιμοι")} ισχυρισμοί.`
         : `The article scores ${overall}/100, a mixed picture: ${counts.True} true, ${counts.False} false, and ${counts.Unverifiable} unverifiable claims.`;
   }
 
@@ -211,6 +211,10 @@ function buildVerdict(
 
 function enClaim(count: number): string {
   return count === 1 ? "claim is" : "claims are";
+}
+
+function elAdj(count: number, singular: string, plural: string): string {
+  return `${count} ${count === 1 ? singular : plural}`;
 }
 
 function round(value: number): number {
