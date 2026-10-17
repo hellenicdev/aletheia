@@ -3,13 +3,18 @@ import type { EvidenceItem } from "../../shared/citations";
 import { HttpError, UpstreamError, redactSecret } from "./errors";
 import { LIMITS } from "./limits";
 import { assertPublicHttpUrl, isBlockedHost } from "./ssrf";
+import { acquireOutbound, resetOutboundBudget } from "./throttle";
 
 const FIRECRAWL_API = "https://api.firecrawl.dev";
+const CACHE_TTL_SECONDS = 86_400;
 const searchCache = new Map<string, { at: number; hits: EvidenceItem[] }>();
+const scrapeCache = new Map<string, { at: number; page: ScrapedPage }>();
 let queue: Promise<unknown> = Promise.resolve();
 
 export function clearSearchCache(): void {
   searchCache.clear();
+  scrapeCache.clear();
+  resetOutboundBudget();
 }
 
 function enqueue<T>(job: () => Promise<T>): Promise<T> {
@@ -39,6 +44,11 @@ export async function searchWeb(options: {
   const cacheKey = `${options.language}:${query}`;
   const cached = searchCache.get(cacheKey);
   if (cached && Date.now() - cached.at < 10 * 60_000) return cached.hits;
+  const persisted = await readPersisted<EvidenceItem[]>(`search:${cacheKey}`);
+  if (persisted) {
+    searchCache.set(cacheKey, { at: Date.now(), hits: persisted });
+    return persisted;
+  }
 
   const payload: Record<string, unknown> = {
     query,
@@ -49,9 +59,17 @@ export async function searchWeb(options: {
   };
   if (options.language === "el") payload.country = "GR";
 
-  const response = await enqueue(() =>
-    firecrawlPost(`${FIRECRAWL_API}/v2/search`, payload, options.apiKey, options.fetchImpl, 12_000, options.retryDelayMs ?? 500),
-  );
+  const response = await enqueue(async () => {
+    await acquireOutbound(pause);
+    return firecrawlPost(
+      `${FIRECRAWL_API}/v2/search`,
+      payload,
+      options.apiKey,
+      options.fetchImpl,
+      12_000,
+      options.retryDelayMs ?? 500,
+    );
+  });
   const text = await response.text();
   if (!response.ok) {
     const failure = new UpstreamError("search", response.status, redactSecret(text, options.apiKey));
@@ -74,6 +92,7 @@ export async function searchWeb(options: {
     .filter((item): item is EvidenceItem => item !== null)
     .slice(0, 4);
   searchCache.set(cacheKey, { at: Date.now(), hits });
+  await writePersisted(`search:${cacheKey}`, hits);
   return hits;
 }
 
@@ -128,8 +147,17 @@ export async function scrapeArticle(options: {
   fetchImpl: typeof fetch;
 }): Promise<ScrapedPage> {
   const pageUrl = assertPublicHttpUrl(options.url);
-  const response = await enqueue(() =>
-    firecrawlPost(
+  const cacheKey = pageUrl.toString();
+  const memo = scrapeCache.get(cacheKey);
+  if (memo && Date.now() - memo.at < 10 * 60_000) return memo.page;
+  const persisted = await readPersisted<ScrapedPage>(`scrape:${cacheKey}`);
+  if (persisted && persisted.text) {
+    scrapeCache.set(cacheKey, { at: Date.now(), page: persisted });
+    return persisted;
+  }
+  const response = await enqueue(async () => {
+    await acquireOutbound(pause);
+    return firecrawlPost(
       `${FIRECRAWL_API}/v2/scrape`,
       {
         url: pageUrl.toString(),
@@ -142,8 +170,8 @@ export async function scrapeArticle(options: {
       options.fetchImpl,
       20_000,
       500,
-    ),
-  );
+    );
+  });
   const text = await response.text();
   if (!response.ok) {
     if (response.status === 401 || response.status === 403) {
@@ -189,13 +217,62 @@ export async function scrapeArticle(options: {
     pageUrl.toString(),
   );
 
-  return {
+  const page: ScrapedPage = {
     title,
     text: article.slice(0, LIMITS.maxArticleChars),
     publishedAt,
     finalUrl,
     rawHtml: typeof data.html === "string" ? data.html : null,
   };
+  scrapeCache.set(cacheKey, { at: Date.now(), page });
+  await writePersisted(`scrape:${cacheKey}`, page);
+  return page;
+}
+
+interface ResultCache {
+  match(request: Request): Promise<Response | undefined>;
+  put(request: Request, response: Response): Promise<void>;
+}
+
+function resultCache(): ResultCache | null {
+  const host = globalThis as unknown as { caches?: { default?: ResultCache } };
+  return host.caches?.default ?? null;
+}
+
+async function cacheRequest(key: string): Promise<Request> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
+  const hex = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return new Request(`https://cache.aletheia.internal/v1/${hex}`);
+}
+
+async function readPersisted<T>(key: string): Promise<T | null> {
+  const cache = resultCache();
+  if (!cache) return null;
+  try {
+    const hit = await cache.match(await cacheRequest(key));
+    if (!hit) return null;
+    return (await hit.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function writePersisted(key: string, value: unknown): Promise<void> {
+  const cache = resultCache();
+  if (!cache) return;
+  try {
+    await cache.put(
+      await cacheRequest(key),
+      new Response(JSON.stringify(value), {
+        headers: {
+          "Cache-Control": `public, max-age=${CACHE_TTL_SECONDS}`,
+          "Content-Type": "application/json",
+        },
+      }),
+    );
+  } catch {
+    /* The Cache API is best-effort and is absent outside the worker. */
+  }
 }
 
 export function markdownToText(markdown: string): string {

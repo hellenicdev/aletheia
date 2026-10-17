@@ -102,6 +102,11 @@ describe("offline evaluation fixtures", () => {
       if (fixture.maxOverall !== undefined) expect(result.score.overall).toBeLessThanOrEqual(fixture.maxOverall);
       if (fixture.expectOpinion) {
         expect(result.segments.some((segment) => segment.label === "Opinion")).toBe(true);
+        expect(result.score.verdict.toLowerCase()).toContain("mostly opinion");
+        expect(result.score.overall).toBeLessThanOrEqual(74);
+      }
+      if (fixture.kind === "reputable") {
+        expect(result.score.verdict.toLowerCase()).not.toContain("mostly opinion");
       }
       if (fixture.maxTone !== undefined) {
         expect(result.score.toneNeutrality).toBeLessThanOrEqual(fixture.maxTone);

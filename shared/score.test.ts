@@ -147,6 +147,63 @@ describe("aggregateScore", () => {
     expect(score.toneNeutrality).toBeLessThan(90);
   });
 
+  it("scores selected claims and ignores factual claims that were not searched", () => {
+    const checked = aggregateScore(
+      [
+        ...Array.from({ length: 8 }, () => segment("True")),
+        ...Array.from({ length: 12 }, () => ({ ...segment("Unverifiable", 0.3, false), inCoverage: false })),
+      ],
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "en" },
+    );
+    expect(checked.overall).toBeGreaterThan(70);
+    expect(checked.verdict).toContain("8 of 8");
+    expect(checked.verdict).toContain("outside this search");
+    expect(checked.counts.Unverifiable).toBe(12);
+  });
+
+  it("caps coverage only when fewer than a quarter of the selected claims were decided", () => {
+    const sparse = aggregateScore(
+      [segment("True"), ...Array.from({ length: 7 }, () => segment("Unverifiable", 0.4, true))],
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "en" },
+    );
+    const half = aggregateScore(
+      [
+        ...Array.from({ length: 4 }, () => segment("True")),
+        ...Array.from({ length: 4 }, () => segment("Unverifiable", 0.4, true)),
+      ],
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "en" },
+    );
+    expect(sparse.overall).toBeLessThanOrEqual(70);
+    expect(half.overall).toBeGreaterThan(70);
+  });
+
+  it("labels a column with many opinion passages as mostly opinion and scores it below straight news", () => {
+    const column = aggregateScore(
+      [
+        ...Array.from({ length: 4 }, () => segment("Opinion", 0.8, false)),
+        segment("True"),
+        segment("True"),
+      ],
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "en" },
+    );
+    const news = aggregateScore(
+      Array.from({ length: 6 }, () => segment("True")),
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "en" },
+    );
+    expect(column.verdict).toContain("mostly opinion");
+    expect(column.overall).toBeLessThanOrEqual(74);
+    expect(column.overall).toBeLessThan(news.overall);
+    const greek = aggregateScore(
+      [
+        ...Array.from({ length: 4 }, () => segment("Opinion", 0.8, false)),
+        segment("True"),
+        segment("True"),
+      ],
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "el" },
+    );
+    expect(greek.verdict).toContain("κυρίως γνώμη");
+  });
+
   it("gives false claims more influence than a low confidence would erase", () => {
     const score = aggregateScore(
       [segment("True", 1), segment("False", 0.5)],

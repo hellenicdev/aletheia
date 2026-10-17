@@ -22,6 +22,8 @@ const MAX_PENALTY = 36;
 const SEARCH_OFF_CAP = 68;
 const COMMENTARY_CAP = 64;
 const LOW_COVERAGE_CAP = 70;
+const LOW_COVERAGE_THRESHOLD = 0.25;
+const OPINION_CAP = 74;
 const SATIRE_CAP = 42;
 const LOW_CREDIBILITY_CAP = 44;
 const SOURCING_CAP_NO_SEARCH = 30;
@@ -34,6 +36,11 @@ export interface ScoreSegment {
   confidence: number;
   hasValidSource: boolean;
   tone?: number;
+  /**
+   * Unverifiable claims left outside the search budget are still shown, but they
+   * are not part of the coverage ratio. Omitted means the claim was selected.
+   */
+  inCoverage?: boolean;
 }
 
 export interface ScoreOptions {
@@ -77,13 +84,16 @@ export function aggregateScore(
 
   const decided = segments.filter(
     (segment): segment is ScoreSegment & { label: keyof typeof FACT_POINTS } =>
-      segment.label === "True" ||
-      segment.label === "False" ||
-      segment.label === "Misleading",
+      (segment.label === "True" ||
+        segment.label === "False" ||
+        segment.label === "Misleading") &&
+      segment.inCoverage !== false,
   );
   const checkable = segments.filter((segment) =>
     ["True", "False", "Misleading", "Unverifiable"].includes(segment.label),
   );
+  const coveragePool = checkable.filter((segment) => segment.inCoverage !== false);
+  const outsideSearch = checkable.length - coveragePool.length;
 
   let measured: number | null = null;
   if (decided.length > 0) {
@@ -97,16 +107,18 @@ export function aggregateScore(
     measured = weighted / weight;
   }
 
-  const coverage = checkable.length === 0 ? 1 : decided.length / checkable.length;
+  const coverage = coveragePool.length === 0 ? 1 : decided.length / coveragePool.length;
   const factualAccuracy =
     checkable.length === 0
       ? null
-      : round(measured === null ? NEUTRAL_FACTUAL : measured * coverage + NEUTRAL_FACTUAL * (1 - coverage));
+      : round(
+          measured === null ? NEUTRAL_FACTUAL : measured * coverage + NEUTRAL_FACTUAL * (1 - coverage),
+        );
 
   let sourcing: number | null = null;
-  if (checkable.length > 0) {
-    const sourced = checkable.filter((segment) => segment.hasValidSource).length;
-    sourcing = round((100 * sourced) / checkable.length);
+  if (coveragePool.length > 0) {
+    const sourced = coveragePool.filter((segment) => segment.hasValidSource).length;
+    sourcing = round((100 * sourced) / coveragePool.length);
     if (!options.searchEnabled) sourcing = Math.min(sourcing, SOURCING_CAP_NO_SEARCH);
   }
 
@@ -121,6 +133,7 @@ export function aggregateScore(
       : Math.max(0, 100 - options.contradictionCount * CONTRADICTION_PENALTY);
 
   const outlet = options.outlet ?? "news";
+  const opinionPiece = isMostlyOpinion(counts, segments.length);
   const factualBasis: ScoreResult["factualBasis"] =
     checkable.length === 0 ? "commentary" : coverage < 0.6 || decided.length === 0 ? "uncertain" : "measured";
 
@@ -138,20 +151,36 @@ export function aggregateScore(
   );
 
   let overall = clamp(round(base - penalty), 0, 100);
+  if (opinionPiece && factualBasis !== "commentary" && outlet !== "satire" && outlet !== "low-credibility") {
+    const opinionBase =
+      0.5 * factualForMix +
+      0.08 * (sourcing ?? 40) +
+      0.3 * toneNeutrality +
+      0.12 * logicalConsistency;
+    overall = Math.min(OPINION_CAP, clamp(round(opinionBase - penalty), 0, 100));
+  }
   if (factualBasis === "commentary") overall = Math.min(overall, COMMENTARY_CAP);
   if (!options.searchEnabled) overall = Math.min(overall, SEARCH_OFF_CAP);
-  if (checkable.length >= 4 && coverage < 0.4) overall = Math.min(overall, LOW_COVERAGE_CAP);
+  if (coveragePool.length >= 4 && coverage < LOW_COVERAGE_THRESHOLD) {
+    overall = Math.min(overall, LOW_COVERAGE_CAP);
+  }
   if (outlet === "satire") overall = Math.min(overall, SATIRE_CAP);
   if (outlet === "low-credibility") overall = Math.min(overall, LOW_CREDIBILITY_CAP);
+
+  const poolCounts = emptyCounts();
+  for (const segment of coveragePool) poolCounts[segment.label] += 1;
 
   const verdict = buildVerdict(
     {
       overall,
       counts,
+      poolCounts,
+      outsideSearch,
       factualBasis,
       searchEnabled: options.searchEnabled,
       searchDegraded: options.searchDegraded === true,
       outlet,
+      opinionPiece,
     },
     options.uiLanguage,
   );
@@ -168,20 +197,28 @@ export function aggregateScore(
   };
 }
 
+function isMostlyOpinion(counts: Record<Label, number>, total: number): boolean {
+  return total > 0 && counts.Opinion >= 3 && counts.Opinion / total >= 0.2;
+}
+
 function buildVerdict(
   input: {
     overall: number;
     counts: Record<Label, number>;
+    poolCounts: Record<Label, number>;
+    outsideSearch: number;
     factualBasis: ScoreResult["factualBasis"];
     searchEnabled: boolean;
     searchDegraded: boolean;
     outlet: OutletKind;
+    opinionPiece: boolean;
   },
   lang: UiLanguage,
 ): string {
-  const { overall, counts, factualBasis, searchEnabled, searchDegraded, outlet } = input;
-  const checked = counts.True + counts.False + counts.Misleading;
-  const checkable = checked + counts.Unverifiable;
+  const { overall, counts, poolCounts, outsideSearch, factualBasis, searchEnabled, searchDegraded, outlet, opinionPiece } =
+    input;
+  const checked = poolCounts.True + poolCounts.False + poolCounts.Misleading;
+  const checkable = checked + poolCounts.Unverifiable;
   const parts: string[] = [];
 
   if (outlet === "satire") {
@@ -202,6 +239,12 @@ function buildVerdict(
         ? `Το κείμενο βαθμολογείται με ${overall}/100 και είναι κυρίως γνώμη ή σχόλιο, όχι σύνολο ελέγξιμων ισχυρισμών.`
         : `The article scores ${overall}/100 and is mostly opinion or commentary, not a set of checkable claims.`,
     );
+  } else if (opinionPiece) {
+    parts.push(
+      lang === "el"
+        ? `Το κείμενο βαθμολογείται με ${overall}/100 και είναι κυρίως γνώμη.`
+        : `The article scores ${overall}/100 and is mostly opinion.`,
+    );
   } else if (searchDegraded && checked === 0) {
     parts.push(
       lang === "el"
@@ -219,8 +262,15 @@ function buildVerdict(
   if (checkable > 0) {
     parts.push(
       lang === "el"
-        ? `Ελέγχθηκαν ${checked} από ${checkable} πραγματολογικούς ισχυρισμούς: ${elAdj(counts.True, "αληθής", "αληθείς")}, ${elAdj(counts.False, "ψευδής", "ψευδείς")} και ${elAdj(counts.Unverifiable, "μη επαληθεύσιμος", "μη επαληθεύσιμοι")}.`
-        : `${checked} of ${checkable} factual claims were checked (${counts.True} true, ${counts.False} false, ${counts.Misleading} misleading, ${counts.Unverifiable} unverifiable).`,
+        ? `Ελέγχθηκαν ${checked} από ${checkable} πραγματολογικούς ισχυρισμούς: ${elAdj(poolCounts.True, "αληθής", "αληθείς")}, ${elAdj(poolCounts.False, "ψευδής", "ψευδείς")} και ${elAdj(poolCounts.Unverifiable, "μη επαληθεύσιμος", "μη επαληθεύσιμοι")}.`
+        : `${checked} of ${checkable} factual claims were checked (${poolCounts.True} true, ${poolCounts.False} false, ${poolCounts.Misleading} misleading, ${poolCounts.Unverifiable} unverifiable).`,
+    );
+  }
+  if (outsideSearch > 0) {
+    parts.push(
+      lang === "el"
+        ? `${outsideSearch} ${outsideSearch === 1 ? "ισχυρισμός έμεινε" : "ισχυρισμοί έμειναν"} εκτός αναζήτησης και δεν μετρούν ως κενό κάλυψης.`
+        : `${outsideSearch} further ${outsideSearch === 1 ? "claim was" : "claims were"} outside this search and do not count as a coverage gap.`,
     );
   }
   if (counts.Opinion > 0) {

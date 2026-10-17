@@ -21,7 +21,8 @@ export function unverifiableExplanation(
     | "search-failed"
     | "budget"
     | "model-only"
-    | "not-independent",
+    | "not-independent"
+    | "entity-mismatch",
 ): string {
   const el: Record<typeof reason, string> = {
     "no-evidence":
@@ -38,6 +39,8 @@ export function unverifiableExplanation(
       "Χωρίς ζωντανή αναζήτηση ο ισχυρισμός μένει μη επαληθεύσιμος. Δεν παρατίθεται πηγή.",
     "not-independent":
       "Οι μόνες σελίδες που βρέθηκαν είναι το ίδιο το άρθρο ή αντίγραφά του, οπότε ο ισχυρισμός δεν επαληθεύεται ανεξάρτητα.",
+    "entity-mismatch":
+      "Τα τεκμήρια αφορούν διαφορετικό πρόσωπο, τόπο ή γεγονός, οπότε ο ισχυρισμός δεν κρίνεται ψευδής και μένει μη επαληθεύσιμος.",
   };
   const en: Record<typeof reason, string> = {
     "no-evidence":
@@ -54,6 +57,8 @@ export function unverifiableExplanation(
       "Without live web search this claim stays unverified. No source is cited.",
     "not-independent":
       "The only pages found were this article or copies of it, so the claim is not independently verified.",
+    "entity-mismatch":
+      "The evidence is about a different person, place, or event, so this claim is not marked false and stays unverified.",
   };
   return lang === "el" ? el[reason] : en[reason];
 }

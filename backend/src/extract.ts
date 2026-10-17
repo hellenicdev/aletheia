@@ -63,7 +63,11 @@ const BLOCK_TAGS = new Set([
   "figcaption",
 ]);
 
-const ARTICLE_CLASS = /article|story-body|post-content|entry-content|article-body|post-body/i;
+const ARTICLE_CLASS =
+  /article|story-body|post-content|entry-content|article-body|post-body|RichTextStoryBody|text-block/i;
+
+const JUNK_REGION =
+  /(?:^|[\s_-])(?:cookie|consent|newsletter|paywall|modal|sharebar|share-bar|related-stories|nav|menu|banner)(?:$|[\s_-])/i;
 
 export function extractArticle(
   html: string,
@@ -71,7 +75,7 @@ export function extractArticle(
 ): Omit<ExtractedArticle, "finalUrl" | "via"> {
   const metas = collectMeta(html);
   const jsonLd = collectJsonLd(html);
-  const walked = walkHtml(html);
+  const walked = walkHtml(html, pageUrl);
 
   const title =
     cleanInline(metas["og:title"] || "") ||
@@ -87,9 +91,15 @@ export function extractArticle(
     normalizeDate(walked.time) ||
     null;
 
+  const preferredText = cleanArticleText(cleanupText(walked.preferred));
   const articleText = cleanArticleText(cleanupText(walked.article));
   const bodyText = cleanArticleText(cleanupText(walked.body));
-  const text = proseScore(articleText) >= 12 ? articleText : bodyText;
+  const text =
+    proseScore(preferredText) >= 12
+      ? preferredText
+      : proseScore(articleText) >= 12
+        ? articleText
+        : bodyText;
 
   if (text.length < LIMITS.minArticleChars) {
     throw new HttpError(
@@ -220,6 +230,7 @@ async function readLimited(response: Response, maxBytes: number): Promise<string
 interface Walked {
   article: string;
   body: string;
+  preferred: string;
   title: string;
   h1: string;
   time: string;
@@ -229,18 +240,20 @@ interface Frame {
   tag: string;
   skip: boolean;
   article: boolean;
+  preferred: boolean;
   title: boolean;
   h1: boolean;
   time: boolean;
 }
 
-function walkHtml(html: string): Walked {
+function walkHtml(html: string, pageUrl: string): Walked {
   const stack: Frame[] = [];
   let title = "";
   let h1 = "";
   let time = "";
   let article = "";
   let body = "";
+  let preferred = "";
 
   const token = /<!--[\s\S]*?-->|<\/?([a-zA-Z][\w:-]*)\b([^>]*)>|[^<]+/g;
   let match: RegExpExecArray | null;
@@ -259,6 +272,7 @@ function walkHtml(html: string): Walked {
 
       if (closing || selfClosing) {
         if (BLOCK_TAGS.has(name) && !inSkip(stack)) {
+          if (inPreferred(stack)) preferred += "\n";
           if (inArticle(stack)) article += "\n";
           body += "\n";
         }
@@ -267,22 +281,31 @@ function walkHtml(html: string): Walked {
       }
 
       const parent = stack[stack.length - 1];
-      const skip = SKIP_TAGS.has(name) || parent?.skip === true;
+      const marker = `${attributes.class || ""} ${attributes.id || ""} ${attributes.role || ""}`;
+      const skip =
+        SKIP_TAGS.has(name) ||
+        parent?.skip === true ||
+        attributes.role === "navigation" ||
+        attributes.role === "banner" ||
+        JUNK_REGION.test(marker);
       const articleRegion =
         !skip &&
         (name === "article" ||
           name === "main" ||
           isArticleContainer(name, attributes) ||
           parent?.article === true);
+      const preferredRegion = !skip && (sitePrefers(pageUrl, name, attributes) || parent?.preferred === true);
       stack.push({
         tag: name,
         skip,
         article: articleRegion,
+        preferred: preferredRegion,
         title: name === "title" && !skip,
         h1: name === "h1" && !skip,
         time: name === "time" && !skip,
       });
       if (BLOCK_TAGS.has(name) && !skip) {
+        if (preferredRegion) preferred += "\n";
         if (articleRegion) article += "\n";
         body += "\n";
       }
@@ -295,11 +318,39 @@ function walkHtml(html: string): Walked {
     if (stack.some((frame) => frame.title)) title += text;
     if (stack.some((frame) => frame.h1)) h1 += text;
     if (!time && stack.some((frame) => frame.time)) time += text;
+    if (inPreferred(stack)) preferred += text;
     if (inArticle(stack)) article += text;
     body += text;
   }
 
-  return { article, body, title, h1, time };
+  return { article, body, preferred, title, h1, time };
+}
+
+function inPreferred(stack: Frame[]): boolean {
+  return stack.some((frame) => frame.preferred);
+}
+
+function sitePrefers(pageUrl: string, name: string, attributes: Record<string, string>): boolean {
+  let host = "";
+  try {
+    host = new URL(pageUrl).hostname.replace(/^www\./, "").toLowerCase();
+  } catch {
+    return false;
+  }
+  const marker = `${attributes.class || ""} ${attributes.id || ""} ${attributes["data-component"] || ""} ${attributes["data-testid"] || ""}`;
+  if (host.endsWith("apnews.com")) return /RichTextStoryBody/i.test(marker);
+  if (host.endsWith("theonion.com")) return /entry-content|article__body|post-content/i.test(marker);
+  if (host.endsWith("bbc.com") || host.endsWith("bbc.co.uk")) {
+    return attributes["data-component"] === "text-block" || /article__body|ssrcss/i.test(marker);
+  }
+  if (host.endsWith("theguardian.com")) {
+    return /article-body|content__article-body|article-body-commercial|dcr-/i.test(marker);
+  }
+  if (host.endsWith("kathimerini.gr")) return name === "article" || /entry-content|article__body|story-body|post-content/i.test(marker);
+  if (host.endsWith("ertnews.gr") || host === "ert.gr" || host.endsWith(".ert.gr")) {
+    return name === "article" || /entry-content|article-content|post-content|story-body/i.test(marker);
+  }
+  return false;
 }
 
 function inSkip(stack: Frame[]): boolean {

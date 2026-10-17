@@ -32,6 +32,34 @@ describe("extractArticle", () => {
     expect(article.text).not.toContain("Home navigation");
     expect(article.publishedAt).toBe("2026-03-03T10:00:00.000Z");
   });
+
+  it("keeps the AP story body and the Onion article, not the menu or the cookie banner", () => {
+    const ap = extractArticle(
+      `<body>
+        <div class="NavMenu">World editors recommend more stories from the politics desk and the business desk today.</div>
+        <p>16, 2026, in San Diego.</p>
+        <div class="RichTextStoryBody">
+          <p>The coastal plant received a federal loan that will fund the restart, according to the filing released on Monday morning.</p>
+        </div>
+      </body>`,
+      "https://apnews.com/article/coastal-loan",
+    );
+    expect(ap.text).toContain("federal loan");
+    expect(ap.text).not.toContain("politics desk");
+    expect(ap.text).not.toContain("San Diego");
+
+    const onion = extractArticle(
+      `<body>
+        <div class="cookie-banner">We use cookies and similar technologies to measure visits. Accept all cookies to continue browsing this video page today.</div>
+        <div class="entry-content">
+          <p>The harbour board told the gulls to count their days and issued a written notice to every marina on the coast.</p>
+        </div>
+      </body>`,
+      "https://www.theonion.com/video/gulls",
+    );
+    expect(onion.text).toContain("harbour board");
+    expect(onion.text).not.toContain("cookies");
+  });
 });
 
 describe("fetchArticle", () => {

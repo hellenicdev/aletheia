@@ -1,3 +1,4 @@
+import { isSkippableFragment, stripCredits } from "../../shared/articleText";
 import { inferClaimType } from "../../shared/classify";
 import { applyEvidence, independentEvidence, type EvidenceItem } from "../../shared/citations";
 import { detectLanguage, languageMatches } from "../../shared/language";
@@ -12,7 +13,7 @@ import { claimImportance } from "../../shared/rank";
 import { resolveOutlet } from "../../shared/reputation";
 import { aggregateScore } from "../../shared/score";
 import { splitPastedTitle, splitSentences } from "../../shared/sentences";
-import { combineTone, passageTone } from "../../shared/tone";
+import { blendTone, combineTone, type Rhetoric } from "../../shared/tone";
 import type { AnalysisResult, ArticlePreview, Contradiction, SegmentResult, StageName } from "../../shared/types";
 import type { Env } from "./config";
 import { resolveConfig } from "./config";
@@ -154,7 +155,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     (segment) => isSearchable(segment.claimType) && !overBudget.has(segment.id),
   );
   const skippedForEvidence = toVerify.filter(
-    (segment) => searchEnabled && (evidence.get(segment.id)?.length ?? 0) === 0,
+    (segment) => searchEnabled && echoOnly.has(segment.id),
   );
   const withEvidence = toVerify.filter((segment) => !skippedForEvidence.includes(segment));
 
@@ -289,6 +290,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
           deadline,
         });
 
+  const draftById = new Map(segmented.segments.map((segment) => [segment.id, segment]));
   const outlet = resolveOutlet({
     domain: ingested.sourceDomain,
     genre: segmented.genre,
@@ -299,7 +301,8 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       label: segment.label,
       confidence: segment.confidence,
       hasValidSource: segment.sources.length > 0,
-      tone: passageTone(segment.text),
+      tone: blendTone(segment.text, rhetoricOf(segment.label, draftById.get(segment.id)?.claimType)),
+      inCoverage: !overBudget.has(segment.id),
     })),
     {
       contradictionCount: contradictions.length,
@@ -375,7 +378,7 @@ async function ingest(
     };
   }
 
-  let raw = normalizeWhitespace(input.text || "");
+  let raw = stripCredits(normalizeWhitespace(input.text || ""));
   let truncated = false;
   if (raw.length < LIMITS.minArticleChars) {
     throw new HttpError(400, "Paste a longer article. Very short text cannot be audited.");
@@ -416,7 +419,7 @@ async function segmentArticle(options: {
   genre: string | null;
 }> {
   const localLanguage = detectLanguage(options.text);
-  const spans = splitSentences(options.text);
+  const spans = uniqueSpans(splitSentences(options.text).filter((span) => !isSkippableFragment(span.text)));
   const ranked = spans
     .map((span, index) => ({ span, importance: claimImportance(span.text, options.title, index) }))
     .sort((a, b) => b.importance - a.importance || a.span.start - b.span.start);
@@ -566,6 +569,7 @@ async function judgeGroup(options: {
       options.group.map((segment) => ({
         id: segment.id,
         claim: segment.text,
+        context: surroundingParagraph(options.articleText, segment.start, segment.end),
         evidence: (options.evidence.get(segment.id) ?? []).map((item) => ({
           url: item.url,
           title: item.title,
@@ -606,6 +610,7 @@ async function judgeGroup(options: {
       uiLanguage: options.uiLanguage,
       articleDomain: options.articleDomain,
       articleText: options.articleText,
+      allowModelKnowledge: options.searchEnabled && (options.evidence.get(segment.id)?.length ?? 0) === 0,
     });
     results.set(segment.id, finishSegment(segment, applied));
   }
@@ -767,6 +772,30 @@ function remainingMs(deadline: number, cap: number): number {
 
 function isSearchable(claimType: ClaimType): boolean {
   return claimType === "checkable_factual" || claimType === "mixed";
+}
+
+function rhetoricOf(label: Label, claimType: ClaimType | undefined): Rhetoric {
+  if (label === "Rhetorical" || claimType === "rhetorical") return "rhetorical";
+  if (claimType === "mixed") return "loaded";
+  return "neutral";
+}
+
+function surroundingParagraph(article: string, start: number, end: number): string {
+  const from = Math.max(0, start - 320);
+  const to = Math.min(article.length, end + 320);
+  return article.slice(from, to).replace(/\s+/g, " ").trim();
+}
+
+function uniqueSpans(spans: { text: string; start: number; end: number }[]) {
+  const seen = new Set<string>();
+  const unique: typeof spans = [];
+  for (const span of spans) {
+    const key = span.text.replace(/\s+/g, " ").trim().toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(span);
+  }
+  return unique;
 }
 
 function dedupeEvidence(items: EvidenceItem[]): EvidenceItem[] {
