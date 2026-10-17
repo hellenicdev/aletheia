@@ -1,3 +1,4 @@
+import { cleanArticleText, proseScore } from "../../shared/articleText";
 import { scrapeArticle } from "./firecrawl";
 import { LIMITS } from "./limits";
 import { HttpError } from "./errors";
@@ -86,9 +87,9 @@ export function extractArticle(
     normalizeDate(walked.time) ||
     null;
 
-  const articleText = cleanupText(walked.article);
-  const bodyText = cleanupText(walked.body);
-  const text = articleText.length >= 80 ? articleText : bodyText;
+  const articleText = cleanArticleText(cleanupText(walked.article));
+  const bodyText = cleanArticleText(cleanupText(walked.body));
+  const text = proseScore(articleText) >= 12 ? articleText : bodyText;
 
   if (text.length < LIMITS.minArticleChars) {
     throw new HttpError(
@@ -120,10 +121,30 @@ export async function fetchArticle(
       apiKey: apiKey.trim(),
       fetchImpl,
     });
-    return { ...scraped, via: "firecrawl" };
+    const fromHtml = htmlBody(scraped.rawHtml, scraped.finalUrl);
+    const text =
+      fromHtml && proseScore(fromHtml) > proseScore(scraped.text) * 1.25 && proseScore(fromHtml) > proseScore(scraped.text) + 40
+        ? fromHtml
+        : scraped.text;
+    return {
+      title: scraped.title,
+      text: text.slice(0, LIMITS.maxArticleChars),
+      publishedAt: scraped.publishedAt,
+      finalUrl: scraped.finalUrl,
+      via: "firecrawl",
+    };
   }
   const direct = await fetchArticleDirect(rawUrl, fetchImpl);
   return { ...direct, via: "local" };
+}
+
+function htmlBody(html: string | null, pageUrl: string): string {
+  if (!html) return "";
+  try {
+    return extractArticle(html, pageUrl).text;
+  } catch {
+    return "";
+  }
 }
 
 async function fetchArticleDirect(

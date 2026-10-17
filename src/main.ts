@@ -110,12 +110,20 @@ app.innerHTML = `
       <section class="card stages" id="stages" hidden>
         <ol id="stage-list"></ol>
       </section>
+      <section class="card preview" id="extract-preview" hidden>
+        <p class="section-label" data-i18n="extracted"></p>
+        <p class="hint" data-i18n="extractedHint"></p>
+        <h2 id="preview-title"></h2>
+        <div class="article-body preview-body" id="preview-body"></div>
+      </section>
       <article class="card paper" id="paper" hidden>
         <div class="paper-head">
           <h2 id="article-title"></h2>
         </div>
         <p class="meta" id="article-meta"></p>
         <p class="banner" id="sample-banner" hidden data-i18n="sampleBanner"></p>
+        <p class="banner warn" id="search-banner" hidden></p>
+        <p class="banner warn" id="outlet-banner" hidden></p>
         <p class="banner" id="truncated-banner" hidden data-i18n="truncated"></p>
         <div class="article-body" id="article-body"></div>
       </article>
@@ -253,6 +261,8 @@ function currentStages(): Record<StageName, StageState> {
   return stageMemory;
 }
 
+const stageDetail: Partial<Record<StageName, string>> = {};
+
 const stageMemory: Record<StageName, StageState> = {
   ingest: "pending",
   segment: "pending",
@@ -262,11 +272,20 @@ const stageMemory: Record<StageName, StageState> = {
 };
 
 function resetStages() {
-  for (const stage of STAGES) stageMemory[stage] = "pending";
+  for (const stage of STAGES) {
+    stageMemory[stage] = "pending";
+    delete stageDetail[stage];
+  }
+  $<HTMLElement>("#extract-preview").hidden = true;
   renderStages(stageMemory);
 }
 
-function setStage(stage: StageName, status: "start" | "done") {
+function setStage(stage: StageName, status: "start" | "done" | "progress", done?: number, total?: number) {
+  if (status === "progress") {
+    if (done !== undefined && total !== undefined) stageDetail[stage] = `${done}/${total}`;
+    renderStages(stageMemory);
+    return;
+  }
   if (status === "start") {
     for (const name of STAGES) {
       if (stageMemory[name] === "active") stageMemory[name] = "done";
@@ -289,9 +308,10 @@ function renderStages(stages: Record<StageName, StageState>) {
     name.textContent = t(state.lang, STAGE_KEY[stage]);
     const status = document.createElement("span");
     status.className = "stage-state";
+    const progress = stageDetail[stage];
     const statusKey: MessageKey =
       stages[stage] === "active" ? "stageActive" : stages[stage] === "done" ? "stageDone" : "stagePending";
-    status.textContent = t(state.lang, statusKey);
+    status.textContent = progress && stages[stage] === "active" ? progress : t(state.lang, statusKey);
     item.append(dot, name, status);
     stageList.append(item);
   }
@@ -504,6 +524,19 @@ function renderArticle() {
   });
   $<HTMLElement>("#sample-banner").hidden = result.meta.model !== "sample";
   $<HTMLElement>("#truncated-banner").hidden = !result.truncated;
+  const searchBanner = $<HTMLElement>("#search-banner");
+  searchBanner.hidden = !result.meta.searchDegraded;
+  searchBanner.textContent = t(state.lang, "searchFailedBanner");
+  const outletBanner = $<HTMLElement>("#outlet-banner");
+  if (result.meta.outlet === "satire") {
+    outletBanner.hidden = false;
+    outletBanner.textContent = t(state.lang, "satireBanner");
+  } else if (result.meta.outlet === "low-credibility") {
+    outletBanner.hidden = false;
+    outletBanner.textContent = t(state.lang, "lowCredBanner");
+  } else {
+    outletBanner.hidden = true;
+  }
   const body = $<HTMLElement>("#article-body");
   body.innerHTML = renderHighlighted(result.article.text, result.segments);
   for (const button of body.querySelectorAll<HTMLButtonElement>(".claim")) {
@@ -633,7 +666,15 @@ function setPhase(phase: "idle" | "running" | "result") {
   layout.classList.toggle("is-running", phase === "running");
   rail.hidden = phase !== "result";
   stagesEl.hidden = phase !== "running";
+  if (phase !== "running") $<HTMLElement>("#extract-preview").hidden = true;
   if (phase !== "result") paper.hidden = true;
+}
+
+function showPreview(article: { title: string | null; text: string }) {
+  const box = $<HTMLElement>("#extract-preview");
+  box.hidden = false;
+  $<HTMLElement>("#preview-title").textContent = article.title || t(state.lang, "pasted");
+  $<HTMLElement>("#preview-body").textContent = article.text;
 }
 
 async function runSample(instant: boolean) {
@@ -691,7 +732,11 @@ async function runAnalysis() {
   renderCounts();
 
   try {
-    const result = await analyzeArticle(payload, (event) => setStage(event.stage, event.status));
+    const result = await analyzeArticle(
+      payload,
+      (event) => setStage(event.stage, event.status, event.done, event.total),
+      showPreview,
+    );
     for (const stage of STAGES) stageMemory[stage] = "done";
     showReport(result, false);
   } catch (error) {

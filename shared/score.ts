@@ -1,5 +1,6 @@
 import type { Label, UiLanguage } from "./labels";
 import { LABELS } from "./labels";
+import type { OutletKind } from "./reputation";
 import type { ScoreResult } from "./types";
 
 export const WEIGHTS = {
@@ -20,21 +21,27 @@ const MISLEADING_PENALTY = 6;
 const MAX_PENALTY = 36;
 const SEARCH_OFF_CAP = 68;
 const COMMENTARY_CAP = 64;
+const LOW_COVERAGE_CAP = 70;
+const SATIRE_CAP = 42;
+const LOW_CREDIBILITY_CAP = 44;
 const SOURCING_CAP_NO_SEARCH = 30;
 const CONTRADICTION_PENALTY = 30;
-const UNCERTAIN_FACTUAL = 42;
+const NEUTRAL_FACTUAL = 50;
 const COMMENTARY_FACTUAL = 60;
 
 export interface ScoreSegment {
   label: Label;
   confidence: number;
   hasValidSource: boolean;
+  tone?: number;
 }
 
 export interface ScoreOptions {
   contradictionCount: number;
   searchEnabled: boolean;
   uiLanguage: UiLanguage;
+  searchDegraded?: boolean;
+  outlet?: OutletKind;
 }
 
 export function emptyCounts(): Record<Label, number> {
@@ -78,7 +85,7 @@ export function aggregateScore(
     ["True", "False", "Misleading", "Unverifiable"].includes(segment.label),
   );
 
-  let factualAccuracy: number | null = null;
+  let measured: number | null = null;
   if (decided.length > 0) {
     let weight = 0;
     let weighted = 0;
@@ -87,8 +94,14 @@ export function aggregateScore(
       weight += confidence;
       weighted += confidence * FACT_POINTS[segment.label];
     }
-    factualAccuracy = round(weighted / weight);
+    measured = weighted / weight;
   }
+
+  const coverage = checkable.length === 0 ? 1 : decided.length / checkable.length;
+  const factualAccuracy =
+    checkable.length === 0
+      ? null
+      : round(measured === null ? NEUTRAL_FACTUAL : measured * coverage + NEUTRAL_FACTUAL * (1 - coverage));
 
   let sourcing: number | null = null;
   if (checkable.length > 0) {
@@ -97,22 +110,21 @@ export function aggregateScore(
     if (!options.searchEnabled) sourcing = Math.min(sourcing, SOURCING_CAP_NO_SEARCH);
   }
 
-  const toneNeutrality = round(
-    100 - (100 * counts.Rhetorical) / segments.length,
-  );
+  const tones = segments.map((segment) => segment.tone ?? 100);
+  const averageTone = tones.reduce((sum, value) => sum + value, 0) / tones.length;
+  const worstTone = Math.min(...tones);
+  const toneNeutrality = round(averageTone * 0.7 + worstTone * 0.3);
 
   const logicalConsistency =
     segments.length < 2
       ? 100
       : Math.max(0, 100 - options.contradictionCount * CONTRADICTION_PENALTY);
 
-  const hasUnverifiable = counts.Unverifiable > 0;
+  const outlet = options.outlet ?? "news";
   const factualBasis: ScoreResult["factualBasis"] =
-    factualAccuracy !== null ? "measured" : hasUnverifiable || checkable.length > 0 ? "uncertain" : "commentary";
+    checkable.length === 0 ? "commentary" : coverage < 0.6 || decided.length === 0 ? "uncertain" : "measured";
 
-  const factualForMix =
-    factualAccuracy ??
-    (factualBasis === "commentary" ? COMMENTARY_FACTUAL : UNCERTAIN_FACTUAL);
+  const factualForMix = factualAccuracy ?? (factualBasis === "commentary" ? COMMENTARY_FACTUAL : NEUTRAL_FACTUAL);
 
   const base =
     WEIGHTS.factual * factualForMix +
@@ -128,6 +140,9 @@ export function aggregateScore(
   let overall = clamp(round(base - penalty), 0, 100);
   if (factualBasis === "commentary") overall = Math.min(overall, COMMENTARY_CAP);
   if (!options.searchEnabled) overall = Math.min(overall, SEARCH_OFF_CAP);
+  if (checkable.length >= 4 && coverage < 0.4) overall = Math.min(overall, LOW_COVERAGE_CAP);
+  if (outlet === "satire") overall = Math.min(overall, SATIRE_CAP);
+  if (outlet === "low-credibility") overall = Math.min(overall, LOW_CREDIBILITY_CAP);
 
   const verdict = buildVerdict(
     {
@@ -135,6 +150,8 @@ export function aggregateScore(
       counts,
       factualBasis,
       searchEnabled: options.searchEnabled,
+      searchDegraded: options.searchDegraded === true,
+      outlet,
     },
     options.uiLanguage,
   );
@@ -157,60 +174,84 @@ function buildVerdict(
     counts: Record<Label, number>;
     factualBasis: ScoreResult["factualBasis"];
     searchEnabled: boolean;
+    searchDegraded: boolean;
+    outlet: OutletKind;
   },
   lang: UiLanguage,
 ): string {
-  const { overall, counts, factualBasis, searchEnabled } = input;
-  const checkable =
-    counts.True + counts.False + counts.Misleading + counts.Unverifiable;
-  let sentence: string;
+  const { overall, counts, factualBasis, searchEnabled, searchDegraded, outlet } = input;
+  const checked = counts.True + counts.False + counts.Misleading;
+  const checkable = checked + counts.Unverifiable;
+  const parts: string[] = [];
 
-  if (factualBasis === "commentary") {
-    sentence =
+  if (outlet === "satire") {
+    parts.push(
+      lang === "el"
+        ? `Το κείμενο βαθμολογείται με ${overall}/100 και είναι σάτιρα, όχι είδηση.`
+        : `The article scores ${overall}/100 and is satire, not news.`,
+    );
+  } else if (outlet === "low-credibility") {
+    parts.push(
+      lang === "el"
+        ? `Το κείμενο βαθμολογείται με ${overall}/100. Η πηγή έχει ιστορικό αναξιόπιστων ισχυρισμών.`
+        : `The article scores ${overall}/100. The outlet has a record of unreliable claims.`,
+    );
+  } else if (factualBasis === "commentary") {
+    parts.push(
       lang === "el"
         ? `Το κείμενο βαθμολογείται με ${overall}/100 και είναι κυρίως γνώμη ή σχόλιο, όχι σύνολο ελέγξιμων ισχυρισμών.`
-        : `The article scores ${overall}/100 and is mostly opinion or commentary, not a set of checkable claims.`;
-  } else if (counts.False > 0 && counts.False >= counts.True) {
-    sentence =
+        : `The article scores ${overall}/100 and is mostly opinion or commentary, not a set of checkable claims.`,
+    );
+  } else if (searchDegraded && checked === 0) {
+    parts.push(
       lang === "el"
-        ? counts.False === 1
-          ? `Το κείμενο βαθμολογείται με ${overall}/100 επειδή 1 ελέγξιμος ισχυρισμός έρχεται σε αντίθεση με τα τεκμήρια.`
-          : `Το κείμενο βαθμολογείται με ${overall}/100 επειδή ${counts.False} ελέγξιμοι ισχυρισμοί έρχονται σε αντίθεση με τα τεκμήρια.`
-        : `The article scores ${overall}/100 because ${counts.False} checkable ${enClaim(counts.False)} contradicted by the evidence.`;
-  } else if (counts.Misleading > 0 && counts.False === 0 && counts.Misleading >= counts.True) {
-    sentence =
-      lang === "el"
-        ? `Το κείμενο βαθμολογείται με ${overall}/100: η βασική αδυναμία είναι παραπλανητική πλαισίωση σε ${counts.Misleading} ${counts.Misleading === 1 ? "ισχυρισμό" : "ισχυρισμούς"}.`
-        : `The article scores ${overall}/100: the main weakness is misleading framing in ${counts.Misleading} ${counts.Misleading === 1 ? "claim" : "claims"}.`;
-  } else if (checkable > 0 && counts.Unverifiable * 2 >= checkable && counts.False === 0) {
-    sentence =
-      lang === "el"
-        ? `Το κείμενο βαθμολογείται με ${overall}/100 επειδή τα διαθέσιμα τεκμήρια δεν αρκούν για τους περισσότερους ελέγξιμους ισχυρισμούς.`
-        : `The article scores ${overall}/100 because the available evidence is not enough to settle most checkable claims.`;
-  } else if (overall >= 75 && counts.False === 0) {
-    sentence =
-      lang === "el"
-        ? `Το κείμενο βαθμολογείται με ${overall}/100 επειδή οι ελέγξιμοι ισχυρισμοί στηρίζονται σε μεγάλο βαθμό από τις παρατιθέμενες πηγές και το ύφος μένει συγκρατημένο.`
-        : `The article scores ${overall}/100 because its checkable claims are largely supported by the cited sources and the tone stays measured.`;
+        ? `Το κείμενο βαθμολογείται με ${overall}/100, αλλά αυτό δεν είναι κρίση αξιοπιστίας: η ζωντανή αναζήτηση απέτυχε.`
+        : `The article scores ${overall}/100, but that is not a credibility judgement: live search failed.`,
+    );
   } else {
-    sentence =
+    parts.push(
       lang === "el"
-        ? `Το κείμενο βαθμολογείται με ${overall}/100, με μεικτή εικόνα: ${elAdj(counts.True, "αληθής", "αληθείς")}, ${elAdj(counts.False, "ψευδής", "ψευδείς")} και ${elAdj(counts.Unverifiable, "μη επαληθεύσιμος", "μη επαληθεύσιμοι")} ισχυρισμοί.`
-        : `The article scores ${overall}/100, a mixed picture: ${counts.True} true, ${counts.False} false, and ${counts.Unverifiable} unverifiable claims.`;
+        ? `Το κείμενο βαθμολογείται με ${overall}/100.`
+        : `The article scores ${overall}/100.`,
+    );
   }
 
+  if (checkable > 0) {
+    parts.push(
+      lang === "el"
+        ? `Ελέγχθηκαν ${checked} από ${checkable} πραγματολογικούς ισχυρισμούς: ${elAdj(counts.True, "αληθής", "αληθείς")}, ${elAdj(counts.False, "ψευδής", "ψευδείς")} και ${elAdj(counts.Unverifiable, "μη επαληθεύσιμος", "μη επαληθεύσιμοι")}.`
+        : `${checked} of ${checkable} factual claims were checked (${counts.True} true, ${counts.False} false, ${counts.Misleading} misleading, ${counts.Unverifiable} unverifiable).`,
+    );
+  }
+  if (counts.Opinion > 0) {
+    parts.push(
+      lang === "el"
+        ? `${counts.Opinion} ${counts.Opinion === 1 ? "απόσπασμα χαρακτηρίστηκε γνώμη" : "αποσπάσματα χαρακτηρίστηκαν γνώμη"}.`
+        : `${counts.Opinion} ${counts.Opinion === 1 ? "passage is labelled opinion" : "passages are labelled opinion"}.`,
+    );
+  }
+  if (counts.Rhetorical > 0) {
+    parts.push(
+      lang === "el"
+        ? `${counts.Rhetorical} ${counts.Rhetorical === 1 ? "απόσπασμα είναι ρητορικό" : "αποσπάσματα είναι ρητορικά"}.`
+        : `${counts.Rhetorical} ${counts.Rhetorical === 1 ? "passage is rhetorical" : "passages are rhetorical"}.`,
+    );
+  }
+  if (searchDegraded && checked > 0) {
+    parts.push(
+      lang === "el"
+        ? "Μέρος της αναζήτησης απέτυχε, οπότε οι κενές παραπομπές δεν σημαίνουν επιβεβαίωση."
+        : "Part of the search failed, so missing citations are not a confirmation.",
+    );
+  }
   if (!searchEnabled) {
-    sentence +=
+    parts.push(
       lang === "el"
-        ? " Η ζωντανή αναζήτηση δεν ήταν διαθέσιμη, οπότε οι πραγματολογικές ετικέτες στηρίζονται μόνο στη γνώση του μοντέλου και δεν θεωρούνται επαληθευμένες."
-        : " Live web search was unavailable, so factual labels are model-knowledge-only and are not treated as verified.";
+        ? "Η ζωντανή αναζήτηση δεν ήταν διαθέσιμη, οπότε οι πραγματολογικές ετικέτες στηρίζονται μόνο στη γνώση του μοντέλου και δεν θεωρούνται επαληθευμένες."
+        : "Live web search was unavailable, so factual labels are model-knowledge-only and are not treated as verified.",
+    );
   }
-
-  return sentence;
-}
-
-function enClaim(count: number): string {
-  return count === 1 ? "claim is" : "claims are";
+  return parts.join(" ");
 }
 
 function elAdj(count: number, singular: string, plural: string): string {

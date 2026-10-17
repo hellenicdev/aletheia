@@ -33,7 +33,7 @@ async function probeLlm(env: Env, fetchImpl: typeof fetch): Promise<ProbeCheck> 
     const completion = await requestChat(
       { config: resolveConfig(env), apiKey, fetchImpl, maxTokens: 4096 },
       messages,
-      { dropResponseFormat: false, legacyMaxTokens: false },
+      { dropResponseFormat: false, legacyMaxTokens: false, dropReasoningEffort: false },
     );
     const shown = completion.texts[0] ?? null;
     let detail = shown

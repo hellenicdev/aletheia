@@ -75,6 +75,53 @@ describe("applyEvidence", () => {
   });
 });
 
+describe("independent evidence", () => {
+  it("rejects the article's own domain, social copies, and echoed snippets", () => {
+    const claim = "Sixteen people were rescued off the coast before dawn.";
+    const echo = applyEvidence({
+      label: "True",
+      confidence: 0.95,
+      explanation: "The page repeats the sentence.",
+      claimText: claim,
+      sourceUrls: ["https://www.theonion.com/story"],
+      evidence: [
+        {
+          url: "https://www.theonion.com/story",
+          title: "Satire",
+          snippet: "Sixteen people were rescued off the coast before dawn.",
+        },
+      ],
+      searchEnabled: true,
+      uiLanguage: "en",
+      articleDomain: "theonion.com",
+      articleText: claim,
+    });
+    expect(echo.label).toBe("Unverifiable");
+    expect(echo.explanation).toContain("not independently verified");
+
+    const wire = applyEvidence({
+      label: "True",
+      confidence: 0.9,
+      explanation: "A separate newsroom reported the rescue.",
+      claimText: claim,
+      sourceUrls: ["https://www.reuters.com/world/rescue"],
+      evidence: [
+        {
+          url: "https://www.reuters.com/world/rescue",
+          title: "Reuters",
+          snippet: "Coast guard crews brought sixteen people ashore after a night search.",
+        },
+      ],
+      searchEnabled: true,
+      uiLanguage: "en",
+      articleDomain: "apnews.com",
+      articleText: "A longer original article about the rescue operation and the crew.",
+    });
+    expect(wire.label).toBe("True");
+    expect(wire.sources).toHaveLength(1);
+  });
+});
+
 describe("canonicalUrl", () => {
   it("ignores a trailing slash and fragment", () => {
     expect(canonicalUrl("https://example.com/minutes/#vote")).toBe(

@@ -70,6 +70,31 @@ describe("searchWeb", () => {
   });
 });
 
+describe("searchWeb retries", () => {
+  it("backs off on HTTP 429 and then accepts the next response", async () => {
+    let calls = 0;
+    const fetchImpl: typeof fetch = async () => {
+      calls += 1;
+      if (calls === 1) return new Response("Consumed (req/min): 11, Remaining: 0", { status: 429 });
+      return new Response(
+        JSON.stringify({
+          success: true,
+          data: [{ url: "https://example.com/a", title: "A", description: "Recovered" }],
+        }),
+      );
+    };
+    const hits = await searchWeb({
+      apiKey: "k",
+      query: "retry after limit",
+      language: "en",
+      fetchImpl,
+      retryDelayMs: 0,
+    });
+    expect(calls).toBe(2);
+    expect(hits[0]?.snippet).toBe("Recovered");
+  });
+});
+
 describe("searchWeb failures", () => {
   it("includes the HTTP status and strips the key", async () => {
     const fetchImpl: typeof fetch = async () =>
@@ -122,8 +147,9 @@ describe("scrapeArticle", () => {
     });
 
     expect(payload).toMatchObject({
-      formats: ["markdown"],
+      formats: ["markdown", "html"],
       onlyMainContent: true,
+      excludeTags: expect.arrayContaining(["nav", "footer"]),
       url: "https://news.example/harbour",
     });
     expect(JSON.stringify(payload)).not.toContain("secret-firecrawl-key");

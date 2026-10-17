@@ -1,5 +1,7 @@
 import type { EvidenceMode, Label, UiLanguage } from "./labels";
 import { unverifiableExplanation } from "./messages";
+import { tokenOverlap } from "./rank";
+import { hostOf, isSocialHost, isUnreliableHost, sameOutlet } from "./reputation";
 import type { SourceCitation } from "./types";
 
 export interface EvidenceItem {
@@ -35,6 +37,35 @@ const DECIDED = new Set<Label>(["True", "False", "Misleading"]);
  * a surviving citation is downgraded to Unverifiable. With search disabled,
  * sources are always empty and recent or numeric claims are not treated as verified.
  */
+export function independentEvidence(
+  items: EvidenceItem[],
+  options: { articleDomain?: string | null; articleText?: string; claimText: string },
+): EvidenceItem[] {
+  return items.filter((item) => isIndependent(item, options));
+}
+
+export function isIndependent(
+  item: EvidenceItem,
+  options: { articleDomain?: string | null; articleText?: string; claimText: string },
+): boolean {
+  if (sameOutlet(item.url, options.articleDomain ?? null)) return false;
+  if (isSocialHost(item.url)) return false;
+  if (isUnreliableHost(item.url)) return false;
+  if (isEcho(item.snippet, options.claimText, options.articleText ?? "", item.url)) return false;
+  return true;
+}
+
+const SYNDICATORS = ["yahoo.com", "inkl.com", "msn.com", "apple.news", "flipboard.com", "smartnews.com", "news.google.com"];
+
+/** A snippet copied from this article, or a social/wire repost of the claim, is not independent. */
+export function isEcho(snippet: string, claim: string, articleText: string, url = ""): boolean {
+  const compact = snippet.replace(/\s+/g, " ").trim();
+  if (compact.length >= 48 && articleText.includes(compact.slice(0, 48))) return true;
+  const repeatsClaim = tokenOverlap(claim, compact) >= 0.8 && compact.length <= claim.length + 40;
+  if (!repeatsClaim || !url) return false;
+  return isSocialHost(url) || SYNDICATORS.some((host) => (hostOf(url) ?? "") === host || (hostOf(url) ?? "").endsWith(`.${host}`));
+}
+
 export function applyEvidence(input: {
   label: Label;
   confidence: number;
@@ -44,6 +75,8 @@ export function applyEvidence(input: {
   evidence: EvidenceItem[];
   searchEnabled: boolean;
   uiLanguage: UiLanguage;
+  articleDomain?: string | null;
+  articleText?: string;
 }): AppliedEvidence {
   const confidence = clampConfidence(input.confidence);
 
@@ -61,7 +94,12 @@ export function applyEvidence(input: {
     };
   }
 
-  const byUrl = new Map(input.evidence.map((item) => [canonicalUrl(item.url), item]));
+  const usable = independentEvidence(input.evidence, {
+    articleDomain: input.articleDomain,
+    articleText: input.articleText,
+    claimText: input.claimText,
+  });
+  const byUrl = new Map(usable.map((item) => [canonicalUrl(item.url), item]));
   const sources: SourceCitation[] = [];
   const seen = new Set<string>();
   for (const url of input.sourceUrls) {
@@ -77,13 +115,12 @@ export function applyEvidence(input: {
   }
 
   if (DECIDED.has(input.label) && sources.length === 0) {
+    const reason =
+      input.evidence.length === 0 ? "no-evidence" : usable.length > 0 ? "uncited" : "not-independent";
     return {
       label: "Unverifiable",
       confidence: Math.min(confidence, 0.45),
-      explanation: unverifiableExplanation(
-        input.uiLanguage,
-        input.evidence.length === 0 ? "no-evidence" : "uncited",
-      ),
+      explanation: unverifiableExplanation(input.uiLanguage, reason),
       sources: [],
       evidenceMode: "web-search",
     };

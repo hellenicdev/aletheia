@@ -241,7 +241,7 @@ h1 {
   box-shadow: var(--shadow);
 }
 
-.composer, .paper, .scorecard, .detail, .counts, .legend, .method, .stages {
+.composer, .paper, .scorecard, .detail, .counts, .legend, .method, .stages, .preview {
   padding: 16px 18px 18px;
 }
 
@@ -382,6 +382,23 @@ textarea { min-height: 220px; resize: vertical; line-height: 1.55; }
   border: 1px solid rgba(227, 179, 65, 0.35);
   color: #f3e2b0;
 }
+
+.banner.warn {
+  background: rgba(214, 92, 92, 0.12);
+  border-color: rgba(214, 92, 92, 0.45);
+  color: #f6d0d0;
+}
+
+.hint { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+
+.preview h2 {
+  margin: 12px 0 0;
+  font-family: var(--serif);
+  font-size: 26px;
+  line-height: 1.2;
+}
+
+.preview-body { max-height: 280px; overflow: auto; }
 
 .article-body {
   margin: 16px 0 0;

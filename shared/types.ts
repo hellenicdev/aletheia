@@ -4,6 +4,7 @@ import type {
   Label,
   UiLanguage,
 } from "./labels";
+import type { OutletKind } from "./reputation";
 
 export interface SourceCitation {
   url: string;
@@ -66,12 +67,22 @@ export interface AnalysisResult {
     requestId: string;
     extraction: "pasted" | "firecrawl" | "local";
     warnings: string[];
+    outlet: OutletKind;
   };
+}
+
+export interface ArticlePreview {
+  title: string | null;
+  text: string;
+  sourceUrl: string | null;
+  publishedAt: string | null;
 }
 
 export type StageName = "ingest" | "segment" | "evidence" | "verify" | "score";
 
 export interface StageEvent {
   stage: StageName;
-  status: "start" | "done";
+  status: "start" | "done" | "progress";
+  done?: number;
+  total?: number;
 }

@@ -14,7 +14,14 @@ export function rhetoricalExplanation(lang: UiLanguage): string {
 
 export function unverifiableExplanation(
   lang: UiLanguage,
-  reason: "no-evidence" | "weak-evidence" | "uncited" | "search-failed" | "budget" | "model-only",
+  reason:
+    | "no-evidence"
+    | "weak-evidence"
+    | "uncited"
+    | "search-failed"
+    | "budget"
+    | "model-only"
+    | "not-independent",
 ): string {
   const el: Record<typeof reason, string> = {
     "no-evidence":
@@ -29,6 +36,8 @@ export function unverifiableExplanation(
       "Ο ισχυρισμός δεν ελέγχθηκε σε ζωντανή αναζήτηση σε αυτό το αίτημα, επειδή ξεπεράστηκε το όριο τεκμηρίων.",
     "model-only":
       "Χωρίς ζωντανή αναζήτηση ο ισχυρισμός μένει μη επαληθεύσιμος. Δεν παρατίθεται πηγή.",
+    "not-independent":
+      "Οι μόνες σελίδες που βρέθηκαν είναι το ίδιο το άρθρο ή αντίγραφά του, οπότε ο ισχυρισμός δεν επαληθεύεται ανεξάρτητα.",
   };
   const en: Record<typeof reason, string> = {
     "no-evidence":
@@ -43,6 +52,8 @@ export function unverifiableExplanation(
       "This claim was not checked against live search in this request because the evidence budget was reached.",
     "model-only":
       "Without live web search this claim stays unverified. No source is cited.",
+    "not-independent":
+      "The only pages found were this article or copies of it, so the claim is not independently verified.",
   };
   return lang === "el" ? el[reason] : en[reason];
 }

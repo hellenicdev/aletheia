@@ -50,13 +50,15 @@ export async function completeJson<T>(options: {
   fetchImpl: typeof fetch;
   maxTokens?: number;
   attempts?: number;
+  reasoningEffort?: "low" | "medium" | "high";
+  timeoutMs?: number;
 }): Promise<T> {
   let hint = "";
   let lastDetail = "invalid JSON";
   let lastField: string | null = null;
   let lastReason: string | null = null;
   let lastPreview = "";
-  const attempts = options.attempts ?? 3;
+  const attempts = options.attempts ?? 2;
   for (let attempt = 0; attempt < attempts; attempt++) {
     const messages: ChatMessage[] = [
       { role: "system", content: options.system },
@@ -71,6 +73,7 @@ export async function completeJson<T>(options: {
     const completion = await requestChat(options, messages, {
       dropResponseFormat: attempt > 0,
       legacyMaxTokens: false,
+      dropReasoningEffort: false,
     });
     const candidates = completion.texts.length
       ? completion.texts
@@ -111,9 +114,11 @@ export async function requestChat(
     apiKey: string;
     fetchImpl: typeof fetch;
     maxTokens?: number;
+    reasoningEffort?: "low" | "medium" | "high";
+    timeoutMs?: number;
   },
   messages: ChatMessage[],
-  flags: { dropResponseFormat: boolean; legacyMaxTokens: boolean },
+  flags: { dropResponseFormat: boolean; legacyMaxTokens: boolean; dropReasoningEffort: boolean },
 ): Promise<ModelCompletion> {
   const budget = options.maxTokens ?? COMPLETION_TOKEN_BUDGET;
   const body: Record<string, unknown> = {
@@ -124,6 +129,9 @@ export async function requestChat(
   if (flags.legacyMaxTokens) body.max_tokens = budget;
   else body.max_completion_tokens = budget;
   if (!flags.dropResponseFormat) body.response_format = { type: "json_object" };
+  if (options.reasoningEffort && !flags.dropReasoningEffort) {
+    body.reasoning_effort = options.reasoningEffort;
+  }
 
   let response: Response;
   try {
@@ -134,7 +142,7 @@ export async function requestChat(
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(45_000),
+      signal: AbortSignal.timeout(options.timeoutMs ?? 22_000),
     });
   } catch (error) {
     throw loggedUpstream("llm", null, errorText(error), options.apiKey);
@@ -150,6 +158,15 @@ export async function requestChat(
     ) {
       console.error(`llm: HTTP ${response.status} ${safe}`);
       return requestChat(options, messages, { ...flags, legacyMaxTokens: true });
+    }
+    if (
+      response.status === 400 &&
+      /reasoning_effort/i.test(safe) &&
+      !flags.dropReasoningEffort &&
+      Boolean(options.reasoningEffort)
+    ) {
+      console.error(`llm: HTTP ${response.status} ${safe}`);
+      return requestChat(options, messages, { ...flags, dropReasoningEffort: true });
     }
     if (
       response.status === 400 &&

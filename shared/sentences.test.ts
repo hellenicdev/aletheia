@@ -17,6 +17,17 @@ describe("splitSentences", () => {
     ]);
   });
 
+  it("does not split domains, ranks, or abbreviations", () => {
+    const text =
+      "Read more at kathimerini.gr today. Coast Guard Lt. Santiago Tamburini led the rescue. See https://www.bbc.com/news later.";
+    const parts = splitSentences(text).map((span) => span.text);
+    expect(parts).toEqual([
+      "Read more at kathimerini.gr today.",
+      "Coast Guard Lt. Santiago Tamburini led the rescue.",
+      "See https://www.bbc.com/news later.",
+    ]);
+  });
+
   it("returns offsets that match the source", () => {
     const text = "First claim here. Second claim here.";
     for (const span of splitSentences(text)) {

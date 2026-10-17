@@ -229,6 +229,7 @@ export function buildSample(lang: UiLanguage): AnalysisResult {
       requestId: "sample",
       extraction: "pasted",
       warnings: [],
+      outlet: "news",
     },
   };
 }

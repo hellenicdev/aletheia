@@ -1,4 +1,4 @@
-import type { AnalysisResult, StageEvent } from "../shared/types";
+import type { AnalysisResult, ArticlePreview, StageEvent } from "../shared/types";
 import { BACKEND_URL } from "./config";
 
 export interface Health {
@@ -21,6 +21,7 @@ export async function fetchHealth(): Promise<Health | null> {
 export async function analyzeArticle(
   body: { text?: string; url?: string; uiLanguage: "en" | "el" },
   onStage: (event: StageEvent) => void,
+  onPreview?: (article: ArticlePreview) => void,
 ): Promise<AnalysisResult> {
   const response = await fetch(`${trimSlash(BACKEND_URL)}/api/analyze`, {
     method: "POST",
@@ -59,6 +60,7 @@ export async function analyzeArticle(
       const parsed = parseEvent(part);
       if (!parsed) continue;
       if (parsed.event === "stage") onStage(parsed.data as StageEvent);
+      if (parsed.event === "preview") onPreview?.(parsed.data as ArticlePreview);
       if (parsed.event === "result") result = parsed.data as AnalysisResult;
       if (parsed.event === "error") {
         const data = parsed.data as { message?: string };

@@ -1,5 +1,5 @@
 import { inferClaimType } from "../../shared/classify";
-import { applyEvidence, type EvidenceItem } from "../../shared/citations";
+import { applyEvidence, independentEvidence, type EvidenceItem } from "../../shared/citations";
 import { detectLanguage, languageMatches } from "../../shared/language";
 import type { ClaimType, DetectedLanguage, Label, UiLanguage } from "../../shared/labels";
 import { CLAIM_TYPES, LABELS, isUiLanguage } from "../../shared/labels";
@@ -8,9 +8,12 @@ import {
   rhetoricalExplanation,
   unverifiableExplanation,
 } from "../../shared/messages";
+import { claimImportance } from "../../shared/rank";
+import { resolveOutlet } from "../../shared/reputation";
 import { aggregateScore } from "../../shared/score";
-import { alignSegments, splitPastedTitle } from "../../shared/sentences";
-import type { AnalysisResult, Contradiction, SegmentResult, StageName } from "../../shared/types";
+import { splitPastedTitle, splitSentences } from "../../shared/sentences";
+import { combineTone, passageTone } from "../../shared/tone";
+import type { AnalysisResult, ArticlePreview, Contradiction, SegmentResult, StageName } from "../../shared/types";
 import type { Env } from "./config";
 import { resolveConfig } from "./config";
 import { HttpError, UpstreamError } from "./errors";
@@ -40,8 +43,10 @@ export interface AnalyzeInput {
 export interface AnalyzeDeps {
   env: Env;
   fetchImpl?: typeof fetch;
-  onStage?: (stage: StageName, status: "start" | "done") => void;
+  onStage?: (stage: StageName, status: "start" | "done" | "progress", done?: number, total?: number) => void;
+  onPreview?: (article: ArticlePreview) => void;
   requestId?: string;
+  budgetMs?: number;
 }
 
 interface DraftSegment {
@@ -51,6 +56,7 @@ interface DraftSegment {
   end: number;
   claimType: ClaimType;
   note: string;
+  importance: number;
 }
 
 export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<AnalysisResult> {
@@ -64,20 +70,30 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   const warnings: string[] = [];
   const llmKey = deps.env.OPENAI_API_KEY?.trim() ?? "";
   const searchKey = deps.env.FIRECRAWL_API_KEY?.trim() ?? "";
-  const stage = (name: StageName, status: "start" | "done") => deps.onStage?.(name, status);
+  const deadline = Date.now() + (deps.budgetMs ?? LIMITS.analysisDeadlineMs);
+  const stage = (name: StageName, status: "start" | "done" | "progress", done?: number, total?: number) =>
+    deps.onStage?.(name, status, done, total);
 
   stage("ingest", "start");
-  const ingested = await ingest(input, fetchImpl, searchKey);
+  const ingested = await ingest(input, fetchImpl, searchKey, warnings);
   stage("ingest", "done");
+  deps.onPreview?.({
+    title: ingested.title,
+    text: ingested.text,
+    sourceUrl: ingested.sourceUrl,
+    publishedAt: ingested.publishedAt,
+  });
 
   stage("segment", "start");
   const segmented = await segmentArticle({
     text: ingested.text,
+    title: ingested.title,
     uiLanguage,
     config,
     apiKey: llmKey,
     fetchImpl,
     warnings,
+    deadline,
   });
   stage("segment", "done");
 
@@ -87,26 +103,47 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
 
   stage("evidence", "start");
   const searchable = segmented.segments.filter((segment) => isSearchable(segment.claimType));
-  const budgeted = searchable.slice(0, LIMITS.maxSearches);
-  const overBudget = new Set(searchable.slice(LIMITS.maxSearches).map((segment) => segment.id));
+  const budgeted = [...searchable]
+    .sort((a, b) => b.importance - a.importance || a.start - b.start)
+    .slice(0, LIMITS.maxSearches);
+  const budgetedIds = new Set(budgeted.map((segment) => segment.id));
+  const overBudget = new Set(searchable.filter((segment) => !budgetedIds.has(segment.id)).map((segment) => segment.id));
+  const echoOnly = new Set<string>();
 
   if (searchEnabled && searchKey) {
-    const queries = await buildQueries(budgeted, config, llmKey, fetchImpl, warnings);
+    const queries = await buildQueries(budgeted, config, llmKey, fetchImpl, warnings, deadline);
+    let finishedSearches = 0;
     for (const segment of budgeted) {
+      if (Date.now() > deadline) {
+        remember(warnings, new Error("analysis deadline reached before search finished"), "search");
+        searchDegraded = true;
+        evidence.set(segment.id, []);
+        continue;
+      }
       const query = queries.get(segment.id) || segment.text.slice(0, 180);
       try {
-        const hits = await searchWeb({
-          apiKey: searchKey,
-          query,
-          language: segmented.detectedLanguage,
-          fetchImpl,
+        const hits = dedupeEvidence(
+          await searchWeb({
+            apiKey: searchKey,
+            query,
+            language: segmented.detectedLanguage,
+            fetchImpl,
+          }),
+        );
+        const independent = independentEvidence(hits, {
+          articleDomain: ingested.sourceDomain,
+          articleText: ingested.text,
+          claimText: segment.text,
         });
-        evidence.set(segment.id, dedupeEvidence(hits));
+        if (hits.length > 0 && independent.length === 0) echoOnly.add(segment.id);
+        evidence.set(segment.id, independent);
       } catch (error) {
         remember(warnings, error, "search");
         searchDegraded = true;
         evidence.set(segment.id, []);
       }
+      finishedSearches += 1;
+      stage("evidence", "progress", finishedSearches, budgeted.length);
     }
   }
   stage("evidence", "done");
@@ -122,7 +159,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   const withEvidence = toVerify.filter((segment) => !skippedForEvidence.includes(segment));
 
   for (const segment of skippedForEvidence) {
-    const failed = searchDegraded && searchEnabled;
+    const failed = searchDegraded && searchEnabled && !echoOnly.has(segment.id);
     verified.set(
       segment.id,
       finishSegment(segment, {
@@ -130,7 +167,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
         confidence: 0.35,
         explanation: unverifiableExplanation(
           uiLanguage,
-          failed ? "search-failed" : "no-evidence",
+          echoOnly.has(segment.id) ? "not-independent" : failed ? "search-failed" : "no-evidence",
         ),
         sources: [],
         evidenceMode: searchEnabled ? "web-search" : "model-knowledge-only",
@@ -138,7 +175,17 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     );
   }
 
-  for (const group of chunk(withEvidence, 4)) {
+  const groups = chunk(withEvidence, 4);
+  await Promise.all(
+    groups.map(async (group, index) => {
+    if (Date.now() > deadline) {
+      remember(warnings, new Error("analysis deadline reached before verification finished"), "llm");
+      for (const segment of group) {
+        verified.set(segment.id, unverifiedSegment(segment, uiLanguage, searchEnabled, "weak-evidence"));
+      }
+      return;
+    }
+    stage("verify", index === 0 ? "start" : "progress", index, groups.length);
     try {
       const judged = await judgeGroup({
         group,
@@ -148,6 +195,10 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
         config,
         apiKey: llmKey,
         fetchImpl,
+        deadline,
+        publishedAt: ingested.publishedAt,
+        articleDomain: ingested.sourceDomain,
+        articleText: ingested.text,
       });
       for (const [id, result] of judged) verified.set(id, result);
     } catch (error) {
@@ -166,11 +217,30 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
         );
       }
     }
-  }
+    }),
+  );
 
   for (const segment of segmented.segments) {
     if (verified.has(segment.id)) continue;
     if (overBudget.has(segment.id)) {
+      if (segment.claimType === "opinion" || segment.claimType === "rhetorical") {
+        const opinion = segment.claimType === "opinion";
+        verified.set(
+          segment.id,
+          finishSegment(segment, {
+            label: opinion ? "Opinion" : "Rhetorical",
+            confidence: 0.7,
+            explanation: acceptNote(
+              segment.note,
+              uiLanguage,
+              opinion ? opinionExplanation(uiLanguage) : rhetoricalExplanation(uiLanguage),
+            ),
+            sources: [],
+            evidenceMode: "not-applicable",
+          }),
+        );
+        continue;
+      }
       verified.set(
         segment.id,
         finishSegment(segment, {
@@ -206,25 +276,37 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     .map((segment) => verified.get(segment.id))
     .filter((segment): segment is SegmentResult => Boolean(segment));
 
-  const contradictions = await findContradictions({
-    segments: ordered,
-    uiLanguage,
-    config,
-    apiKey: llmKey,
-    fetchImpl,
-    warnings,
-  });
+  const contradictions =
+    Date.now() > deadline - 12_000
+      ? []
+      : await findContradictions({
+          segments: ordered,
+          uiLanguage,
+          config,
+          apiKey: llmKey,
+          fetchImpl,
+          warnings,
+          deadline,
+        });
 
+  const outlet = resolveOutlet({
+    domain: ingested.sourceDomain,
+    genre: segmented.genre,
+    tone: combineTone(ordered.map((segment) => segment.text)),
+  });
   const score = aggregateScore(
     ordered.map((segment) => ({
       label: segment.label,
       confidence: segment.confidence,
       hasValidSource: segment.sources.length > 0,
+      tone: passageTone(segment.text),
     })),
     {
       contradictionCount: contradictions.length,
       searchEnabled,
+      searchDegraded,
       uiLanguage,
+      outlet,
     },
   );
   stage("score", "done");
@@ -241,7 +323,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     segments: ordered,
     score,
     contradictions,
-    truncated: segmented.truncated,
+    truncated: segmented.truncated || ingested.truncated,
     meta: {
       searchEnabled,
       searchDegraded,
@@ -250,11 +332,17 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       requestId,
       extraction: ingested.extraction,
       warnings,
+      outlet,
     },
   };
 }
 
-async function ingest(input: AnalyzeInput, fetchImpl: typeof fetch, firecrawlKey?: string) {
+async function ingest(
+  input: AnalyzeInput,
+  fetchImpl: typeof fetch,
+  firecrawlKey: string | undefined,
+  warnings: string[],
+) {
   const hasText = typeof input.text === "string" && input.text.trim().length > 0;
   const hasUrl = typeof input.url === "string" && input.url.trim().length > 0;
   if (!hasText && !hasUrl) {
@@ -283,15 +371,19 @@ async function ingest(input: AnalyzeInput, fetchImpl: typeof fetch, firecrawlKey
       sourceUrl: extracted.finalUrl,
       publishedAt: extracted.publishedAt,
       extraction: extracted.via,
+      truncated: false,
     };
   }
 
-  const raw = normalizeWhitespace(input.text || "");
+  let raw = normalizeWhitespace(input.text || "");
+  let truncated = false;
   if (raw.length < LIMITS.minArticleChars) {
     throw new HttpError(400, "Paste a longer article. Very short text cannot be audited.");
   }
   if (raw.length > LIMITS.maxArticleChars) {
-    throw new HttpError(413, `Articles are limited to ${LIMITS.maxArticleChars} characters.`);
+    raw = raw.slice(0, LIMITS.maxArticleChars);
+    truncated = true;
+    warnings.push(`llm: pasted text was truncated to ${LIMITS.maxArticleChars} characters`);
   }
   const split = splitPastedTitle(raw);
   if (split.body.length < LIMITS.minArticleChars) {
@@ -299,69 +391,89 @@ async function ingest(input: AnalyzeInput, fetchImpl: typeof fetch, firecrawlKey
   }
   return {
     title: split.title,
-    text: split.body,
+    text: split.body.slice(0, LIMITS.maxArticleChars),
     sourceDomain: null,
     sourceUrl: null,
     publishedAt: null,
     extraction: "pasted" as const,
+    truncated,
   };
 }
 
 async function segmentArticle(options: {
   text: string;
+  title: string | null;
   uiLanguage: UiLanguage;
   config: ReturnType<typeof resolveConfig>;
   apiKey: string;
   fetchImpl: typeof fetch;
   warnings: string[];
-}): Promise<{ segments: DraftSegment[]; detectedLanguage: DetectedLanguage; truncated: boolean }> {
+  deadline: number;
+}): Promise<{
+  segments: DraftSegment[];
+  detectedLanguage: DetectedLanguage;
+  truncated: boolean;
+  genre: string | null;
+}> {
   const localLanguage = detectLanguage(options.text);
-  let proposed: { text: string; claimType: ClaimType; note: string }[] = [];
-  let detected: DetectedLanguage = localLanguage;
-
-  try {
-    const parsed = await completeJson({
-      config: options.config,
-      apiKey: options.apiKey,
-      fetchImpl: options.fetchImpl,
-      system: segmentSystem(options.uiLanguage),
-      user: segmentUser(options.text, options.uiLanguage),
-      validate: validateSegments,
-    });
-    proposed = parsed.segments;
-    detected = localLanguage === "other" ? parsed.detectedLanguage : localLanguage;
-  } catch (error) {
-    if (isModelAuthError(error)) throw error;
-    remember(options.warnings, error, "llm");
-  }
-
-  const spans = alignSegments(
-    options.text,
-    proposed.map((segment) => ({ text: segment.text })),
-  );
-  let truncated = spans.length > LIMITS.maxSegments;
-  const limited = spans.slice(0, LIMITS.maxSegments);
-  const segments = limited.map((span, index) => {
-    const match = proposed.find((item) => item.text.trim() === span.text.trim());
-    return {
-      id: `s${index + 1}`,
-      text: span.text,
-      start: span.start,
-      end: span.end,
-      claimType: match?.claimType ?? inferClaimType(span.text),
-      note: match?.note ?? "",
-    };
-  });
-
-  if (segments.length === 0) {
+  const spans = splitSentences(options.text);
+  const ranked = spans
+    .map((span, index) => ({ span, importance: claimImportance(span.text, options.title, index) }))
+    .sort((a, b) => b.importance - a.importance || a.span.start - b.span.start);
+  const truncated = ranked.length > LIMITS.maxSegments;
+  const kept = ranked.slice(0, LIMITS.maxSegments).sort((a, b) => a.span.start - b.span.start);
+  const drafts = kept.map((item, index) => ({
+    id: `s${index + 1}`,
+    text: item.span.text,
+    start: item.span.start,
+    end: item.span.end,
+    claimType: inferClaimType(item.span.text),
+    note: "",
+    importance: item.importance,
+  }));
+  if (drafts.length === 0) {
     throw new HttpError(422, "The article could not be split into claims.");
   }
-  return { segments, detectedLanguage: detected, truncated };
+
+  let detected: DetectedLanguage = localLanguage;
+  let genre: string | null = null;
+  if (Date.now() < options.deadline - 8_000) {
+    try {
+      const parsed = await completeJson({
+        config: options.config,
+        apiKey: options.apiKey,
+        fetchImpl: options.fetchImpl,
+        system: segmentSystem(options.uiLanguage),
+        user: segmentUser(
+          drafts.map((segment) => ({ id: segment.id, text: segment.text })),
+          options.uiLanguage,
+        ),
+        validate: validateSegments,
+        reasoningEffort: "low",
+        maxTokens: 4096,
+        timeoutMs: remainingMs(options.deadline, 22_000),
+      });
+      genre = parsed.genre;
+      detected = localLanguage === "other" ? parsed.detectedLanguage : localLanguage;
+      const byId = new Map(parsed.segments.map((segment) => [segment.id, segment]));
+      for (const draft of drafts) {
+        const match = byId.get(draft.id);
+        if (!match) continue;
+        draft.claimType = match.claimType;
+        draft.note = match.note;
+      }
+    } catch (error) {
+      if (isModelAuthError(error)) throw error;
+      remember(options.warnings, error, "llm");
+    }
+  }
+  return { segments: drafts, detectedLanguage: detected, truncated, genre };
 }
 
 function validateSegments(data: unknown): {
   detectedLanguage: DetectedLanguage;
-  segments: { text: string; claimType: ClaimType; note: string }[];
+  genre: string | null;
+  segments: { id: string; claimType: ClaimType; note: string }[];
 } {
   if (!isRecord(data)) throw new Error("segment payload must be an object");
   const detectedLanguage = expectOneOf(
@@ -369,18 +481,22 @@ function validateSegments(data: unknown): {
     ["en", "el", "other"] as const,
     "detectedLanguage",
   );
+  const genre =
+    typeof data.genre === "string" && ["news", "opinion", "satire", "unreliable"].includes(data.genre)
+      ? data.genre
+      : null;
   if (!Array.isArray(data.segments) || data.segments.length === 0) {
     throw new Error("segments must be a non-empty array");
   }
   const segments = data.segments.map((item, index) => {
     if (!isRecord(item)) throw new Error(`segment ${index} must be an object`);
     return {
-      text: expectString(item.text, `segment ${index} text`),
+      id: expectString(item.id, `segment ${index} id`),
       claimType: expectOneOf(item.claimType, CLAIM_TYPES, `segment ${index} claimType`),
-      note: typeof item.note === "string" ? item.note.trim().slice(0, 500) : "",
+      note: typeof item.note === "string" ? item.note.trim().slice(0, 240) : "",
     };
   });
-  return { detectedLanguage, segments };
+  return { detectedLanguage, genre, segments };
 }
 
 async function buildQueries(
@@ -389,9 +505,10 @@ async function buildQueries(
   apiKey: string,
   fetchImpl: typeof fetch,
   warnings: string[],
+  deadline: number,
 ): Promise<Map<string, string>> {
   const queries = new Map<string, string>();
-  if (segments.length === 0) return queries;
+  if (segments.length === 0 || Date.now() > deadline - 8_000) return queries;
   try {
     const parsed = await completeJson({
       config,
@@ -400,6 +517,9 @@ async function buildQueries(
       system: querySystem(),
       user: queryUser(segments.map((segment) => ({ id: segment.id, text: segment.text }))),
       validate: (data) => validateQueries(data, new Set(segments.map((segment) => segment.id))),
+      reasoningEffort: "low",
+      maxTokens: 2048,
+      timeoutMs: remainingMs(deadline, 18_000),
     });
     for (const item of parsed) queries.set(item.id, item.query);
   } catch (error) {
@@ -431,6 +551,10 @@ async function judgeGroup(options: {
   config: ReturnType<typeof resolveConfig>;
   apiKey: string;
   fetchImpl: typeof fetch;
+  deadline: number;
+  publishedAt: string | null;
+  articleDomain: string | null;
+  articleText: string;
 }): Promise<Map<string, SegmentResult>> {
   const ids = new Set(options.group.map((segment) => segment.id));
   const parsed = await completeJson({
@@ -448,8 +572,11 @@ async function judgeGroup(options: {
           snippet: item.snippet,
         })),
       })),
+      options.publishedAt,
     ),
     validate: (data) => validateVerdicts(data, ids, options.uiLanguage),
+    reasoningEffort: "medium",
+    timeoutMs: remainingMs(options.deadline, 22_000),
   });
 
   const results = new Map<string, SegmentResult>();
@@ -477,6 +604,8 @@ async function judgeGroup(options: {
       evidence: options.evidence.get(segment.id) ?? [],
       searchEnabled: options.searchEnabled,
       uiLanguage: options.uiLanguage,
+      articleDomain: options.articleDomain,
+      articleText: options.articleText,
     });
     results.set(segment.id, finishSegment(segment, applied));
   }
@@ -522,6 +651,7 @@ async function findContradictions(options: {
   apiKey: string;
   fetchImpl: typeof fetch;
   warnings: string[];
+  deadline: number;
 }): Promise<Contradiction[]> {
   const factual = options.segments.filter((segment) =>
     ["True", "False", "Misleading", "Unverifiable"].includes(segment.label),
@@ -533,6 +663,9 @@ async function findContradictions(options: {
       apiKey: options.apiKey,
       fetchImpl: options.fetchImpl,
       system: consistencySystem(options.uiLanguage),
+      reasoningEffort: "low",
+      maxTokens: 2048,
+      timeoutMs: remainingMs(options.deadline, 16_000),
       user: consistencyUser(
         factual.map((segment) => ({
           id: segment.id,
@@ -611,6 +744,25 @@ function acceptNote(note: string, lang: UiLanguage, fallback: string): string {
   if (/https?:\/\//i.test(trimmed)) return fallback;
   if (!languageMatches(trimmed, lang)) return fallback;
   return trimmed;
+}
+
+function unverifiedSegment(
+  segment: DraftSegment,
+  uiLanguage: UiLanguage,
+  searchEnabled: boolean,
+  reason: "weak-evidence" | "budget" | "no-evidence" | "search-failed" | "not-independent",
+): SegmentResult {
+  return finishSegment(segment, {
+    label: "Unverifiable",
+    confidence: 0.3,
+    explanation: unverifiableExplanation(uiLanguage, reason),
+    sources: [],
+    evidenceMode: searchEnabled ? "web-search" : "model-knowledge-only",
+  });
+}
+
+function remainingMs(deadline: number, cap: number): number {
+  return Math.max(1_000, Math.min(cap, deadline - Date.now()));
 }
 
 function isSearchable(claimType: ClaimType): boolean {

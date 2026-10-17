@@ -21,7 +21,7 @@ describe("aggregateScore", () => {
     expect(score.toneNeutrality).toBe(100);
     expect(score.logicalConsistency).toBe(100);
     expect(score.verdict).toContain("100/100");
-    expect(score.verdict).toContain("largely supported");
+    expect(score.verdict).toContain("3 of 3");
   });
 
   it("punishes contradicted claims", () => {
@@ -31,7 +31,8 @@ describe("aggregateScore", () => {
     );
     expect(score.factualAccuracy).toBe(0);
     expect(score.overall).toBe(14);
-    expect(score.verdict).toContain("contradicted");
+    expect(score.verdict).toContain("2 of 2");
+    expect(score.verdict).toContain("2 false");
   });
 
   it("weights a single false claim below a clean report", () => {
@@ -41,7 +42,8 @@ describe("aggregateScore", () => {
     );
     expect(score.factualAccuracy).toBe(67);
     expect(score.overall).toBe(67);
-    expect(score.verdict).toContain("mixed picture");
+    expect(score.verdict).toContain("3 of 3");
+    expect(score.verdict).toContain("1 false");
   });
 
   it("caps commentary that has no checkable claims", () => {
@@ -80,11 +82,12 @@ describe("aggregateScore", () => {
       { contradictionCount: 0, searchEnabled: true, uiLanguage: "el" },
     );
     expect(score.factualBasis).toBe("uncertain");
-    expect(score.factualAccuracy).toBeNull();
+    expect(score.factualAccuracy).toBe(50);
     expect(score.sourcing).toBe(0);
-    expect(score.overall).toBe(50);
+    expect(score.overall).toBeLessThan(70);
+    expect(score.overall).toBeGreaterThan(40);
     expect(score.verdict).toMatch(/[\u0370-\u03FF]/);
-    expect(score.verdict).toContain("50/100");
+    expect(score.verdict).toContain("0 από 2");
   });
 
   it("returns a zero score for an empty article", () => {
@@ -95,6 +98,53 @@ describe("aggregateScore", () => {
     });
     expect(score.overall).toBe(0);
     expect(score.counts.True).toBe(0);
+  });
+
+  it("pulls a mostly unchecked article below a fully checked one", () => {
+    const thin = aggregateScore(
+      [
+        ...Array.from({ length: 5 }, () => segment("True")),
+        ...Array.from({ length: 15 }, () => segment("Unverifiable", 0.3, false)),
+      ],
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "en" },
+    );
+    const solid = aggregateScore(
+      Array.from({ length: 8 }, () => segment("True")),
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "en" },
+    );
+    expect(thin.factualAccuracy).toBeLessThan(80);
+    expect(thin.overall).toBeLessThanOrEqual(70);
+    expect(thin.verdict).toContain("5 of 20");
+    expect(solid.overall).toBeGreaterThan(70);
+    expect(thin.verdict).not.toBe(solid.verdict);
+  });
+
+  it("caps satire and low-credibility outlets under 50", () => {
+    const supported = Array.from({ length: 6 }, () => segment("True"));
+    const satire = aggregateScore(supported, {
+      contradictionCount: 0,
+      searchEnabled: true,
+      uiLanguage: "en",
+      outlet: "satire",
+    });
+    const low = aggregateScore(supported, {
+      contradictionCount: 0,
+      searchEnabled: true,
+      uiLanguage: "en",
+      outlet: "low-credibility",
+    });
+    expect(satire.overall).toBeLessThan(50);
+    expect(satire.verdict).toContain("satire");
+    expect(low.overall).toBeLessThan(50);
+    expect(low.verdict).toContain("unreliable");
+  });
+
+  it("lets loaded language lower tone without erasing a true label", () => {
+    const score = aggregateScore(
+      [segment("True", 1, true), { ...segment("True"), tone: 20 }],
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "en" },
+    );
+    expect(score.toneNeutrality).toBeLessThan(90);
   });
 
   it("gives false claims more influence than a low confidence would erase", () => {
