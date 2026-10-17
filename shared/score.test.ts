@@ -185,7 +185,7 @@ describe("aggregateScore", () => {
       outlet: "opinion",
     });
     expect(score.verdict).toContain("mostly opinion");
-    expect(score.overall).toBeLessThanOrEqual(74);
+    expect(score.overall).toBeLessThanOrEqual(65);
   });
 
   it("caps coverage only when fewer than a quarter of the selected claims were decided", () => {
@@ -218,7 +218,7 @@ describe("aggregateScore", () => {
       { contradictionCount: 0, searchEnabled: true, uiLanguage: "en" },
     );
     expect(column.verdict).toContain("mostly opinion");
-    expect(column.overall).toBeLessThanOrEqual(74);
+    expect(column.overall).toBeLessThanOrEqual(65);
     expect(column.overall).toBeLessThan(news.overall);
     const greek = aggregateScore(
       [
@@ -229,6 +229,35 @@ describe("aggregateScore", () => {
       { contradictionCount: 0, searchEnabled: true, uiLanguage: "el" },
     );
     expect(greek.verdict).toContain("κυρίως γνώμη");
+  });
+
+  it("caps a mostly-opinion column at 65, below an all-true news score", () => {
+    const column = aggregateScore(
+      Array.from({ length: 6 }, () => segment("True")),
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "en", outlet: "opinion" },
+    );
+    expect(column.verdict).toContain("mostly opinion");
+    expect(column.overall).toBe(65);
+  });
+
+  it("says a thin page had too little text instead of zero-of-one", () => {
+    const score = aggregateScore([segment("Unverifiable", 0.3, false)], {
+      contradictionCount: 0,
+      searchEnabled: true,
+      uiLanguage: "en",
+    });
+    expect(score.verdict).toContain("too little article text");
+    expect(score.verdict).not.toContain("0 of 1");
+  });
+
+  it("says pasted text has an unknown outlet and does not add a reputation bonus", () => {
+    const score = aggregateScore(
+      [segment("True"), segment("True"), segment("True")],
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "en", outlet: "unknown" },
+    );
+    expect(score.overall).toBe(100);
+    expect(score.verdict).toContain("outlet is unknown");
+    expect(score.verdict).toContain("not a reputation judgement");
   });
 
   it("gives false claims more influence than a low confidence would erase", () => {

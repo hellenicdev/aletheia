@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { evaluativeDensity, inferClaimType, looksLikeOpinionSection, reconcileClaimType } from "./classify";
+import {
+  evaluativeDensity,
+  inferClaimType,
+  isAttributedClaim,
+  looksLikeOpinionSection,
+  opinionCueFromHtml,
+  reconcileClaimType,
+} from "./classify";
 
 describe("inferClaimType", () => {
   it("keeps a dated place claim checkable and a slogan rhetorical", () => {
@@ -29,6 +36,17 @@ describe("inferClaimType", () => {
     ).toBe("rhetorical");
     expect(reconcileClaimType("I think the fee doubled in 2024.", "checkable_factual")).toBe("mixed");
     expect(reconcileClaimType("The council voted 7 to 2.", "checkable_factual")).toBe("checkable_factual");
+    expect(
+      reconcileClaimType("\"I have been vaping for two years,\" said Maria, a teacher from Leeds.", "opinion"),
+    ).toBe("checkable_factual");
+  });
+
+  it("treats reported testimony as an attributed claim, not the author's opinion", () => {
+    const quote = "\"I've been vaping for two years,\" said Maria, a teacher from Leeds.";
+    expect(isAttributedClaim(quote)).toBe(true);
+    expect(inferClaimType(quote)).toBe("checkable_factual");
+    expect(inferClaimType("I think the waterfront deserves better lighting.")).toBe("opinion");
+    expect(isAttributedClaim("I think the fee doubled in 2024.")).toBe(false);
   });
 });
 
@@ -37,6 +55,23 @@ describe("opinion section cues", () => {
     expect(looksLikeOpinionSection("https://www.ertnews.gr/apopseis/dimosio-vima/column", null, "Κείμενο.")).toBe(
       true,
     );
+    expect(
+      looksLikeOpinionSection(
+        "https://www.ertnews.gr/eidiseis/diethni/i-eyropi-exei-kaysima-alla-oxi-anosia-sto-sok-ton-timon/",
+        "Η Ευρώπη έχει καύσιμα",
+        "Η συμφωνία αποδεσμεύει αποθέματα.",
+      ),
+    ).toBe(false);
+    expect(
+      opinionCueFromHtml(
+        '<article class="post category-apopseis category-dimosio-vima category-eidiseis"><script type="application/ld+json">{"articleSection":["ΑΠΟΨΕΙΣ","ΕΙΔΗΣΕΙΣ","ΔΗΜΟΣΙΟ ΒΗΜΑ"]}</script><p>Κείμενο.</p></article>',
+      ),
+    ).toBe(true);
+    expect(
+      opinionCueFromHtml(
+        '<nav><a class="menu-item" href="https://www.ertnews.gr/news/apopseis/">ΑΠΟΨΕΙΣ</a></nav><article class="category-eidiseis"><p>Είδηση.</p></article>',
+      ),
+    ).toBe(false);
     expect(looksLikeOpinionSection("https://www.theguardian.com/commentisfree/2026/oct/fees", null, "Fees rose.")).toBe(
       true,
     );

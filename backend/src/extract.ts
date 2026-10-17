@@ -1,4 +1,5 @@
 import { cleanArticleText, proseScore } from "../../shared/articleText";
+import { looksLikeOpinionSection, opinionCueFromHtml } from "../../shared/classify";
 import { scrapeArticle } from "./firecrawl";
 import { LIMITS } from "./limits";
 import { HttpError } from "./errors";
@@ -11,6 +12,7 @@ export interface ExtractedArticle {
   finalUrl: string;
   via: "firecrawl" | "local";
   fromPreferred?: boolean;
+  opinionSection?: boolean;
 }
 
 const SKIP_TAGS = new Set([
@@ -68,7 +70,7 @@ const ARTICLE_CLASS =
   /article|story-body|post-content|entry-content|article-body|post-body|RichTextStoryBody|text-block/i;
 
 const JUNK_REGION =
-  /(?:^|[\s_-])(?:cookie|consent|newsletter|paywall|modal|sharebar|share-bar|related-stories|nav|menu|banner)(?:$|[\s_-])/i;
+  /(?:^|[\s_-])(?:cookie|consent|newsletter|paywall|modal|sharebar|share-bar|related(?:-stories|-articles|-content|-posts)?|read-more|k-read-more|also-read|more-items|more-stories|sidebar|nx-sidebar|nx-popular|popular|nav|menu|banner)(?:$|[\s_-])/i;
 
 export function extractArticle(
   html: string,
@@ -114,6 +116,7 @@ export function extractArticle(
     text: text.slice(0, LIMITS.maxArticleChars),
     publishedAt,
     fromPreferred,
+    opinionSection: looksLikeOpinionSection(pageUrl, title, text) || opinionCueFromHtml(html),
   };
 }
 
@@ -154,6 +157,9 @@ export async function fetchArticle(
       publishedAt: scraped.publishedAt,
       finalUrl: scraped.finalUrl,
       via: "firecrawl",
+      opinionSection:
+        looksLikeOpinionSection(scraped.finalUrl, scraped.title, text) ||
+        opinionCueFromHtml(scraped.rawHtml ?? ""),
     };
   }
   const direct = await fetchArticleDirect(rawUrl, fetchImpl);

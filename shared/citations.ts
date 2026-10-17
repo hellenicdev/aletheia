@@ -1,5 +1,5 @@
 import type { EvidenceMode, Label, UiLanguage } from "./labels";
-import { inferClaimType } from "./classify";
+import { inferClaimType, isAttributedClaim } from "./classify";
 import { opinionExplanation, rhetoricalExplanation, unverifiableExplanation } from "./messages";
 import { tokenOverlap } from "./rank";
 import { hostOf, isBlockedEvidenceHost, isSocialHost, sameOutlet } from "./reputation";
@@ -40,21 +40,59 @@ const DECIDED = new Set<Label>(["True", "False", "Misleading"]);
  */
 export function independentEvidence(
   items: EvidenceItem[],
-  options: { articleDomain?: string | null; articleText?: string; claimText: string },
+  options: {
+    articleDomain?: string | null;
+    articleText?: string;
+    articleTitle?: string | null;
+    claimText: string;
+  },
 ): EvidenceItem[] {
   return items.filter((item) => isIndependent(item, options));
 }
 
 export function isIndependent(
   item: EvidenceItem,
-  options: { articleDomain?: string | null; articleText?: string; claimText: string },
+  options: {
+    articleDomain?: string | null;
+    articleText?: string;
+    articleTitle?: string | null;
+    claimText: string;
+  },
 ): boolean {
   if (sameOutlet(item.url, options.articleDomain ?? null)) return false;
   if (isSocialHost(item.url)) return false;
   if (isBlockedEvidenceHost(item.url)) return false;
   if (isWireCopy(item.url)) return false;
+  if (isSyndicatedCopy(item, options.articleTitle ?? null, options.articleText ?? "")) return false;
   if (isEcho(item.snippet, options.claimText, options.articleText ?? "", item.url)) return false;
   return true;
+}
+
+const WIRE_BYLINE =
+  /\bassociated press\b|\(\s*ap\s*\)|(?:^|[\s—–|])ap\s*[—–|-]|[—–|-]\s*ap\s*$/i;
+
+/** A reprint of this article, or a page carrying an AP byline, is not a second source. */
+export function isSyndicatedCopy(
+  item: { title?: string; snippet?: string },
+  articleTitle: string | null,
+  articleText: string,
+): boolean {
+  const title = (item.title ?? "").replace(/\s+/g, " ").trim();
+  const snippet = (item.snippet ?? "").replace(/\s+/g, " ").trim();
+  if (WIRE_BYLINE.test(`${title} ${snippet}`)) return true;
+  const ours = (articleTitle ?? "").replace(/\s+/g, " ").trim();
+  if (ours.length >= 24 && title.length >= 24) {
+    const overlap = Math.min(tokenOverlap(ours, title), tokenOverlap(title, ours));
+    if (overlap >= 0.72) return true;
+  }
+  const lead = articleText.replace(/\s+/g, " ").trim().slice(0, 500);
+  if (snippet.length >= 48 && lead.length >= 48) {
+    const window = snippet.slice(0, 64).toLowerCase();
+    if (lead.toLowerCase().includes(window.slice(0, 48))) return true;
+    const overlap = Math.min(tokenOverlap(lead, snippet), tokenOverlap(snippet, lead));
+    if (overlap >= 0.8) return true;
+  }
+  return false;
 }
 
 const SYNDICATORS = ["yahoo.com", "inkl.com", "msn.com", "apple.news", "flipboard.com", "smartnews.com", "news.google.com"];
@@ -146,12 +184,14 @@ export function applyEvidence(input: {
   uiLanguage: UiLanguage;
   articleDomain?: string | null;
   articleText?: string;
+  articleTitle?: string | null;
   /** When search ran and returned nothing, stable facts may keep a low-confidence model label. */
   allowModelKnowledge?: boolean;
 }): AppliedEvidence {
   const confidence = clampConfidence(input.confidence);
   const local = inferClaimType(input.claimText);
-  if (local === "opinion" || local === "rhetorical") {
+  const label = isAttributedClaim(input.claimText) && input.label === "Opinion" ? "Unverifiable" : input.label;
+  if (!isAttributedClaim(input.claimText) && (local === "opinion" || local === "rhetorical")) {
     const opinion = local === "opinion";
     return {
       label: opinion ? "Opinion" : "Rhetorical",
@@ -166,9 +206,9 @@ export function applyEvidence(input: {
 
   if (!input.searchEnabled) {
     const downgrade =
-      DECIDED.has(input.label) && looksLikeNewsOrFigure(input.claimText);
+      DECIDED.has(label) && looksLikeNewsOrFigure(input.claimText);
     return {
-      label: downgrade ? "Unverifiable" : input.label,
+      label: downgrade ? "Unverifiable" : label,
       confidence: Math.min(confidence, 0.55),
       explanation: downgrade
         ? unverifiableExplanation(input.uiLanguage, "model-only")
@@ -181,6 +221,7 @@ export function applyEvidence(input: {
   const usable = independentEvidence(input.evidence, {
     articleDomain: input.articleDomain,
     articleText: input.articleText,
+    articleTitle: input.articleTitle,
     claimText: input.claimText,
   });
   const byUrl = new Map(usable.map((item) => [canonicalUrl(item.url), item]));
@@ -198,7 +239,7 @@ export function applyEvidence(input: {
     });
   }
 
-  if (input.label === "False" && sources.length > 0 && !sharesEntity(input.claimText, sources)) {
+  if (label === "False" && sources.length > 0 && !sharesEntity(input.claimText, sources)) {
     return {
       label: "Unverifiable",
       confidence: Math.min(confidence, 0.45),
@@ -208,14 +249,14 @@ export function applyEvidence(input: {
     };
   }
 
-  if (DECIDED.has(input.label) && sources.length === 0) {
+  if (DECIDED.has(label) && sources.length === 0) {
     if (
       input.evidence.length === 0 &&
       input.allowModelKnowledge &&
       !looksLikeNewsOrFigure(input.claimText)
     ) {
       return {
-        label: input.label,
+        label,
         confidence: Math.min(confidence, 0.55),
         explanation: input.explanation,
         sources: [],
@@ -233,8 +274,18 @@ export function applyEvidence(input: {
     };
   }
 
+  if (label === "Unverifiable" && input.label === "Opinion") {
+    return {
+      label: "Unverifiable",
+      confidence: Math.min(confidence, 0.45),
+      explanation: unverifiableExplanation(input.uiLanguage, "no-evidence"),
+      sources: [],
+      evidenceMode: input.searchEnabled ? "web-search" : "model-knowledge-only",
+    };
+  }
+
   return {
-    label: input.label,
+    label,
     confidence,
     explanation: input.explanation,
     sources,

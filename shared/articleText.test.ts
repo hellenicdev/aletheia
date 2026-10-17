@@ -73,4 +73,18 @@ describe("cleanArticleText", () => {
     expect(text).toContain("federal loan");
     expect(text).toContain("licence review");
   });
+
+  it("keeps a Greek opinion kicker and drops the related-story list under it", () => {
+    const raw = [
+      "Άποψη",
+      "",
+      "Η κυβέρνηση ανακοίνωσε νέο πλαίσιο για τον τουρισμό μετά τη σύνοδο των υπουργών.",
+      "",
+      "Διαβάστε επίσης",
+      "Ανακαλύφθηκε στη Σικελία άλλο ναυάγιο που δεν ανήκει σε αυτό το κείμενο.",
+    ].join("\n");
+    const text = cleanArticleText(raw);
+    expect(text).toContain("τουρισμό");
+    expect(text).not.toContain("Σικελία");
+  });
 });

@@ -74,6 +74,8 @@ export async function completeJson<T>(options: {
       dropResponseFormat: attempt > 0,
       legacyMaxTokens: false,
       dropReasoningEffort: false,
+      dropTemperature: false,
+      dropSeed: false,
     });
     const candidates = completion.texts.length
       ? completion.texts
@@ -118,14 +120,21 @@ export async function requestChat(
     timeoutMs?: number;
   },
   messages: ChatMessage[],
-  flags: { dropResponseFormat: boolean; legacyMaxTokens: boolean; dropReasoningEffort: boolean },
+  flags: {
+    dropResponseFormat: boolean;
+    legacyMaxTokens: boolean;
+    dropReasoningEffort: boolean;
+    dropTemperature: boolean;
+    dropSeed: boolean;
+  },
 ): Promise<ModelCompletion> {
   const budget = options.maxTokens ?? COMPLETION_TOKEN_BUDGET;
   const body: Record<string, unknown> = {
     model: options.config.llmModel,
-    temperature: 0,
     messages,
   };
+  if (!flags.dropTemperature) body.temperature = 0;
+  if (!flags.dropSeed) body.seed = 7;
   if (flags.legacyMaxTokens) body.max_tokens = budget;
   else body.max_completion_tokens = budget;
   if (!flags.dropResponseFormat) body.response_format = { type: "json_object" };
@@ -175,6 +184,17 @@ export async function requestChat(
     ) {
       console.error(`llm: HTTP ${response.status} ${safe}`);
       return requestChat(options, messages, { ...flags, dropResponseFormat: true });
+    }
+    if (
+      response.status === 400 &&
+      ((/\bseed\b/i.test(safe) && !flags.dropSeed) || (/temperature/i.test(safe) && !flags.dropTemperature))
+    ) {
+      console.error(`llm: HTTP ${response.status} ${safe}`);
+      return requestChat(options, messages, {
+        ...flags,
+        dropSeed: flags.dropSeed || /\bseed\b/i.test(safe),
+        dropTemperature: flags.dropTemperature || /temperature/i.test(safe),
+      });
     }
     if (response.status === 401 || response.status === 403) {
       console.error(`llm: HTTP ${response.status} ${safe}`);

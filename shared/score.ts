@@ -23,7 +23,7 @@ const SEARCH_OFF_CAP = 68;
 const COMMENTARY_CAP = 64;
 const LOW_COVERAGE_CAP = 70;
 const LOW_COVERAGE_THRESHOLD = 0.25;
-const OPINION_CAP = 74;
+const OPINION_CAP = 65;
 const SATIRE_CAP = 42;
 const LOW_CREDIBILITY_CAP = 44;
 const SOURCING_CAP_NO_SEARCH = 30;
@@ -181,6 +181,7 @@ export function aggregateScore(
       searchDegraded: options.searchDegraded === true,
       outlet,
       opinionPiece,
+      thin: segments.length <= 1,
     },
     options.uiLanguage,
   );
@@ -212,10 +213,11 @@ function buildVerdict(
     searchDegraded: boolean;
     outlet: OutletKind;
     opinionPiece: boolean;
+    thin: boolean;
   },
   lang: UiLanguage,
 ): string {
-  const { overall, counts, poolCounts, outsideSearch, factualBasis, searchEnabled, searchDegraded, outlet, opinionPiece } =
+  const { overall, counts, poolCounts, outsideSearch, factualBasis, searchEnabled, searchDegraded, outlet, opinionPiece, thin } =
     input;
   const checked = poolCounts.True + poolCounts.False + poolCounts.Misleading;
   const checkable = checked + poolCounts.Unverifiable;
@@ -259,11 +261,26 @@ function buildVerdict(
     );
   }
 
-  if (checkable > 0) {
+  if (thin && checked === 0 && checkable > 0) {
+    parts.push(
+      lang === "el"
+        ? "Η σελίδα είχε πολύ λίγο κείμενο άρθρου για να ελεγχθεί ένας πραγματολογικός ισχυρισμός."
+        : "The page had too little article text to check a factual claim.",
+    );
+  } else if (checkable > 0) {
     parts.push(
       lang === "el"
         ? `Ελέγχθηκαν ${checked} από ${checkable} πραγματολογικούς ισχυρισμούς: ${elAdj(poolCounts.True, "αληθής", "αληθείς")}, ${elAdj(poolCounts.False, "ψευδής", "ψευδείς")} και ${elAdj(poolCounts.Unverifiable, "μη επαληθεύσιμος", "μη επαληθεύσιμοι")}.`
-        : `${checked} of ${checkable} factual claims were checked (${poolCounts.True} true, ${poolCounts.False} false, ${poolCounts.Misleading} misleading, ${poolCounts.Unverifiable} unverifiable).`,
+        : checkable === 1
+          ? `${checked} of 1 factual claim was checked (${poolCounts.True} true, ${poolCounts.False} false, ${poolCounts.Misleading} misleading, ${poolCounts.Unverifiable} unverifiable).`
+          : `${checked} of ${checkable} factual claims were checked (${poolCounts.True} true, ${poolCounts.False} false, ${poolCounts.Misleading} misleading, ${poolCounts.Unverifiable} unverifiable).`,
+    );
+  }
+  if (outlet === "unknown") {
+    parts.push(
+      lang === "el"
+        ? "Το κείμενο επικολλήθηκε, οπότε η πηγή είναι άγνωστη και ο βαθμός δεν είναι κρίση φήμης ενός μέσου."
+        : "The text was pasted, so the outlet is unknown and this score is not a reputation judgement.",
     );
   }
   if (outsideSearch > 0) {

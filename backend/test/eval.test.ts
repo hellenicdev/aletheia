@@ -103,7 +103,7 @@ describe("offline evaluation fixtures", () => {
       if (fixture.expectOpinion) {
         expect(result.segments.some((segment) => segment.label === "Opinion")).toBe(true);
         expect(result.score.verdict.toLowerCase()).toContain("mostly opinion");
-        expect(result.score.overall).toBeLessThanOrEqual(74);
+        expect(result.score.overall).toBeLessThanOrEqual(65);
       }
       if (fixture.kind === "reputable") {
         expect(result.score.verdict.toLowerCase()).not.toContain("mostly opinion");

@@ -9,7 +9,7 @@ import {
   rhetoricalExplanation,
   unverifiableExplanation,
 } from "../../shared/messages";
-import { claimImportance } from "../../shared/rank";
+import { claimImportance, tokenOverlap } from "../../shared/rank";
 import { resolveOutlet } from "../../shared/reputation";
 import { aggregateScore } from "../../shared/score";
 import { splitPastedTitle, splitSentences } from "../../shared/sentences";
@@ -50,6 +50,8 @@ export interface AnalyzeDeps {
   onTick?: () => void;
   requestId?: string;
   budgetMs?: number;
+  /** Test hook. Production caps the post-verify consistency call at a few seconds. */
+  consistencyTimeoutMs?: number;
   /** Test hook. Production uses the worker subrequest ceiling. */
   subrequestLimit?: number;
 }
@@ -106,7 +108,8 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   if (
     segmented.genre !== "satire" &&
     segmented.genre !== "unreliable" &&
-    (looksLikeOpinionSection(ingested.sourceUrl, ingested.title, ingested.text) ||
+    (ingested.opinionSection ||
+      looksLikeOpinionSection(ingested.sourceUrl, ingested.title, ingested.text) ||
       evaluativeDensity(segmented.segments.map((segment) => segment.text)))
   ) {
     segmented.genre = "opinion";
@@ -161,6 +164,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
         const independent = independentEvidence(hits, {
           articleDomain: ingested.sourceDomain,
           articleText: ingested.text,
+          articleTitle: ingested.title,
           claimText: segment.text,
         });
         if (hits.length > 0 && independent.length === 0) echoOnly.add(segment.id);
@@ -240,6 +244,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
               publishedAt: ingested.publishedAt,
               articleDomain: ingested.sourceDomain,
               articleText: ingested.text,
+              articleTitle: ingested.title,
               attempts,
               timeoutMs,
             }),
@@ -312,16 +317,21 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     );
   }
   stage("verify", "done");
+  tick();
 
   stage("score", "start");
+  tick();
   const ordered = segmented.segments
     .map((segment) => verified.get(segment.id))
     .filter((segment): segment is SegmentResult => Boolean(segment));
 
-  const contradictions =
-    Date.now() > deadline - 12_000
-      ? []
-      : await findContradictions({
+  const consistencyMs =
+    deps.consistencyTimeoutMs ?? Math.min(8_000, deadline - Date.now() - 500);
+  let contradictions: Contradiction[] = [];
+  if (consistencyMs >= 200) {
+    try {
+      contradictions = await withTimeout(
+        findContradictions({
           segments: ordered,
           uiLanguage,
           config,
@@ -329,7 +339,17 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
           fetchImpl,
           warnings,
           deadline,
-        });
+          timeoutMs: consistencyMs,
+        }),
+        consistencyMs + 400,
+        "consistency timed out",
+      );
+    } catch (error) {
+      remember(warnings, error, "llm");
+      contradictions = [];
+    }
+  }
+  tick();
 
   const draftById = new Map(segmented.segments.map((segment) => [segment.id, segment]));
   const outlet = resolveOutlet({
@@ -416,6 +436,7 @@ async function ingest(
       publishedAt: extracted.publishedAt,
       extraction: extracted.via,
       truncated: false,
+      opinionSection: extracted.opinionSection === true,
     };
   }
 
@@ -441,6 +462,7 @@ async function ingest(
     publishedAt: null,
     extraction: "pasted" as const,
     truncated,
+    opinionSection: looksLikeOpinionSection(null, split.title, split.body),
   };
 }
 
@@ -610,6 +632,7 @@ async function judgeGroup(options: {
   publishedAt: string | null;
   articleDomain: string | null;
   articleText: string;
+  articleTitle: string | null;
   attempts: number;
   timeoutMs: number;
 }): Promise<Map<string, SegmentResult>> {
@@ -665,6 +688,7 @@ async function judgeGroup(options: {
       uiLanguage: options.uiLanguage,
       articleDomain: options.articleDomain,
       articleText: options.articleText,
+      articleTitle: options.articleTitle,
       allowModelKnowledge: options.searchEnabled && (options.evidence.get(segment.id)?.length ?? 0) === 0,
     });
     results.set(segment.id, finishSegment(segment, applied));
@@ -712,6 +736,7 @@ async function findContradictions(options: {
   fetchImpl: typeof fetch;
   warnings: string[];
   deadline: number;
+  timeoutMs: number;
 }): Promise<Contradiction[]> {
   const factual = options.segments.filter((segment) =>
     ["True", "False", "Misleading", "Unverifiable"].includes(segment.label),
@@ -725,7 +750,8 @@ async function findContradictions(options: {
       system: consistencySystem(options.uiLanguage),
       reasoningEffort: "low",
       maxTokens: 2048,
-      timeoutMs: remainingMs(options.deadline, 16_000),
+      attempts: 1,
+      timeoutMs: options.timeoutMs,
       user: consistencyUser(
         factual.map((segment) => ({
           id: segment.id,
@@ -875,15 +901,23 @@ function surroundingParagraph(article: string, start: number, end: number): stri
 }
 
 function uniqueSpans(spans: { text: string; start: number; end: number }[]) {
-  const seen = new Set<string>();
-  const unique: typeof spans = [];
+  const kept: { key: string; span: (typeof spans)[number] }[] = [];
   for (const span of spans) {
-    const key = span.text.replace(/\s+/g, " ").trim().toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    unique.push(span);
+    const key = span.text
+      .replace(/\s+/g, " ")
+      .replace(/^(?:photograph|photo|image|caption|credit|φωτογραφία|εικόνα)\s*[:：]\s*/i, "")
+      .trim()
+      .toLowerCase();
+    if (!key) continue;
+    if (kept.some((item) => item.key === key || captionDuplicate(item.key, key))) continue;
+    kept.push({ key, span });
   }
-  return unique;
+  return kept.map((item) => item.span);
+}
+
+function captionDuplicate(left: string, right: string): boolean {
+  if (left.length < 24 || right.length < 24) return false;
+  return Math.min(tokenOverlap(left, right), tokenOverlap(right, left)) >= 0.9;
 }
 
 function dedupeEvidence(items: EvidenceItem[]): EvidenceItem[] {
