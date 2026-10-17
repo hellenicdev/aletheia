@@ -67,13 +67,24 @@ describe("aggregateScore", () => {
     expect(score.verdict).toContain("model-knowledge-only");
   });
 
-  it("lowers logical consistency for contradictions", () => {
+  it("lowers logical consistency a little for one contradiction and keeps it high when unsure", () => {
+    const none = aggregateScore(
+      [segment("True"), segment("True")],
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "en" },
+    );
+    expect(none.logicalConsistency).toBe(100);
     const score = aggregateScore(
       [segment("True"), segment("True")],
       { contradictionCount: 1, searchEnabled: true, uiLanguage: "en" },
     );
-    expect(score.logicalConsistency).toBe(70);
-    expect(score.overall).toBe(96);
+    expect(score.logicalConsistency).toBe(85);
+    expect(score.overall).toBe(98);
+    const several = aggregateScore(
+      [segment("True"), segment("True")],
+      { contradictionCount: 3, searchEnabled: true, uiLanguage: "en" },
+    );
+    expect(several.logicalConsistency).toBe(70);
+    expect(several.overall).toBe(96);
   });
 
   it("does not treat an all-unverifiable piece as confirmed", () => {

@@ -54,12 +54,14 @@ describe("cleanArticleText", () => {
       "",
       "The coastal plant received a federal loan that will fund the restart, according to the filing released on Monday.",
       "",
+      "Operators said the licence review finishes next spring after the board signs the notice.",
+      "",
       "References",
       "Smith J. A short citation.",
       "Popular articles",
       "Another harbour story from last year",
       "",
-      "Operators said the licence review finishes next spring after the board signs the notice.",
+      "A later paragraph that looks like prose but sits after the article end marker and must be dropped from the body.",
     ].join("\n");
     const text = cleanArticleText(raw);
     expect(text).toContain("τουρισμό");
@@ -70,8 +72,32 @@ describe("cleanArticleText", () => {
     expect(text).not.toContain("email alerts");
     expect(text).not.toContain("Smith");
     expect(text).not.toContain("Another harbour");
+    expect(text).not.toContain("end marker");
     expect(text).toContain("federal loan");
     expect(text).toContain("licence review");
+  });
+
+  it("drops list-like link titles and anything after an end marker", () => {
+    const raw = [
+      "The coastal plant received a federal loan that will fund the restart, according to the filing released on Monday.",
+      "",
+      "Decentralize.TV – Episode 166.",
+      "Brighteon.TV – Episode 12 – BrighteonBroadcast",
+      "",
+      "Operators said the licence review finishes next spring after the board signs the notice.",
+      "",
+      "Related articles",
+      "Another harbour story from last year that should not be scored.",
+      "",
+      "A later paragraph that looks like prose but sits after the article end marker and must be dropped.",
+    ].join("\n");
+    const text = cleanArticleText(raw);
+    expect(text).toContain("federal loan");
+    expect(text).toContain("licence review");
+    expect(text).not.toContain("Decentralize");
+    expect(text).not.toContain("Brighteon");
+    expect(text).not.toContain("Another harbour");
+    expect(text).not.toContain("end marker");
   });
 
   it("keeps a Greek opinion kicker and drops the related-story list under it", () => {

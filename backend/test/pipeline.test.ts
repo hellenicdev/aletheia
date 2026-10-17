@@ -1,7 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
+import { clearSearchCache } from "../src/firecrawl";
 import { handleRequest } from "../src/index";
 import type { RateState } from "../src/limits";
 import { analyze } from "../src/pipeline";
+
+beforeEach(() => {
+  clearSearchCache();
+});
 
 const vote = "The council voted 7 to 2 on Monday.";
 const fee = "The marina fee doubled overnight.";
@@ -871,6 +876,126 @@ describe("handleRequest", () => {
     await first.text();
     const second = await handleRequest(post(article), envTight, { rate, now: () => 5_100, fetchImpl: scriptedFetch().fetchImpl });
     expect(second.status).toBe(429);
+  });
+
+  it("closes the stream when a search fetch never resolves", async () => {
+    clearSearchCache();
+    let hungCalls = 0;
+    const fetchImpl: typeof fetch = (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        hungCalls += 1;
+        return new Promise((resolve) => {
+          const timer = setTimeout(() => resolve(new Response("late")), 60_000);
+          timer.unref?.();
+          void init?.signal;
+        });
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return Promise.resolve(
+          llmPayload(classifyPayload(user, () => ({ claimType: "checkable_factual", note: "A recorded claim." }))),
+        );
+      }
+      if (system.startsWith("TASK:queries")) {
+        return Promise.resolve(llmPayload({ queries: [{ id: "s1", query: "council vote Monday" }] }));
+      }
+      if (system.startsWith("TASK:verify") || system.startsWith("TASK:consistency")) {
+        return Promise.resolve(llmPayload({ contradictions: [], results: [] }));
+      }
+      return Promise.reject(new Error(system.slice(0, 24)));
+    };
+    const started = Date.now();
+    const response = await handleRequest(post(article), env, {
+      fetchImpl,
+      rate: { buckets: new Map(), inFlight: { count: 0 } },
+      now: () => 50_000,
+      deadlineMs: 5_000,
+    });
+    const events = parseSse(await response.text());
+    expect(Date.now() - started).toBeLessThan(8_000);
+    expect(hungCalls).toBeGreaterThan(0);
+    expect(events.some((event) => event.event === "result" || event.event === "error")).toBe(true);
+    const terminal = events.filter((event) => event.event === "result" || event.event === "error");
+    expect(terminal).toHaveLength(1);
+  }, 12_000);
+
+  it("reuses a cached verification for the same claim and evidence", async () => {
+    clearSearchCache();
+    const store = new Map<string, string>();
+    const previous = (globalThis as { caches?: unknown }).caches;
+    (globalThis as { caches?: unknown }).caches = {
+      default: {
+        async match(request: Request) {
+          const hit = store.get(request.url);
+          return hit ? new Response(hit) : undefined;
+        },
+        async put(request: Request, response: Response) {
+          store.set(request.url, await response.text());
+        },
+      },
+    };
+    let verifyCalls = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            data: {
+              web: [
+                {
+                  url: "https://www.reuters.com/world/harbour-vote",
+                  title: "Harbour vote",
+                  description: "Councillors approved the harbour measure by seven votes to two.",
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(classifyPayload(user, () => ({ claimType: "checkable_factual", note: "A recorded claim." })));
+      }
+      if (system.startsWith("TASK:queries")) {
+        return llmPayload({ queries: [{ id: "s1", query: "council vote Monday" }] });
+      }
+      if (system.startsWith("TASK:verify")) {
+        verifyCalls += 1;
+        const payload = JSON.parse(user) as { claims: { id: string }[] };
+        return llmPayload({
+          results: payload.claims.map((claim) => ({
+            id: claim.id,
+            label: "True",
+            confidence: 0.9,
+            explanation: "Reuters recorded the same seven to two vote.",
+            sourceUrls: ["https://www.reuters.com/world/harbour-vote"],
+          })),
+        });
+      }
+      if (system.startsWith("TASK:consistency")) return llmPayload({ contradictions: [] });
+      throw new Error(system.slice(0, 24));
+    };
+    const text = "The council voted 7 to 2 on Monday and published the minutes for residents.";
+    try {
+      await analyze({ text, uiLanguage: "en" }, { env, fetchImpl, requestId: "cache-1" });
+      const afterFirst = verifyCalls;
+      clearSearchCache();
+      await analyze({ text, uiLanguage: "en" }, { env, fetchImpl, requestId: "cache-2" });
+      expect(afterFirst).toBeGreaterThan(0);
+      expect(verifyCalls).toBe(afterFirst);
+      expect(store.size).toBeGreaterThan(0);
+    } finally {
+      if (previous === undefined) delete (globalThis as { caches?: unknown }).caches;
+      else (globalThis as { caches?: unknown }).caches = previous;
+      clearSearchCache();
+    }
   });
 
   it("truncates pasted text over the character budget and still returns a result", async () => {

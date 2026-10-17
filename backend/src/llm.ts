@@ -1,5 +1,6 @@
 import { parseModelJson } from "../../shared/json";
 import type { AppConfig } from "./config";
+import { combineSignals, isDeadline } from "./deadline";
 import { HttpError, UpstreamError, redactSecret } from "./errors";
 
 export interface ChatMessage {
@@ -52,6 +53,7 @@ export async function completeJson<T>(options: {
   attempts?: number;
   reasoningEffort?: "low" | "medium" | "high";
   timeoutMs?: number;
+  signal?: AbortSignal;
 }): Promise<T> {
   let hint = "";
   let lastDetail = "invalid JSON";
@@ -118,6 +120,7 @@ export async function requestChat(
     maxTokens?: number;
     reasoningEffort?: "low" | "medium" | "high";
     timeoutMs?: number;
+    signal?: AbortSignal;
   },
   messages: ChatMessage[],
   flags: {
@@ -142,6 +145,9 @@ export async function requestChat(
     body.reasoning_effort = options.reasoningEffort;
   }
 
+  const signal = options.signal
+    ? combineSignals([options.signal, AbortSignal.timeout(options.timeoutMs ?? 22_000)])
+    : AbortSignal.timeout(options.timeoutMs ?? 22_000);
   let response: Response;
   try {
     response = await options.fetchImpl(`${options.config.llmBaseUrl}/chat/completions`, {
@@ -151,9 +157,10 @@ export async function requestChat(
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(options.timeoutMs ?? 22_000),
+      signal,
     });
   } catch (error) {
+    if (isDeadline(error) || options.signal?.aborted) throw error;
     throw loggedUpstream("llm", null, errorText(error), options.apiKey);
   }
 

@@ -1,4 +1,4 @@
-import type { ArticlePreview, StageName } from "../../shared/types";
+import type { AnalysisResult, ArticlePreview, StageName } from "../../shared/types";
 import { resolveConfig, type Env } from "./config";
 import { corsHeaders, jsonResponse } from "./cors";
 import { HttpError } from "./errors";
@@ -11,6 +11,8 @@ export interface HandlerDeps {
   fetchImpl?: typeof fetch;
   now?: () => number;
   rate?: RateState;
+  /** Test hook. Production uses the analysis deadline. */
+  deadlineMs?: number;
 }
 
 const isolateRate: RateState = {
@@ -109,58 +111,92 @@ export async function handleRequest(
 
   rate.inFlight.count += 1;
   const encoder = new TextEncoder();
+  const deadlineMs = deps.deadlineMs ?? LIMITS.analysisDeadlineMs;
+  const abort = new AbortController();
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let hardStop: ReturnType<typeof setTimeout> | undefined;
+  let grace: ReturnType<typeof setTimeout> | undefined;
+  let closed = false;
   const stream = new ReadableStream({
-    async start(controller) {
+    start(controller) {
       const send = (event: string, data: unknown) => {
+        if (closed) return;
         controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
       };
-      let heartbeat: ReturnType<typeof setInterval> | undefined;
-      const ping = () => {
-        try {
-          controller.enqueue(encoder.encode(`: ping\n\n`));
-        } catch {
-          if (heartbeat) clearInterval(heartbeat);
-        }
-      };
-      ping();
-      heartbeat = setInterval(ping, 10_000);
-      let settled = false;
-      const hardStop = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        send("error", { message: "The analysis timed out before a verdict could be sent." });
+      const finish = () => {
+        if (closed) return;
+        closed = true;
+        if (heartbeat) clearInterval(heartbeat);
+        if (hardStop) clearTimeout(hardStop);
+        if (grace) clearTimeout(grace);
+        abort.abort();
+        rate.inFlight.count = Math.max(0, rate.inFlight.count - 1);
         try {
           controller.close();
         } catch {
           /* The stream is already closed. */
         }
-      }, LIMITS.analysisDeadlineMs + 15_000);
-      try {
-        const result = await analyze(input, {
-          env,
-          fetchImpl: deps.fetchImpl,
-          onStage: (stage: StageName, status, done, total) => send("stage", { stage, status, done, total }),
-          onPreview: (article: ArticlePreview) => send("preview", article),
-          onTick: ping,
-        });
-        if (!settled) {
-          settled = true;
-          send("result", result);
+      };
+      const ping = () => {
+        try {
+          if (!closed) controller.enqueue(encoder.encode(`: ping\n\n`));
+        } catch {
+          if (heartbeat) clearInterval(heartbeat);
         }
-      } catch (error) {
-        const message =
-          error instanceof HttpError ? error.message : "The analysis could not be completed.";
-        if (!(error instanceof HttpError)) console.error(error);
-        if (!settled) {
-          settled = true;
-          send("error", { message });
+      };
+      // Keepalive is scheduled on the stream, not inside the analysis promise.
+      ping();
+      heartbeat = setInterval(ping, 10_000);
+
+      const deadline = new Promise<"timeout">((resolve) => {
+        hardStop = setTimeout(() => resolve("timeout"), deadlineMs);
+      });
+      const work: Promise<AnalysisResult> = analyze(input, {
+        env,
+        fetchImpl: deps.fetchImpl,
+        signal: abort.signal,
+        budgetMs: deadlineMs,
+        onStage: (stage: StageName, status, done, total) => send("stage", { stage, status, done, total }),
+        onPreview: (article: ArticlePreview) => send("preview", article),
+        onTick: ping,
+      });
+
+      void (async () => {
+        const timeoutMessage = "The analysis timed out before a verdict could be sent.";
+        try {
+          const winner = await Promise.race([work, deadline]);
+          if (winner === "timeout") {
+            abort.abort();
+            const late = await Promise.race([
+              work.catch(() => null),
+              new Promise<AnalysisResult | null>((resolve) => {
+                grace = setTimeout(() => resolve(null), 1_500);
+              }),
+            ]);
+            if (late) send("result", late);
+            else send("error", { message: timeoutMessage });
+          } else {
+            send("result", winner);
+          }
+        } catch (error) {
+          const timedOut =
+            abort.signal.aborted || (error instanceof Error && /deadline|timed out/i.test(error.message));
+          const message = timedOut
+            ? timeoutMessage
+            : error instanceof HttpError
+              ? error.message
+              : "The analysis could not be completed.";
+          if (!(error instanceof HttpError) && !timedOut) console.error(error);
+          const late = await work.catch(() => null);
+          if (late) send("result", late);
+          else send("error", { message });
+        } finally {
+          finish();
         }
-      } finally {
-        clearTimeout(hardStop);
-        clearInterval(heartbeat);
-        rate.inFlight.count = Math.max(0, rate.inFlight.count - 1);
-        controller.close();
-      }
+      })();
+    },
+    cancel() {
+      abort.abort();
     },
   });
 

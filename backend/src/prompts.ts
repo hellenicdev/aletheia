@@ -95,10 +95,12 @@ export function verifyUser(
 
 export function consistencySystem(lang: UiLanguage): string {
   return `TASK:consistency
-You look only for direct logical contradictions: one claim asserts A and another asserts not-A.
-Do not flag a harsh tone, missing context, or claims about different topics.
-If there is no direct contradiction, return an empty list.
-explanation is one sentence in ${languageName(lang)}.
+You look only for direct logical contradictions.
+Flag a pair only when both sentences are about the same entity at the same time and cannot both be true.
+Do not flag different people, different ages, different wrecks, different dates, or a step where some objects remain and others were raised. Those can both be true.
+If you are unsure, return an empty list.
+Quote both sentences inside the explanation, then say why they cannot both be true.
+explanation is one or two sentences in ${languageName(lang)}.
 Return JSON only: {"contradictions":[{"a":"s1","b":"s2","explanation":"..."}]}`;
 }
 

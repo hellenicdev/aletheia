@@ -206,6 +206,49 @@ describe("wire reprints and entity match", () => {
     });
     expect(reuters.label).toBe("True");
 
+    expect(
+      isSyndicatedCopy(
+        {
+          title: "Federal coast guard rescues sailors after baja delay notice extra",
+          snippet: "A local station carried a shortened version of the same rescue report.",
+        },
+        "Federal coast guard rescues sailors after baja storm warning",
+        "An original report about the rescue and the crew that stayed out overnight.",
+        "apnews.com",
+      ),
+    ).toBe(true);
+    expect(
+      isSyndicatedCopy(
+        {
+          title: "Energy ministers debate a separate grid plan",
+          snippet: "Officials described a federal loan for the coastal plant after a separate review.",
+        },
+        "Federal coast guard rescues sailors after baja storm warning",
+        "An original report about the rescue and the crew that stayed out overnight.",
+        "apnews.com",
+      ),
+    ).toBe(false);
+    const credited = applyEvidence({
+      label: "True",
+      confidence: 0.8,
+      explanation: "A partner site carried the wire.",
+      claimText: claim,
+      sourceUrls: ["https://www.newsday.com/news/nation/coast-guard"],
+      evidence: [
+        {
+          url: "https://www.newsday.com/news/nation/coast-guard",
+          title: "Coast Guard stop",
+          snippet: "Editors appended a note that the dispatch came via the Associated Press.",
+        },
+      ],
+      searchEnabled: true,
+      uiLanguage: "en",
+      articleDomain: "apnews.com",
+      articleTitle: "Federal coast guard rescues sailors after baja storm warning",
+      articleText: "An original AP story about the coastal plant and its financing.",
+    });
+    expect(credited.label).toBe("Unverifiable");
+
     const sameFamily = applyEvidence({
       label: "True",
       confidence: 0.8,

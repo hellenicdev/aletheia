@@ -8,7 +8,7 @@ const MENU_BLOB =
   /\b(?:Εκδόσεις|Reimagine Tourism|Our personalization engine|Get email alerts|Popular articles|Google Tag Manager|Essential cookies)\b/i;
 
 const REFERENCE_HEADING =
-  /^(?:references|sources|popular articles|related articles|you may also like|read more|also read|more stories|σχετικά άρθρα|σχετικά θέματα|διαβάστε επίσης|διαβάστε περισσότερα|δείτε επίσης|περισσότερα άρθρα)(?=$|[^\p{L}])/iu;
+  /^(?:references|sources|popular articles|related articles|related stories|related posts|you may also like|you might also like|read more|also read|more stories|more from|trending|end of article|about the author|σχετικά άρθρα|σχετικά θέματα|διαβάστε επίσης|διαβάστε περισσότερα|δείτε επίσης|περισσότερα άρθρα)$/iu;
 
 const SECTION_LABEL =
   /^(?:opinion|opinions|comment|άποψη|αποψη|σχόλιο|σχολιο|απόψεις|αποψεις|γνώμες|γνωμες|δημόσιο βήμα|δημοσιο βημα|αρθρογραφία|αρθρογραφια)$/iu;
@@ -32,6 +32,7 @@ export function isSkippableFragment(text: string): boolean {
   const value = text.replace(/\s+/g, " ").trim();
   if (!value) return true;
   if (SECTION_LABEL.test(value)) return true;
+  if (isLinkTitle(value)) return true;
   if (value.length < 25) return true;
   if (MENU.test(value)) return true;
   if (isDateline(value) || isPhotoCredit(value)) return true;
@@ -43,21 +44,16 @@ export function isSkippableFragment(text: string): boolean {
 export function cleanArticleText(raw: string): string {
   const lines = stripCredits(raw).replace(/\r\n/g, "\n").split("\n");
   const seenLines = new Set<string>();
-  let droppingReferences = false;
-  let droppedReferenceBody = false;
+  let droppingTail = false;
   let keptProse = false;
   const kept = lines.filter((line) => {
     const trimmed = line.trim();
     if (keptProse && REFERENCE_HEADING.test(trimmed)) {
-      droppingReferences = true;
-      droppedReferenceBody = false;
+      droppingTail = true;
       return false;
     }
-    if (droppingReferences) {
-      if (!trimmed && droppedReferenceBody) droppingReferences = false;
-      else if (trimmed) droppedReferenceBody = true;
-      return false;
-    }
+    if (droppingTail) return false;
+    if (isLinkTitle(trimmed)) return false;
     if (looksLikeBoilerplate(line)) return false;
     const key = line.replace(/\s+/g, " ").trim().toLowerCase();
     if (!key) return true;
@@ -110,10 +106,25 @@ function isPhotoCredit(text: string): boolean {
   return PHOTO_CREDIT.test(text.trim());
 }
 
+function isLinkTitle(text: string): boolean {
+  const value = text.replace(/\s+/g, " ").trim();
+  if (!value) return false;
+  if (/episode\s*\d+/i.test(value) && value.length < 180) return true;
+  if (value.length > 120 || value.length < 12) return false;
+  if (!/[–—]/.test(value)) return false;
+  if (/,/.test(value)) return false;
+  if (/[.!?]/.test(value.slice(0, -1))) return false;
+  if (/\b(was|were|is|are|said|says|voted|will|have|has|had|ανακοίνωσε|είπε|δήλωσε)\b/iu.test(value)) {
+    return false;
+  }
+  return value.split(/\s+/).length <= 10;
+}
+
 function looksLikeBoilerplate(line: string): boolean {
   const text = line.trim();
   if (!text) return false;
   if (SECTION_LABEL.test(text)) return false;
+  if (isLinkTitle(text)) return true;
   if (MENU.test(text)) return true;
   if (isDateline(text) || isPhotoCredit(text)) return true;
   if (text.length < 25) return true;

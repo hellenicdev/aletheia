@@ -1,5 +1,6 @@
 import { cleanArticleText } from "../../shared/articleText";
 import type { EvidenceItem } from "../../shared/citations";
+import { combineSignals, deadlineReached, isDeadline, raceAbort } from "./deadline";
 import { HttpError, UpstreamError, redactSecret } from "./errors";
 import { LIMITS } from "./limits";
 import { assertPublicHttpUrl, isBlockedHost } from "./ssrf";
@@ -9,26 +10,65 @@ const FIRECRAWL_API = "https://api.firecrawl.dev";
 const CACHE_TTL_SECONDS = 86_400;
 const searchCache = new Map<string, { at: number; hits: EvidenceItem[] }>();
 const scrapeCache = new Map<string, { at: number; page: ScrapedPage }>();
-let queue: Promise<unknown> = Promise.resolve();
+const verifyCache = new Map<string, { at: number; verdict: CachedVerdict }>();
+let queue: Promise<void> = Promise.resolve();
+
+export interface CachedVerdict {
+  label: string;
+  confidence: number;
+  explanation: string;
+  sourceUrls: string[];
+}
 
 export function clearSearchCache(): void {
   searchCache.clear();
   scrapeCache.clear();
+  verifyCache.clear();
   resetOutboundBudget();
 }
 
-function enqueue<T>(job: () => Promise<T>): Promise<T> {
-  const run = queue.then(job, job);
-  queue = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  return run;
+/**
+ * One Firecrawl call at a time. The slot is released when the job finishes or
+ * when `signal` aborts, so a fetch that never resolves cannot pin later calls.
+ */
+function enqueue<T>(job: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  const previous = queue;
+  let release: () => void = () => {};
+  const slot = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  queue = slot;
+  return (async () => {
+    try {
+      await raceAbort(previous, signal);
+      if (signal?.aborted) throw deadlineReached();
+      return await raceAbort(job(), signal);
+    } finally {
+      release();
+    }
+  })();
 }
 
-async function pause(ms: number): Promise<void> {
+async function pause(ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) return;
-  await new Promise((resolve) => setTimeout(resolve, ms));
+  if (signal?.aborted) throw deadlineReached();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await raceAbort(
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, ms);
+      }),
+      signal,
+    );
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function operationSignal(timeoutMs: number, parent?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(Math.max(1_000, timeoutMs));
+  if (!parent) return timeout;
+  return combineSignals([timeout, parent]);
 }
 
 function testsSkipWait(): boolean {
@@ -57,6 +97,7 @@ export async function searchWeb(options: {
   retryDelayMs?: number;
   timeoutMs?: number;
   canSpend?: () => boolean;
+  signal?: AbortSignal;
 }): Promise<EvidenceItem[]> {
   const query = options.query.trim().slice(0, 240);
   if (!query) return [];
@@ -81,19 +122,22 @@ export async function searchWeb(options: {
   if (options.canSpend && !options.canSpend()) {
     throw new Error("search skipped to stay within the worker subrequest limit");
   }
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const signal = operationSignal(timeoutMs, options.signal);
   const response = await enqueue(async () => {
-    await acquireOutbound(pause);
+    await acquireOutbound(pause, signal);
     return firecrawlPost(
       `${FIRECRAWL_API}/v2/search`,
       payload,
       options.apiKey,
       options.fetchImpl,
-      options.timeoutMs ?? 10_000,
+      timeoutMs,
       options.retryDelayMs ?? 500,
       options.canSpend,
+      signal,
     );
-  });
-  const text = await response.text();
+  }, signal);
+  const text = await raceAbort(response.text(), signal);
   if (!response.ok) {
     const failure = new UpstreamError("search", response.status, redactSecret(text, options.apiKey));
     console.error(failure.message);
@@ -127,9 +171,11 @@ async function firecrawlPost(
   timeoutMs: number,
   retryDelayMs: number,
   canSpend?: () => boolean,
+  signal?: AbortSignal,
 ): Promise<Response> {
   let lastError: unknown = null;
   for (let attempt = 0; attempt < 2; attempt++) {
+    if (signal?.aborted) throw deadlineReached();
     if (attempt > 0 && canSpend && !canSpend()) {
       throw new Error("search skipped to stay within the worker subrequest limit");
     }
@@ -138,17 +184,18 @@ async function firecrawlPost(
         method: "POST",
         headers: firecrawlHeaders(apiKey.trim()),
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(Math.max(1_000, timeoutMs)),
+        signal,
       });
       if (response.status === 429 && attempt < 1) {
         const wait = retryAfterMs(response, retryDelayMs);
-        await response.text().catch(() => "");
-        await pause(testsSkipWait() ? 0 : wait);
+        await raceAbort(response.text().catch(() => ""), signal);
+        await pause(testsSkipWait() ? 0 : wait, signal);
         continue;
       }
       return response;
     } catch (error) {
       lastError = error;
+      if (isDeadline(error)) throw error;
       break;
     }
   }
@@ -174,6 +221,8 @@ export async function scrapeArticle(options: {
   url: string;
   apiKey: string;
   fetchImpl: typeof fetch;
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }): Promise<ScrapedPage> {
   const pageUrl = assertPublicHttpUrl(options.url);
   const cacheKey = pageUrl.toString();
@@ -184,8 +233,10 @@ export async function scrapeArticle(options: {
     scrapeCache.set(cacheKey, { at: Date.now(), page: persisted });
     return persisted;
   }
+  const timeoutMs = options.timeoutMs ?? 20_000;
+  const signal = operationSignal(timeoutMs, options.signal);
   const response = await enqueue(async () => {
-    await acquireOutbound(pause);
+    await acquireOutbound(pause, signal);
     return firecrawlPost(
       `${FIRECRAWL_API}/v2/scrape`,
       {
@@ -193,15 +244,17 @@ export async function scrapeArticle(options: {
         formats: ["markdown", "html"],
         onlyMainContent: true,
         excludeTags: ["nav", "header", "footer", "aside", "form", "script", "style", "noscript"],
-        timeout: 20_000,
+        timeout: timeoutMs,
       },
       options.apiKey,
       options.fetchImpl,
-      20_000,
+      timeoutMs,
       500,
+      undefined,
+      signal,
     );
-  });
-  const text = await response.text();
+  }, signal);
+  const text = await raceAbort(response.text(), signal);
   if (!response.ok) {
     if (response.status === 401 || response.status === 403) {
       throw new HttpError(502, "The Firecrawl API key was rejected.");
@@ -287,6 +340,28 @@ async function readPersisted<T>(key: string): Promise<T | null> {
   }
 }
 
+export function verificationCacheKey(claim: string, urls: string[], language: string): string {
+  const list = [...urls]
+    .map((url) => url.trim())
+    .filter(Boolean)
+    .sort();
+  return `verify:${language}:${claim.replace(/\s+/g, " ").trim()}\n${list.join("\n")}`;
+}
+
+export async function readVerification(key: string): Promise<CachedVerdict | null> {
+  const memo = verifyCache.get(key);
+  if (memo && Date.now() - memo.at < CACHE_TTL_SECONDS * 1000) return memo.verdict;
+  const persisted = await readPersisted<CachedVerdict>(key);
+  if (!persisted || typeof persisted.label !== "string") return null;
+  verifyCache.set(key, { at: Date.now(), verdict: persisted });
+  return persisted;
+}
+
+export async function writeVerification(key: string, verdict: CachedVerdict): Promise<void> {
+  verifyCache.set(key, { at: Date.now(), verdict });
+  await writePersisted(key, verdict);
+}
+
 async function writePersisted(key: string, value: unknown): Promise<void> {
   const cache = resultCache();
   if (!cache) return;
@@ -353,13 +428,27 @@ function readHits(payload: Record<string, unknown>): Hit[] {
 
 function toEvidence(hit: Hit): EvidenceItem | null {
   if (typeof hit.url !== "string" || !/^https?:\/\//i.test(hit.url)) return null;
+  const markdown = markdownToText(stringValue(hit.markdown));
   const snippetSource =
-    stringValue(hit.description) || stringValue(hit.snippet) || markdownToText(stringValue(hit.markdown));
+    stringValue(hit.description) || stringValue(hit.snippet) || markdown;
+  const byline = apByline(markdown) || apByline(stringValue(hit.title));
+  const snippet = [snippetSource, byline && !apByline(snippetSource) ? byline : ""]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 400);
   return {
     url: hit.url,
     title: (stringValue(hit.title) || hit.url).replace(/\s+/g, " ").trim().slice(0, 180),
-    snippet: snippetSource.replace(/\s+/g, " ").trim().slice(0, 400),
+    snippet,
   };
+}
+
+/** Keep an Associated Press credit that arrived only in markdown, so a reprint is not scored as a second source. */
+function apByline(text: string): string {
+  const match = text.match(/.{0,60}\bassociated press\b.{0,40}|.{0,40}\(\s*ap\s*\).{0,40}/i);
+  return match ? match[0].replace(/\s+/g, " ").trim() : "";
 }
 
 function stringValue(value: unknown): string {

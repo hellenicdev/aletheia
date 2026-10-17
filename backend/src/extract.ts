@@ -1,5 +1,6 @@
 import { cleanArticleText, proseScore } from "../../shared/articleText";
 import { looksLikeOpinionSection, opinionCueFromHtml } from "../../shared/classify";
+import { combineSignals, raceAbort } from "./deadline";
 import { scrapeArticle } from "./firecrawl";
 import { LIMITS } from "./limits";
 import { HttpError } from "./errors";
@@ -128,6 +129,7 @@ export async function fetchArticle(
   rawUrl: string,
   fetchImpl: typeof fetch,
   apiKey?: string,
+  signal?: AbortSignal,
 ): Promise<ExtractedArticle> {
   assertPublicHttpUrl(rawUrl);
   if (apiKey?.trim()) {
@@ -135,6 +137,8 @@ export async function fetchArticle(
       url: rawUrl,
       apiKey: apiKey.trim(),
       fetchImpl,
+      signal,
+      timeoutMs: 20_000,
     });
     const fromHtml = htmlBody(scraped.rawHtml, scraped.finalUrl);
     const text =
@@ -162,7 +166,7 @@ export async function fetchArticle(
         opinionCueFromHtml(scraped.rawHtml ?? ""),
     };
   }
-  const direct = await fetchArticleDirect(rawUrl, fetchImpl);
+  const direct = await fetchArticleDirect(rawUrl, fetchImpl, signal);
   return { ...direct, via: "local" };
 }
 
@@ -182,20 +186,27 @@ function htmlBody(
 async function fetchArticleDirect(
   rawUrl: string,
   fetchImpl: typeof fetch,
+  signal?: AbortSignal,
 ): Promise<Omit<ExtractedArticle, "via">> {
   let current = assertPublicHttpUrl(rawUrl);
   let response: Response | null = null;
 
   for (let hop = 0; hop <= LIMITS.maxRedirects; hop++) {
-    response = await fetchImpl(current.toString(), {
-      method: "GET",
-      redirect: "manual",
-      headers: {
-        Accept: "text/html,application/xhtml+xml",
-        "User-Agent": "AletheiaBot/1.0 (+https://hellenicdev.github.io/aletheia)",
-      },
-      signal: AbortSignal.timeout(15_000),
-    });
+    const hopSignal = signal
+      ? combineSignals([signal, AbortSignal.timeout(15_000)])
+      : AbortSignal.timeout(15_000);
+    response = await raceAbort(
+      fetchImpl(current.toString(), {
+        method: "GET",
+        redirect: "manual",
+        headers: {
+          Accept: "text/html,application/xhtml+xml",
+          "User-Agent": "AletheiaBot/1.0 (+https://hellenicdev.github.io/aletheia)",
+        },
+        signal: hopSignal,
+      }),
+      hopSignal,
+    );
 
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get("location");

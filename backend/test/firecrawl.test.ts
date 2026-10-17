@@ -251,6 +251,70 @@ describe("result cache", () => {
   });
 });
 
+describe("deadline abort", () => {
+  it("does not leave the queue stuck when a fetch never resolves", async () => {
+    clearSearchCache();
+    const controller = new AbortController();
+    const hung: typeof fetch = () =>
+      new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(new Response("late")), 60_000);
+        timer.unref?.();
+      });
+    const first = searchWeb({
+      apiKey: "k",
+      query: "hung query alpha",
+      language: "en",
+      fetchImpl: hung,
+      signal: controller.signal,
+      timeoutMs: 30_000,
+    });
+    const second = searchWeb({
+      apiKey: "k",
+      query: "hung query beta",
+      language: "en",
+      fetchImpl: hung,
+      signal: controller.signal,
+      timeoutMs: 30_000,
+    });
+    setTimeout(() => controller.abort(), 40);
+    await expect(first).rejects.toThrow(/deadline/);
+    await expect(second).rejects.toThrow(/deadline/);
+    const hits = await searchWeb({
+      apiKey: "k",
+      query: "hung query gamma",
+      language: "en",
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            success: true,
+            data: [{ url: "https://example.com/a", title: "A", description: "After the hang" }],
+          }),
+        ),
+    });
+    expect(hits[0]?.snippet).toBe("After the hang");
+  });
+
+  it("keeps an Associated Press credit that arrived only in markdown", async () => {
+    clearSearchCache();
+    const fetchImpl: typeof fetch = async () =>
+      new Response(
+        JSON.stringify({
+          success: true,
+          data: [
+            {
+              url: "https://www.opb.org/article/rescue",
+              title: "Coast Guard stop",
+              description: "A local desk summarized the rescue without naming the wire in this field.",
+              markdown: "WASHINGTON (AP) — The coastal plant received financing for the restart.",
+            },
+          ],
+        }),
+      );
+    const hits = await searchWeb({ apiKey: "k", query: "coast guard markdown credit", language: "en", fetchImpl });
+    expect(hits[0]?.snippet).toMatch(/\(AP\)|Associated Press/i);
+  });
+});
+
 describe("markdownToText", () => {
   it("drops link targets and emphasis", () => {
     expect(markdownToText("See [the minutes](https://example.com/m) and *the fee*.")).toBe(

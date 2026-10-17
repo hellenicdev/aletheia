@@ -63,7 +63,11 @@ export function isIndependent(
   if (isSocialHost(item.url)) return false;
   if (isBlockedEvidenceHost(item.url)) return false;
   if (isWireCopy(item.url)) return false;
-  if (isSyndicatedCopy(item, options.articleTitle ?? null, options.articleText ?? "")) return false;
+  if (
+    isSyndicatedCopy(item, options.articleTitle ?? null, options.articleText ?? "", options.articleDomain ?? null)
+  ) {
+    return false;
+  }
   if (isEcho(item.snippet, options.claimText, options.articleText ?? "", item.url)) return false;
   return true;
 }
@@ -71,28 +75,44 @@ export function isIndependent(
 const WIRE_BYLINE =
   /\bassociated press\b|\(\s*ap\s*\)|(?:^|[\s—–|])ap\s*[—–|-]|[—–|-]\s*ap\s*$/i;
 
+const AP_CREDIT = /\bassociated press\b|\(\s*ap\s*\)/i;
+
+function articleIsAp(domain: string | null | undefined, title: string | null, text: string): boolean {
+  const host = (domain ?? "").replace(/^www\./, "").toLowerCase();
+  if (host === "apnews.com" || host.endsWith(".apnews.com")) return true;
+  return WIRE_BYLINE.test(`${title ?? ""} ${text.slice(0, 700)}`);
+}
+
 /** A reprint of this article, or a page carrying an AP byline, is not a second source. */
 export function isSyndicatedCopy(
   item: { title?: string; snippet?: string },
   articleTitle: string | null,
   articleText: string,
+  articleDomain?: string | null,
 ): boolean {
   const title = (item.title ?? "").replace(/\s+/g, " ").trim();
   const snippet = (item.snippet ?? "").replace(/\s+/g, " ").trim();
-  if (WIRE_BYLINE.test(`${title} ${snippet}`)) return true;
+  const surface = `${title} ${snippet}`;
+  if (WIRE_BYLINE.test(surface)) return true;
+  if (articleIsAp(articleDomain, articleTitle, articleText) && AP_CREDIT.test(surface)) return true;
   const ours = (articleTitle ?? "").replace(/\s+/g, " ").trim();
-  if (ours.length >= 24 && title.length >= 24) {
-    const overlap = Math.min(tokenOverlap(ours, title), tokenOverlap(title, ours));
-    if (overlap >= 0.72) return true;
-  }
   const lead = articleText.replace(/\s+/g, " ").trim().slice(0, 500);
+  if (nearCopy(ours, title, 24, 24)) return true;
+  if (nearCopy(ours, snippet, 24, 40)) return true;
+  if (nearCopy(lead, title, 40, 24)) return true;
   if (snippet.length >= 48 && lead.length >= 48) {
     const window = snippet.slice(0, 64).toLowerCase();
     if (lead.toLowerCase().includes(window.slice(0, 48))) return true;
-    const overlap = Math.min(tokenOverlap(lead, snippet), tokenOverlap(snippet, lead));
-    if (overlap >= 0.8) return true;
   }
+  if (nearCopy(lead, snippet, 40, 40)) return true;
   return false;
+}
+
+/** Token overlap above ~0.6 in both directions means the result repeats this article. */
+function nearCopy(articlePart: string, resultPart: string, minArticle: number, minResult: number): boolean {
+  if (articlePart.length < minArticle || resultPart.length < minResult) return false;
+  const overlap = Math.min(tokenOverlap(articlePart, resultPart), tokenOverlap(resultPart, articlePart));
+  return overlap >= 0.6;
 }
 
 const SYNDICATORS = ["yahoo.com", "inkl.com", "msn.com", "apple.news", "flipboard.com", "smartnews.com", "news.google.com"];
