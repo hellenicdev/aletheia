@@ -133,7 +133,7 @@ export function aggregateScore(
       : Math.max(0, 100 - options.contradictionCount * CONTRADICTION_PENALTY);
 
   const outlet = options.outlet ?? "news";
-  const opinionPiece = isMostlyOpinion(counts, segments.length);
+  const opinionPiece = options.outlet === "opinion" || isMostlyOpinion(counts, segments.length);
   const factualBasis: ScoreResult["factualBasis"] =
     checkable.length === 0 ? "commentary" : coverage < 0.6 || decided.length === 0 ? "uncertain" : "measured";
 
@@ -269,8 +269,12 @@ function buildVerdict(
   if (outsideSearch > 0) {
     parts.push(
       lang === "el"
-        ? `${outsideSearch} ${outsideSearch === 1 ? "ισχυρισμός έμεινε" : "ισχυρισμοί έμειναν"} εκτός αναζήτησης και δεν μετρούν ως κενό κάλυψης.`
-        : `${outsideSearch} further ${outsideSearch === 1 ? "claim was" : "claims were"} outside this search and do not count as a coverage gap.`,
+        ? outsideSearch === 1
+          ? "1 ισχυρισμός έμεινε εκτός αναζήτησης και δεν μετρά ως κενό κάλυψης."
+          : `${outsideSearch} ισχυρισμοί έμειναν εκτός αναζήτησης και δεν μετρούν ως κενό κάλυψης.`
+        : outsideSearch === 1
+          ? "1 further claim was outside this search and does not count as a coverage gap."
+          : `${outsideSearch} further claims were outside this search and do not count as a coverage gap.`,
     );
   }
   if (counts.Opinion > 0) {

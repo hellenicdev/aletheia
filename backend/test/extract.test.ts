@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { clearSearchCache } from "../src/firecrawl";
 import { extractArticle, fetchArticle } from "../src/extract";
 import { HttpError } from "../src/errors";
 
@@ -60,9 +61,47 @@ describe("extractArticle", () => {
     expect(onion.text).toContain("harbour board");
     expect(onion.text).not.toContain("cookies");
   });
+
+  it("keeps a WordPress article body and drops the sibling menu", () => {
+    const page = extractArticle(
+      `<body>
+        <div class="sidebar">World editors recommend more stories from the politics desk and the business desk today.</div>
+        <div class="entry-content">
+          <p>The council voted 7 to 2 and published the full minutes for residents of the harbour district.</p>
+        </div>
+      </body>`,
+      "https://example.com/2026/10/harbour",
+    );
+    expect(page.text).toContain("voted 7 to 2");
+    expect(page.text).not.toContain("politics desk");
+  });
 });
 
 describe("fetchArticle", () => {
+  it("prefers the AP HTML story when markdown is a longer menu", async () => {
+    clearSearchCache();
+    const menu =
+      "World editors recommend more stories from the politics desk and the business desk every morning before the paper closes for the night.";
+    const loan =
+      "The coastal plant received a federal loan that will fund the restart, according to the filing released on Monday morning.";
+    const fetchImpl: typeof fetch = async () =>
+      new Response(
+        JSON.stringify({
+          success: true,
+          data: {
+            markdown: `${menu}\n\n${menu} The politics desk kept filing more items so this markdown dump is much longer than the story itself and would otherwise win.`,
+            html: `<div class="NavMenu"><p>${menu}</p></div><div class="RichTextStoryBody"><p>${loan}</p></div>`,
+            metadata: { title: "Loan", sourceURL: "https://apnews.com/article/coastal-loan" },
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    const page = await fetchArticle("https://apnews.com/article/coastal-loan", fetchImpl, "key");
+    expect(page.text).toContain("federal loan");
+    expect(page.text).not.toContain("politics desk");
+    expect(page.text).not.toContain("personalization");
+  });
+
   it("refuses a redirect onto a private address", async () => {
     let calls = 0;
     const fetchImpl: typeof fetch = async () => {

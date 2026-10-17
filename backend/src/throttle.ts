@@ -7,8 +7,8 @@ export interface TokenBucket {
   reset(now?: number): void;
 }
 
-export function createTokenBucket(capacity = 10, windowMs = 60_000): TokenBucket {
-  let tokens = capacity;
+export function createTokenBucket(capacity = 10, windowMs = 60_000, initial = capacity): TokenBucket {
+  let tokens = initial;
   let updated = 0;
 
   return {
@@ -24,13 +24,19 @@ export function createTokenBucket(capacity = 10, windowMs = 60_000): TokenBucket
       return Math.ceil(((1 - tokens) * windowMs) / capacity);
     },
     reset(now = Date.now()) {
-      tokens = capacity;
+      tokens = initial;
       updated = now;
     },
   };
 }
 
-export const outboundBudget = createTokenBucket(10, 60_000);
+/**
+ * A fresh isolate starts with two tokens, then refills at about 10/minute.
+ * That stops a new request from firing its whole search budget at once.
+ * The bucket does not survive across isolates. A shared limit would need a
+ * Durable Object or KV binding, which this worker does not add.
+ */
+export const outboundBudget = createTokenBucket(10, 60_000, 2);
 
 export function resetOutboundBudget(now = Date.now()): void {
   outboundBudget.reset(now);

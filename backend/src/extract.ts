@@ -10,6 +10,7 @@ export interface ExtractedArticle {
   publishedAt: string | null;
   finalUrl: string;
   via: "firecrawl" | "local";
+  fromPreferred?: boolean;
 }
 
 const SKIP_TAGS = new Set([
@@ -94,12 +95,12 @@ export function extractArticle(
   const preferredText = cleanArticleText(cleanupText(walked.preferred));
   const articleText = cleanArticleText(cleanupText(walked.article));
   const bodyText = cleanArticleText(cleanupText(walked.body));
-  const text =
-    proseScore(preferredText) >= 12
-      ? preferredText
-      : proseScore(articleText) >= 12
-        ? articleText
-        : bodyText;
+  const fromPreferred = preferredText.length >= LIMITS.minArticleChars && proseScore(preferredText) >= 12;
+  const text = fromPreferred
+    ? preferredText
+    : proseScore(articleText) >= 12
+      ? articleText
+      : bodyText;
 
   if (text.length < LIMITS.minArticleChars) {
     throw new HttpError(
@@ -112,6 +113,7 @@ export function extractArticle(
     title,
     text: text.slice(0, LIMITS.maxArticleChars),
     publishedAt,
+    fromPreferred,
   };
 }
 
@@ -133,9 +135,19 @@ export async function fetchArticle(
     });
     const fromHtml = htmlBody(scraped.rawHtml, scraped.finalUrl);
     const text =
-      fromHtml && proseScore(fromHtml) > proseScore(scraped.text) * 1.25 && proseScore(fromHtml) > proseScore(scraped.text) + 40
-        ? fromHtml
-        : scraped.text;
+      fromHtml?.fromPreferred
+        ? fromHtml.text
+        : fromHtml &&
+            proseScore(fromHtml.text) > proseScore(scraped.text) * 1.25 &&
+            proseScore(fromHtml.text) > proseScore(scraped.text) + 40
+          ? fromHtml.text
+          : scraped.text;
+    if (text.length < LIMITS.minArticleChars) {
+      throw new HttpError(
+        422,
+        "Could not find enough article text on that page. Paste the text instead.",
+      );
+    }
     return {
       title: scraped.title,
       text: text.slice(0, LIMITS.maxArticleChars),
@@ -148,12 +160,16 @@ export async function fetchArticle(
   return { ...direct, via: "local" };
 }
 
-function htmlBody(html: string | null, pageUrl: string): string {
-  if (!html) return "";
+function htmlBody(
+  html: string | null,
+  pageUrl: string,
+): { text: string; fromPreferred: boolean } | null {
+  if (!html) return null;
   try {
-    return extractArticle(html, pageUrl).text;
+    const extracted = extractArticle(html, pageUrl);
+    return { text: extracted.text, fromPreferred: extracted.fromPreferred === true };
   } catch {
-    return "";
+    return null;
   }
 }
 
@@ -337,8 +353,16 @@ function sitePrefers(pageUrl: string, name: string, attributes: Record<string, s
   } catch {
     return false;
   }
-  const marker = `${attributes.class || ""} ${attributes.id || ""} ${attributes["data-component"] || ""} ${attributes["data-testid"] || ""}`;
-  if (host.endsWith("apnews.com")) return /RichTextStoryBody/i.test(marker);
+  const marker = `${attributes.class || ""} ${attributes.id || ""} ${attributes["data-component"] || ""} ${attributes["data-testid"] || ""} ${attributes.itemprop || ""}`;
+  if (/articleBody/i.test(attributes.itemprop || "")) return true;
+  if (
+    /RichTextStoryBody|entry-content|post-content|td-post-content|article__body|article-body|story-body|story-content|c-article__content|hentry/i.test(
+      marker,
+    )
+  ) {
+    return true;
+  }
+  if (host.endsWith("apnews.com")) return /RichTextStoryBody|Article/i.test(marker);
   if (host.endsWith("theonion.com")) return /entry-content|article__body|post-content/i.test(marker);
   if (host.endsWith("bbc.com") || host.endsWith("bbc.co.uk")) {
     return attributes["data-component"] === "text-block" || /article__body|ssrcss/i.test(marker);

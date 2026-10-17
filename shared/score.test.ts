@@ -158,7 +158,34 @@ describe("aggregateScore", () => {
     expect(checked.overall).toBeGreaterThan(70);
     expect(checked.verdict).toContain("8 of 8");
     expect(checked.verdict).toContain("outside this search");
+    expect(checked.verdict).toContain("do not count");
     expect(checked.counts.Unverifiable).toBe(12);
+  });
+
+  it("uses singular grammar when one claim was outside the search", () => {
+    const score = aggregateScore(
+      [segment("True"), { ...segment("Unverifiable", 0.3, false), inCoverage: false }],
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "en" },
+    );
+    expect(score.verdict).toContain("1 further claim was outside this search and does not count");
+    expect(score.verdict).not.toContain("and do not count");
+    const greek = aggregateScore(
+      [segment("True"), { ...segment("Unverifiable", 0.3, false), inCoverage: false }],
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "el" },
+    );
+    expect(greek.verdict).toContain("δεν μετρά");
+    expect(greek.verdict).not.toContain("δεν μετρούν");
+  });
+
+  it("describes an opinion outlet as mostly opinion and caps the score", () => {
+    const score = aggregateScore([segment("True"), segment("True")], {
+      contradictionCount: 0,
+      searchEnabled: true,
+      uiLanguage: "en",
+      outlet: "opinion",
+    });
+    expect(score.verdict).toContain("mostly opinion");
+    expect(score.overall).toBeLessThanOrEqual(74);
   });
 
   it("caps coverage only when fewer than a quarter of the selected claims were decided", () => {

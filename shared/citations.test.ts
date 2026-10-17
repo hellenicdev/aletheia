@@ -145,9 +145,83 @@ describe("wire reprints and entity match", () => {
     });
     expect(isWireCopy("https://abcnews.go.com/US/wireStory/coastal-loan")).toBe(true);
     expect(isWireCopy("https://www.usnews.com/news/national/articles/loan")).toBe(true);
+    expect(isWireCopy("https://www.clickondetroit.com/news/story")).toBe(true);
+    expect(isWireCopy("https://www.wral.com/news/ap/story")).toBe(true);
+    expect(isWireCopy("https://www.manisteenews.com/news/article")).toBe(true);
+    expect(isWireCopy("https://www.aol.co.uk/articles/story")).toBe(true);
+    expect(isWireCopy("https://apnews.com/article/coastal-loan")).toBe(false);
     expect(isWireCopy("https://www.reuters.com/world/energy")).toBe(false);
     expect(wire.label).toBe("Unverifiable");
     expect(wire.explanation).toContain("not independently verified");
+
+    const sameFamily = applyEvidence({
+      label: "True",
+      confidence: 0.8,
+      explanation: "The UK edition repeated the BBC story.",
+      claimText: claim,
+      sourceUrls: ["https://www.bbc.co.uk/news/vaping"],
+      evidence: [
+        {
+          url: "https://www.bbc.co.uk/news/vaping",
+          title: "BBC",
+          snippet: "A separate count of vaping among people who do not smoke.",
+        },
+      ],
+      searchEnabled: true,
+      uiLanguage: "en",
+      articleDomain: "bbc.com",
+      articleText: "An original BBC story about vaping rates.",
+    });
+    expect(sameFamily.label).toBe("Unverifiable");
+
+    const weak = applyEvidence({
+      label: "True",
+      confidence: 0.7,
+      explanation: "A newsletter and a policy journal agreed.",
+      claimText: claim,
+      sourceUrls: ["https://foo.substack.com/p/x", "https://publichealthpolicyjournal.com/story"],
+      evidence: [
+        {
+          url: "https://foo.substack.com/p/x",
+          title: "Newsletter",
+          snippet: "The coastal plant received financing for the restart.",
+        },
+        {
+          url: "https://publichealthpolicyjournal.com/story",
+          title: "Journal",
+          snippet: "The coastal plant received financing for the restart.",
+        },
+      ],
+      searchEnabled: true,
+      uiLanguage: "en",
+      articleDomain: "naturalnews.com",
+      articleText: "A long original post about the plant.",
+    });
+    expect(weak.label).toBe("Unverifiable");
+  });
+
+  it("does not fact-check a value judgement as True", () => {
+    const applied = applyEvidence({
+      label: "True",
+      confidence: 0.7,
+      explanation: "The record shows a change of policy.",
+      claimText: "the White House's willingness to dump a client at a time of weakness",
+      sourceUrls: ["https://www.reuters.com/world/policy"],
+      evidence: [
+        {
+          url: "https://www.reuters.com/world/policy",
+          title: "Reuters",
+          snippet: "Washington changed its public line on the partnership during the talks.",
+        },
+      ],
+      searchEnabled: true,
+      uiLanguage: "en",
+      articleDomain: "aljazeera.com",
+      articleText: "A column about the partnership and the talks that followed.",
+    });
+    expect(applied.label).toBe("Opinion");
+    expect(applied.sources).toEqual([]);
+    expect(applied.evidenceMode).toBe("not-applicable");
   });
 
   it("refuses False when the evidence names a different plant", () => {

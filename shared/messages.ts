@@ -22,7 +22,8 @@ export function unverifiableExplanation(
     | "budget"
     | "model-only"
     | "not-independent"
-    | "entity-mismatch",
+    | "entity-mismatch"
+    | "check-failed",
 ): string {
   const el: Record<typeof reason, string> = {
     "no-evidence":
@@ -41,6 +42,8 @@ export function unverifiableExplanation(
       "Οι μόνες σελίδες που βρέθηκαν είναι το ίδιο το άρθρο ή αντίγραφά του, οπότε ο ισχυρισμός δεν επαληθεύεται ανεξάρτητα.",
     "entity-mismatch":
       "Τα τεκμήρια αφορούν διαφορετικό πρόσωπο, τόπο ή γεγονός, οπότε ο ισχυρισμός δεν κρίνεται ψευδής και μένει μη επαληθεύσιμος.",
+    "check-failed":
+      "Ο έλεγχος δεν ολοκληρώθηκε επειδή απέτυχε η κλήση του μοντέλου, οπότε αυτό δεν είναι κρίση επί των τεκμηρίων.",
   };
   const en: Record<typeof reason, string> = {
     "no-evidence":
@@ -59,6 +62,8 @@ export function unverifiableExplanation(
       "The only pages found were this article or copies of it, so the claim is not independently verified.",
     "entity-mismatch":
       "The evidence is about a different person, place, or event, so this claim is not marked false and stays unverified.",
+    "check-failed":
+      "The fact-check did not finish because the model call failed, so this is not a verdict on the evidence.",
   };
   return lang === "el" ? el[reason] : en[reason];
 }

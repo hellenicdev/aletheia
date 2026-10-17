@@ -54,11 +54,19 @@ export function hostOf(url: string): string | null {
   }
 }
 
+/** Country editions of the same newsroom. bbc.co.uk is not a second source for bbc.com. */
+const OUTLET_FAMILIES = [
+  ["bbc.com", "bbc.co.uk"],
+  ["theguardian.com", "guardian.co.uk"],
+];
+
 export function sameOutlet(url: string, articleDomain: string | null): boolean {
   if (!articleDomain) return false;
   const source = hostOf(url);
   if (!source) return false;
-  return source === registrableHost(articleDomain);
+  const article = registrableHost(articleDomain);
+  if (source === article) return true;
+  return OUTLET_FAMILIES.some((family) => family.includes(source) && family.includes(article));
 }
 
 export function outletFromDomain(domain: string | null | undefined): OutletKind | null {
@@ -78,6 +86,29 @@ export function isSocialHost(url: string): boolean {
 export function isUnreliableHost(url: string): boolean {
   const kind = outletFromDomain(hostOf(url));
   return kind === "satire" || kind === "low-credibility";
+}
+
+/** Hosts that must not support a factual label, without capping an article published there. */
+const EVIDENCE_BLOCK = ["substack.com", "publichealthpolicyjournal.com"];
+
+export function bareHostname(url: string): string | null {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "").toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+export function isBlockedEvidenceHost(url: string): boolean {
+  if (isUnreliableHost(url)) return true;
+  const host = hostOf(url);
+  const bare = bareHostname(url);
+  return EVIDENCE_BLOCK.some(
+    (item) =>
+      host === item ||
+      bare === item ||
+      Boolean(bare && (bare.endsWith(`.${item}`) || bare.startsWith(`${item}.`))),
+  );
 }
 
 export function resolveOutlet(options: {
