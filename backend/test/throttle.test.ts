@@ -9,4 +9,12 @@ describe("outbound token bucket", () => {
     expect(bucket.take(start)).toBeGreaterThanOrEqual(6_000);
     expect(bucket.take(start + 6_000)).toBe(0);
   });
+
+  it("starts a fresh isolate with two tokens and then waits", () => {
+    const bucket = createTokenBucket(10, 60_000, 2);
+    const start = 1_000_000;
+    expect(bucket.take(start)).toBe(0);
+    expect(bucket.take(start)).toBe(0);
+    expect(bucket.take(start)).toBeGreaterThanOrEqual(6_000);
+  });
 });

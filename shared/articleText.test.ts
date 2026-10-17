@@ -42,4 +42,35 @@ describe("cleanArticleText", () => {
     expect(text).not.toContain("AP Photo");
     expect(text.match(/federal loan/g)).toHaveLength(1);
   });
+
+  it("drops cookie, newsletter, and menu boilerplate, including a menu glued to a headline", () => {
+    const raw = [
+      "Essential cookies enable basic functions of the site and remember the choices you make.",
+      "Google Tag Manager simplifies tag deployment for the newsroom and its partners.",
+      "Our personalization engine recommends more stories from the politics desk.",
+      "Get email alerts when this story is updated throughout the day.",
+      "",
+      "Η κυβέρνηση ανακοίνωσε νέο πλαίσιο για τον τουρισμό μετά τη σύνοδο. Εκδόσεις Καθημερινής Reimagine Tourism πακέτα για επισκέπτες.",
+      "",
+      "The coastal plant received a federal loan that will fund the restart, according to the filing released on Monday.",
+      "",
+      "References",
+      "Smith J. A short citation.",
+      "Popular articles",
+      "Another harbour story from last year",
+      "",
+      "Operators said the licence review finishes next spring after the board signs the notice.",
+    ].join("\n");
+    const text = cleanArticleText(raw);
+    expect(text).toContain("τουρισμό");
+    expect(text).not.toContain("Reimagine Tourism");
+    expect(text).not.toContain("Essential cookies");
+    expect(text).not.toContain("Google Tag Manager");
+    expect(text).not.toContain("personalization engine");
+    expect(text).not.toContain("email alerts");
+    expect(text).not.toContain("Smith");
+    expect(text).not.toContain("Another harbour");
+    expect(text).toContain("federal loan");
+    expect(text).toContain("licence review");
+  });
 });

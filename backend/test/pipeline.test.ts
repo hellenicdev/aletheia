@@ -384,6 +384,158 @@ describe("analyze", () => {
     expect(result.meta.warnings.join(" ")).not.toContain("firecrawl-test-key");
   });
 
+  it("keeps an insult rhetorical when search hits the worker subrequest error", async () => {
+    const fact = "The council voted 7 to 2 on Monday and published the minutes for residents.";
+    const insult = "Savor that nectar now, you sniveling moth pricks.";
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        throw new Error("Too many subrequests by single Worker invocation");
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(classifyPayload(user, () => ({
+          claimType: "checkable_factual",
+          note: "Treated as a fact.",
+        })));
+      }
+      if (system.startsWith("TASK:queries")) {
+        return llmPayload({ queries: [{ id: "s1", query: "council vote Monday" }] });
+      }
+      throw new Error(`verify should not run: ${system.slice(0, 24)}`);
+    };
+    const result = await analyze(
+      { text: `${fact} ${insult}`, uiLanguage: "en" },
+      { env, fetchImpl, subrequestLimit: 3 },
+    );
+    const factual = result.segments.find((segment) => segment.text.includes("voted"));
+    const rhetorical = result.segments.find((segment) => segment.text.includes("pricks"));
+    expect(rhetorical?.label).toBe("Rhetorical");
+    expect(factual?.label).toBe("Unverifiable");
+    expect(factual?.explanation.toLowerCase()).toContain("failed");
+    expect(factual?.explanation).not.toContain("do not support a firm verdict");
+    expect(result.meta.searchDegraded).toBe(true);
+  });
+
+  it("returns a partial result when search hangs past the deadline", async () => {
+    const fact = "The council voted 7 to 2 on Monday and published the minutes for residents.";
+    let ticks = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        const signal = init?.signal;
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(resolve, 30_000);
+          timer.unref?.();
+          const onAbort = () => {
+            clearTimeout(timer);
+            reject(signal?.reason instanceof Error ? signal.reason : new Error("aborted"));
+          };
+          if (signal?.aborted) onAbort();
+          else signal?.addEventListener("abort", onAbort, { once: true });
+        });
+        return new Response("late", { status: 200 });
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(classifyPayload(user, () => ({
+          claimType: "checkable_factual",
+          note: "A recorded claim.",
+        })));
+      }
+      if (system.startsWith("TASK:queries")) return llmPayload({ queries: [] });
+      if (system.startsWith("TASK:verify")) throw new Error("verify should wait for search");
+      throw new Error(system.slice(0, 24));
+    };
+    const started = Date.now();
+    const result = await analyze(
+      { text: fact, uiLanguage: "en" },
+      { env, fetchImpl, budgetMs: 4_000, onTick: () => { ticks += 1; } },
+    );
+    expect(Date.now() - started).toBeLessThan(6_000);
+    expect(ticks).toBeGreaterThan(0);
+    expect(result.segments[0]?.label).toBe("Unverifiable");
+    expect(result.segments[0]?.explanation.toLowerCase()).toMatch(/failed|did not finish/);
+    expect(result.meta.warnings.some((warning) => /deadline|timed out|subrequest/i.test(warning))).toBe(true);
+    expect(result.score.verdict).toContain("/100");
+  });
+
+  it("treats an opinion-section URL as a column even when the model says news", async () => {
+    const fact = "The council voted 7 to 2 on Monday and published the minutes for residents.";
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev/v2/search")) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            data: {
+              web: [
+                {
+                  url: "https://www.reuters.com/world/harbour-vote",
+                  title: "Reuters",
+                  description: "Councillors approved the harbour measure by seven votes to two.",
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes("api.firecrawl.dev/v2/scrape")) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            data: {
+              markdown: fact,
+              metadata: {
+                title: "Δημόσιο Βήμα",
+                sourceURL: "https://www.ertnews.gr/apopseis/dimosio-vima/column",
+              },
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload({
+          ...classifyPayload(user, () => ({ claimType: "checkable_factual", note: "A recorded claim." })),
+          genre: "news",
+        });
+      }
+      if (system.startsWith("TASK:queries")) {
+        return llmPayload({ queries: [{ id: "s1", query: "council vote Monday" }] });
+      }
+      if (system.startsWith("TASK:verify")) {
+        const payload = JSON.parse(user) as { claims: { id: string }[] };
+        return llmPayload({
+          results: payload.claims.map((claim) => ({
+            id: claim.id,
+            label: "True",
+            confidence: 0.9,
+            explanation: "Reuters recorded the same seven to two vote.",
+            sourceUrls: ["https://www.reuters.com/world/harbour-vote"],
+          })),
+        });
+      }
+      if (system.startsWith("TASK:consistency")) return llmPayload({ contradictions: [] });
+      throw new Error(system.slice(0, 24));
+    };
+    const result = await analyze(
+      { url: "https://www.ertnews.gr/apopseis/dimosio-vima/column", uiLanguage: "en" },
+      { env, fetchImpl },
+    );
+    expect(result.meta.outlet).toBe("opinion");
+    expect(result.score.verdict.toLowerCase()).toContain("mostly opinion");
+    expect(result.score.overall).toBeLessThanOrEqual(74);
+  });
+
   it("rejects private URLs before any fetch", async () => {
     const fetchImpl: typeof fetch = async () => {
       throw new Error("should not fetch");

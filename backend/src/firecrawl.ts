@@ -31,6 +31,23 @@ async function pause(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function testsSkipWait(): boolean {
+  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+  return env?.VITEST === "true";
+}
+
+/** Honour Retry-After, but never sleep so long that the analysis deadline is lost. */
+function retryAfterMs(response: Response, fallback: number): number {
+  const header = response.headers.get("retry-after");
+  const cap = 8_000;
+  if (!header) return Math.min(cap, Math.max(0, fallback));
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) return Math.min(cap, Math.max(0, Math.round(seconds * 1000)));
+  const when = Date.parse(header);
+  if (Number.isFinite(when)) return Math.min(cap, Math.max(0, when - Date.now()));
+  return Math.min(cap, Math.max(0, fallback));
+}
+
 export async function searchWeb(options: {
   apiKey: string;
   query: string;
@@ -38,6 +55,8 @@ export async function searchWeb(options: {
   fetchImpl: typeof fetch;
   limit?: number;
   retryDelayMs?: number;
+  timeoutMs?: number;
+  canSpend?: () => boolean;
 }): Promise<EvidenceItem[]> {
   const query = options.query.trim().slice(0, 240);
   if (!query) return [];
@@ -59,6 +78,9 @@ export async function searchWeb(options: {
   };
   if (options.language === "el") payload.country = "GR";
 
+  if (options.canSpend && !options.canSpend()) {
+    throw new Error("search skipped to stay within the worker subrequest limit");
+  }
   const response = await enqueue(async () => {
     await acquireOutbound(pause);
     return firecrawlPost(
@@ -66,8 +88,9 @@ export async function searchWeb(options: {
       payload,
       options.apiKey,
       options.fetchImpl,
-      12_000,
+      options.timeoutMs ?? 10_000,
       options.retryDelayMs ?? 500,
+      options.canSpend,
     );
   });
   const text = await response.text();
@@ -103,19 +126,24 @@ async function firecrawlPost(
   fetchImpl: typeof fetch,
   timeoutMs: number,
   retryDelayMs: number,
+  canSpend?: () => boolean,
 ): Promise<Response> {
   let lastError: unknown = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt > 0) await pause(retryDelayMs * 2 ** (attempt - 1));
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0 && canSpend && !canSpend()) {
+      throw new Error("search skipped to stay within the worker subrequest limit");
+    }
     try {
       const response = await fetchImpl(url, {
         method: "POST",
         headers: firecrawlHeaders(apiKey.trim()),
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: AbortSignal.timeout(Math.max(1_000, timeoutMs)),
       });
-      if (response.status === 429 && attempt < 2) {
+      if (response.status === 429 && attempt < 1) {
+        const wait = retryAfterMs(response, retryDelayMs);
         await response.text().catch(() => "");
+        await pause(testsSkipWait() ? 0 : wait);
         continue;
       }
       return response;
@@ -124,6 +152,7 @@ async function firecrawlPost(
       break;
     }
   }
+  if (lastError instanceof Error && /subrequest limit/.test(lastError.message)) throw lastError;
   const failure = new UpstreamError(
     "search",
     null,
@@ -193,8 +222,9 @@ export async function scrapeArticle(options: {
   const data = parsed.data;
   const markdown = typeof data.markdown === "string" ? data.markdown : "";
   const metadata = isRecord(data.metadata) ? data.metadata : {};
+  const html = typeof data.html === "string" ? data.html : null;
   const article = cleanArticleText(markdownToText(markdown));
-  if (article.length < LIMITS.minArticleChars) {
+  if (article.length < LIMITS.minArticleChars && !html) {
     throw new HttpError(
       422,
       "Could not find enough article text on that page. Paste the text instead.",
@@ -222,7 +252,7 @@ export async function scrapeArticle(options: {
     text: article.slice(0, LIMITS.maxArticleChars),
     publishedAt,
     finalUrl,
-    rawHtml: typeof data.html === "string" ? data.html : null,
+    rawHtml: html,
   };
   scrapeCache.set(cacheKey, { at: Date.now(), page });
   await writePersisted(`scrape:${cacheKey}`, page);

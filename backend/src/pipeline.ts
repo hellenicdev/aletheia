@@ -1,5 +1,5 @@
 import { isSkippableFragment, stripCredits } from "../../shared/articleText";
-import { inferClaimType } from "../../shared/classify";
+import { evaluativeDensity, inferClaimType, looksLikeOpinionSection, reconcileClaimType } from "../../shared/classify";
 import { applyEvidence, independentEvidence, type EvidenceItem } from "../../shared/citations";
 import { detectLanguage, languageMatches } from "../../shared/language";
 import type { ClaimType, DetectedLanguage, Label, UiLanguage } from "../../shared/labels";
@@ -32,6 +32,7 @@ import {
   verifySystem,
   verifyUser,
 } from "./prompts";
+import { createSubrequestBudget, SUBREQUEST_RESERVE, trackFetch, type SubrequestBudget } from "./budget";
 import { searchWeb } from "./firecrawl";
 import { expectNumber, expectOneOf, expectString, isRecord } from "../../shared/json";
 
@@ -46,8 +47,11 @@ export interface AnalyzeDeps {
   fetchImpl?: typeof fetch;
   onStage?: (stage: StageName, status: "start" | "done" | "progress", done?: number, total?: number) => void;
   onPreview?: (article: ArticlePreview) => void;
+  onTick?: () => void;
   requestId?: string;
   budgetMs?: number;
+  /** Test hook. Production uses the worker subrequest ceiling. */
+  subrequestLimit?: number;
 }
 
 interface DraftSegment {
@@ -66,7 +70,9 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     throw new HttpError(503, "OPENAI_API_KEY is not configured on the worker.");
   }
   const uiLanguage: UiLanguage = isUiLanguage(input.uiLanguage) ? input.uiLanguage : "en";
-  const fetchImpl = resolveFetch(deps.fetchImpl);
+  const budget = createSubrequestBudget(deps.subrequestLimit);
+  const fetchImpl = trackFetch(resolveFetch(deps.fetchImpl), budget);
+  const tick = () => deps.onTick?.();
   const requestId = deps.requestId ?? crypto.randomUUID();
   const warnings: string[] = [];
   const llmKey = deps.env.OPENAI_API_KEY?.trim() ?? "";
@@ -97,6 +103,14 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     deadline,
   });
   stage("segment", "done");
+  if (
+    segmented.genre !== "satire" &&
+    segmented.genre !== "unreliable" &&
+    (looksLikeOpinionSection(ingested.sourceUrl, ingested.title, ingested.text) ||
+      evaluativeDensity(segmented.segments.map((segment) => segment.text)))
+  ) {
+    segmented.genre = "opinion";
+  }
 
   const searchEnabled = config.searchConfigured;
   let searchDegraded = false;
@@ -110,26 +124,39 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   const budgetedIds = new Set(budgeted.map((segment) => segment.id));
   const overBudget = new Set(searchable.filter((segment) => !budgetedIds.has(segment.id)).map((segment) => segment.id));
   const echoOnly = new Set<string>();
+  const searchFailed = new Set<string>();
 
   if (searchEnabled && searchKey) {
-    const queries = await buildQueries(budgeted, config, llmKey, fetchImpl, warnings, deadline);
+    const queries = await buildQueries(budgeted, config, llmKey, fetchImpl, warnings, deadline, budget);
     let finishedSearches = 0;
-    for (const segment of budgeted) {
-      if (Date.now() > deadline) {
-        remember(warnings, new Error("analysis deadline reached before search finished"), "search");
+    for (let index = 0; index < budgeted.length; index++) {
+      const segment = budgeted[index];
+      tick();
+      if (Date.now() > deadline - 3_000 || !budget.canSpend(SUBREQUEST_RESERVE)) {
+        const reason =
+          Date.now() > deadline - 3_000
+            ? "analysis deadline reached before search finished"
+            : "search stopped to stay within the worker subrequest limit";
+        abandonSearches(budgeted, index, evidence, searchFailed, warnings, reason);
         searchDegraded = true;
-        evidence.set(segment.id, []);
-        continue;
+        break;
       }
       const query = queries.get(segment.id) || segment.text.slice(0, 180);
+      const timeoutMs = Math.max(1_000, Math.min(10_000, deadline - Date.now() - 2_000));
       try {
         const hits = dedupeEvidence(
-          await searchWeb({
-            apiKey: searchKey,
-            query,
-            language: segmented.detectedLanguage,
-            fetchImpl,
-          }),
+          await withTimeout(
+            searchWeb({
+              apiKey: searchKey,
+              query,
+              language: segmented.detectedLanguage,
+              fetchImpl,
+              timeoutMs,
+              canSpend: () => budget.canSpend(1),
+            }),
+            timeoutMs + 750,
+            "search timed out",
+          ),
         );
         const independent = independentEvidence(hits, {
           articleDomain: ingested.sourceDomain,
@@ -141,6 +168,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       } catch (error) {
         remember(warnings, error, "search");
         searchDegraded = true;
+        searchFailed.add(segment.id);
         evidence.set(segment.id, []);
       }
       finishedSearches += 1;
@@ -152,7 +180,8 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   stage("verify", "start");
   const verified = new Map<string, SegmentResult>();
   const toVerify = segmented.segments.filter(
-    (segment) => isSearchable(segment.claimType) && !overBudget.has(segment.id),
+    (segment) =>
+      isSearchable(segment.claimType) && !overBudget.has(segment.id) && !searchFailed.has(segment.id),
   );
   const skippedForEvidence = toVerify.filter(
     (segment) => searchEnabled && echoOnly.has(segment.id),
@@ -177,52 +206,64 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   }
 
   const groups = chunk(withEvidence, 4);
-  await Promise.all(
-    groups.map(async (group, index) => {
-    if (Date.now() > deadline) {
+  let cursor = 0;
+  while (cursor < groups.length) {
+    tick();
+    if (Date.now() > deadline || !budget.canSpend(2)) {
       remember(warnings, new Error("analysis deadline reached before verification finished"), "llm");
-      for (const segment of group) {
-        verified.set(segment.id, unverifiedSegment(segment, uiLanguage, searchEnabled, "weak-evidence"));
+      for (const group of groups.slice(cursor)) {
+        for (const segment of group) {
+          verified.set(segment.id, unverifiedSegment(segment, uiLanguage, searchEnabled, "check-failed"));
+        }
       }
-      return;
+      break;
     }
-    stage("verify", index === 0 ? "start" : "progress", index, groups.length);
-    try {
-      const judged = await judgeGroup({
-        group,
-        evidence,
-        uiLanguage,
-        searchEnabled,
-        config,
-        apiKey: llmKey,
-        fetchImpl,
-        deadline,
-        publishedAt: ingested.publishedAt,
-        articleDomain: ingested.sourceDomain,
-        articleText: ingested.text,
-      });
-      for (const [id, result] of judged) verified.set(id, result);
-    } catch (error) {
-      if (isModelAuthError(error)) throw error;
-      remember(warnings, error, "llm");
-      for (const segment of group) {
-        verified.set(
-          segment.id,
-          finishSegment(segment, {
-            label: "Unverifiable",
-            confidence: 0.3,
-            explanation: unverifiableExplanation(uiLanguage, "weak-evidence"),
-            sources: [],
-            evidenceMode: searchEnabled ? "web-search" : "model-knowledge-only",
-          }),
-        );
-      }
-    }
-    }),
-  );
+    const parallel = Math.max(1, Math.min(groups.length - cursor, Math.max(1, budget.remaining() - 2)));
+    const batch = groups.slice(cursor, cursor + parallel);
+    cursor += batch.length;
+    const attempts = budget.canSpend(SUBREQUEST_RESERVE) ? 2 : 1;
+    await Promise.all(
+      batch.map(async (group, index) => {
+        stage("verify", cursor - batch.length + index === 0 ? "start" : "progress", cursor, groups.length);
+        try {
+          const timeoutMs = remainingMs(deadline, 22_000);
+          const judged = await withTimeout(
+            judgeGroup({
+              group,
+              evidence,
+              uiLanguage,
+              searchEnabled,
+              config,
+              apiKey: llmKey,
+              fetchImpl,
+              deadline,
+              publishedAt: ingested.publishedAt,
+              articleDomain: ingested.sourceDomain,
+              articleText: ingested.text,
+              attempts,
+              timeoutMs,
+            }),
+            timeoutMs + 750,
+            "verification timed out",
+          );
+          for (const [id, result] of judged) verified.set(id, result);
+        } catch (error) {
+          if (isModelAuthError(error)) throw error;
+          remember(warnings, error, "llm");
+          for (const segment of group) {
+            verified.set(segment.id, unverifiedSegment(segment, uiLanguage, searchEnabled, "check-failed"));
+          }
+        }
+      }),
+    );
+  }
 
   for (const segment of segmented.segments) {
     if (verified.has(segment.id)) continue;
+    if (searchFailed.has(segment.id)) {
+      verified.set(segment.id, unverifiedSegment(segment, uiLanguage, searchEnabled, "search-failed"));
+      continue;
+    }
     if (overBudget.has(segment.id)) {
       if (segment.claimType === "opinion" || segment.claimType === "rhetorical") {
         const opinion = segment.claimType === "opinion";
@@ -470,6 +511,9 @@ async function segmentArticle(options: {
       remember(options.warnings, error, "llm");
     }
   }
+  for (const draft of drafts) {
+    draft.claimType = reconcileClaimType(draft.text, draft.claimType);
+  }
   return { segments: drafts, detectedLanguage: detected, truncated, genre };
 }
 
@@ -509,24 +553,32 @@ async function buildQueries(
   fetchImpl: typeof fetch,
   warnings: string[],
   deadline: number,
+  budget: SubrequestBudget,
 ): Promise<Map<string, string>> {
   const queries = new Map<string, string>();
-  if (segments.length === 0 || Date.now() > deadline - 8_000) return queries;
-  try {
-    const parsed = await completeJson({
-      config,
-      apiKey,
-      fetchImpl,
-      system: querySystem(),
-      user: queryUser(segments.map((segment) => ({ id: segment.id, text: segment.text }))),
-      validate: (data) => validateQueries(data, new Set(segments.map((segment) => segment.id))),
-      reasoningEffort: "low",
-      maxTokens: 2048,
-      timeoutMs: remainingMs(deadline, 18_000),
-    });
-    for (const item of parsed) queries.set(item.id, item.query);
-  } catch (error) {
-    remember(warnings, error, "llm");
+  if (segments.length === 0) return queries;
+  for (const batch of chunk(segments, 6)) {
+    if (Date.now() > deadline - 8_000 || !budget.canSpend(SUBREQUEST_RESERVE)) {
+      remember(warnings, new Error("query generation stopped before the deadline or subrequest limit"), "llm");
+      break;
+    }
+    try {
+      const parsed = await completeJson({
+        config,
+        apiKey,
+        fetchImpl,
+        system: querySystem(),
+        user: queryUser(batch.map((segment) => ({ id: segment.id, text: segment.text.slice(0, 280) }))),
+        validate: (data) => validateQueries(data, new Set(batch.map((segment) => segment.id))),
+        reasoningEffort: "low",
+        maxTokens: 4096,
+        attempts: 1,
+        timeoutMs: remainingMs(deadline, 16_000),
+      });
+      for (const item of parsed) queries.set(item.id, item.query);
+    } catch (error) {
+      remember(warnings, error, "llm");
+    }
   }
   return queries;
 }
@@ -540,7 +592,7 @@ function validateQueries(data: unknown, ids: Set<string>): { id: string; query: 
       if (!isRecord(item)) throw new Error(`query ${index} must be an object`);
       return {
         id: expectString(item.id, `query ${index} id`),
-        query: expectString(item.query, `query ${index} query`).slice(0, 240),
+        query: boundQuery(expectString(item.query, `query ${index} query`)),
       };
     })
     .filter((item) => ids.has(item.id));
@@ -558,6 +610,8 @@ async function judgeGroup(options: {
   publishedAt: string | null;
   articleDomain: string | null;
   articleText: string;
+  attempts: number;
+  timeoutMs: number;
 }): Promise<Map<string, SegmentResult>> {
   const ids = new Set(options.group.map((segment) => segment.id));
   const parsed = await completeJson({
@@ -580,7 +634,8 @@ async function judgeGroup(options: {
     ),
     validate: (data) => validateVerdicts(data, ids, options.uiLanguage),
     reasoningEffort: "medium",
-    timeoutMs: remainingMs(options.deadline, 22_000),
+    attempts: options.attempts,
+    timeoutMs: options.timeoutMs,
   });
 
   const results = new Map<string, SegmentResult>();
@@ -755,7 +810,7 @@ function unverifiedSegment(
   segment: DraftSegment,
   uiLanguage: UiLanguage,
   searchEnabled: boolean,
-  reason: "weak-evidence" | "budget" | "no-evidence" | "search-failed" | "not-independent",
+  reason: "weak-evidence" | "budget" | "no-evidence" | "search-failed" | "not-independent" | "check-failed",
 ): SegmentResult {
   return finishSegment(segment, {
     label: "Unverifiable",
@@ -768,6 +823,39 @@ function unverifiedSegment(
 
 function remainingMs(deadline: number, cap: number): number {
   return Math.max(1_000, Math.min(cap, deadline - Date.now()));
+}
+
+function boundQuery(query: string): string {
+  return query.replace(/\s+/g, " ").trim().split(" ").slice(0, 8).join(" ").slice(0, 120);
+}
+
+function abandonSearches(
+  budgeted: DraftSegment[],
+  fromIndex: number,
+  evidence: Map<string, EvidenceItem[]>,
+  searchFailed: Set<string>,
+  warnings: string[],
+  reason: string,
+): void {
+  remember(warnings, new Error(reason), "search");
+  for (let index = fromIndex; index < budgeted.length; index++) {
+    const id = budgeted[index].id;
+    if (evidence.has(id)) continue;
+    searchFailed.add(id);
+    evidence.set(id, []);
+  }
+}
+
+async function withTimeout<T>(work: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), Math.max(1, ms));
+  });
+  try {
+    return await Promise.race([work, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function isSearchable(claimType: ClaimType): boolean {

@@ -1,7 +1,8 @@
 import type { EvidenceMode, Label, UiLanguage } from "./labels";
-import { unverifiableExplanation } from "./messages";
+import { inferClaimType } from "./classify";
+import { opinionExplanation, rhetoricalExplanation, unverifiableExplanation } from "./messages";
 import { tokenOverlap } from "./rank";
-import { hostOf, isSocialHost, isUnreliableHost, sameOutlet } from "./reputation";
+import { hostOf, isBlockedEvidenceHost, isSocialHost, sameOutlet } from "./reputation";
 import type { SourceCitation } from "./types";
 
 export interface EvidenceItem {
@@ -50,7 +51,7 @@ export function isIndependent(
 ): boolean {
   if (sameOutlet(item.url, options.articleDomain ?? null)) return false;
   if (isSocialHost(item.url)) return false;
-  if (isUnreliableHost(item.url)) return false;
+  if (isBlockedEvidenceHost(item.url)) return false;
   if (isWireCopy(item.url)) return false;
   if (isEcho(item.snippet, options.claimText, options.articleText ?? "", item.url)) return false;
   return true;
@@ -59,7 +60,16 @@ export function isIndependent(
 const SYNDICATORS = ["yahoo.com", "inkl.com", "msn.com", "apple.news", "flipboard.com", "smartnews.com", "news.google.com"];
 
 /** Local papers and wire hubs that reprint AP or Reuters rather than reporting the story themselves. */
-const WIRE_REPRINT_HOSTS = ["usnews.com", "cbs17.com", "hjnews.com", "whio.com", "wkyc.com", "wfmz.com"];
+const WIRE_REPRINT_HOSTS = [
+  "usnews.com",
+  "cbs17.com",
+  "hjnews.com",
+  "whio.com",
+  "wkyc.com",
+  "wfmz.com",
+  "clickondetroit.com",
+  "manisteenews.com",
+];
 
 export function isWireCopy(url: string): boolean {
   let parsed: URL;
@@ -70,9 +80,14 @@ export function isWireCopy(url: string): boolean {
   }
   const host = parsed.hostname.replace(/^www\./, "").toLowerCase();
   const path = parsed.pathname.toLowerCase();
-  if (/wirestory|\/wire\/|associated-press|associatedpress|\/ap-news\/|\/from-ap\/|\/ap-top-news\/|\/reuters-wire\/|\/from-reuters\//.test(path)) {
+  if (
+    /wirestory|\/wire\/|associated-press|associatedpress|\/ap-news\/|\/from-ap\/|\/ap-top-news\/|\/reuters-wire\/|\/from-reuters\/|(?:^|\/)ap(?:\/|$)/.test(
+      path,
+    )
+  ) {
     return true;
   }
+  if (host === "aol.com" || host.endsWith(".aol.com") || host.startsWith("aol.")) return true;
   return WIRE_REPRINT_HOSTS.some((item) => host === item || host.endsWith(`.${item}`));
 }
 
@@ -135,6 +150,19 @@ export function applyEvidence(input: {
   allowModelKnowledge?: boolean;
 }): AppliedEvidence {
   const confidence = clampConfidence(input.confidence);
+  const local = inferClaimType(input.claimText);
+  if (local === "opinion" || local === "rhetorical") {
+    const opinion = local === "opinion";
+    return {
+      label: opinion ? "Opinion" : "Rhetorical",
+      confidence: Math.min(confidence, 0.75),
+      explanation: opinion
+        ? opinionExplanation(input.uiLanguage)
+        : rhetoricalExplanation(input.uiLanguage),
+      sources: [],
+      evidenceMode: "not-applicable",
+    };
+  }
 
   if (!input.searchEnabled) {
     const downgrade =

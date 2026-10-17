@@ -114,19 +114,23 @@ export async function handleRequest(
       const send = (event: string, data: unknown) => {
         controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
       };
-      const heartbeat = setInterval(() => {
+      let heartbeat: ReturnType<typeof setInterval> | undefined;
+      const ping = () => {
         try {
           controller.enqueue(encoder.encode(`: ping\n\n`));
         } catch {
-          clearInterval(heartbeat);
+          if (heartbeat) clearInterval(heartbeat);
         }
-      }, 10_000);
+      };
+      ping();
+      heartbeat = setInterval(ping, 10_000);
       try {
         const result = await analyze(input, {
           env,
           fetchImpl: deps.fetchImpl,
           onStage: (stage: StageName, status, done, total) => send("stage", { stage, status, done, total }),
           onPreview: (article: ArticlePreview) => send("preview", article),
+          onTick: ping,
         });
         send("result", result);
       } catch (error) {
