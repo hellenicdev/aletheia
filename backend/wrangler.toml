@@ -37,6 +37,8 @@ class_name = "TavilyCredits"
 name = "PIPELINE_CACHE"
 class_name = "PipelineCache"
 
+# `wrangler versions upload` cannot apply this first migration. `wrangler deploy`
+# can. Once tag v1 is on the deployed script, later uploads of the same tag succeed.
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["IpRateLimiter", "TavilyCredits", "PipelineCache"]
