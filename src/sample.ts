@@ -221,6 +221,9 @@ export function buildSample(lang: UiLanguage): AnalysisResult {
     score,
     contradictions,
     truncated: false,
+    degraded: false,
+    claimsVerified: 5,
+    claimsTotal: 5,
     meta: {
       searchEnabled: true,
       searchDegraded: false,
@@ -230,6 +233,7 @@ export function buildSample(lang: UiLanguage): AnalysisResult {
       extraction: "pasted",
       warnings: [],
       outlet: "news",
+      subrequests: { ingest: 0, segment: 0, evidence: 0, verify: 0, score: 0, total: 0 },
     },
   };
 }

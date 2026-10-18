@@ -249,6 +249,76 @@ describe("wire reprints and entity match", () => {
     });
     expect(credited.label).toBe("Unverifiable");
 
+    const articleTitle = "Coast Guard intercepts vessel off the California coast after a late night chase involving agencies";
+    const opb = applyEvidence({
+      label: "True",
+      confidence: 0.9,
+      explanation: "A local station reported the same intercept.",
+      claimText: claim,
+      sourceUrls: ["https://www.opb.org/article/coast-guard"],
+      evidence: [
+        {
+          url: "https://www.opb.org/article/coast-guard",
+          title: "Coast Guard intercepts vessel off California",
+          snippet: "The station posted the story without a fresh byline.",
+        },
+      ],
+      searchEnabled: true,
+      uiLanguage: "en",
+      articleDomain: "apnews.com",
+      articleTitle,
+      articleText: "An original AP story about the intercept and the crew that stayed out overnight.",
+    });
+    expect(opb.label).toBe("Unverifiable");
+    const arabnews = applyEvidence({
+      label: "True",
+      confidence: 0.9,
+      explanation: "A partner site carried the wire.",
+      claimText: claim,
+      sourceUrls: ["https://www.arabnews.com/node/coast-guard"],
+      evidence: [
+        {
+          url: "https://www.arabnews.com/node/coast-guard",
+          title: "Rescue at sea",
+          snippet: "WASHINGTON (Reuters) — Crews stopped the boat off the California coast.",
+        },
+      ],
+      searchEnabled: true,
+      uiLanguage: "en",
+      articleDomain: "apnews.com",
+      articleTitle,
+      articleText: "An original AP story about the intercept and the crew that stayed out overnight.",
+    });
+    expect(arabnews.label).toBe("Unverifiable");
+    const ownWire = applyEvidence({
+      label: "True",
+      confidence: 0.9,
+      explanation: "Reuters reported the intercept itself.",
+      claimText: claim,
+      sourceUrls: ["https://www.reuters.com/world/us/coast-guard"],
+      evidence: [
+        {
+          url: "https://www.reuters.com/world/us/coast-guard",
+          title: "Coast Guard intercepts vessel off California",
+          snippet: "Reuters — Crews stopped the boat after a separate overnight search.",
+        },
+      ],
+      searchEnabled: true,
+      uiLanguage: "en",
+      articleDomain: "apnews.com",
+      articleTitle: "Energy ministers debate a separate grid plan",
+      articleText: "An original AP story about a different financing vote.",
+    });
+    expect(ownWire.label).toBe("True");
+    expect(
+      isSyndicatedCopy(
+        { url: "https://example.com/minutes", title: "The council voted 7 to 2.", snippet: "Residents can read the minutes." },
+        "Harbour lights council publishes the berth fee vote",
+        "The council voted 7 to 2 on Monday and published the full minutes for residents of the harbour district.",
+        "example.com",
+      ),
+    ).toBe(false);
+
     const sameFamily = applyEvidence({
       label: "True",
       confidence: 0.8,

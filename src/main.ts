@@ -6,8 +6,9 @@ import "@fontsource/ibm-plex-mono/500.css";
 import "@fontsource/source-serif-4/400.css";
 import "@fontsource/source-serif-4/600.css";
 import "./styles.css";
-import { LABELS, type UiLanguage } from "../shared/labels";
 import { renderHighlighted } from "../shared/highlight";
+import { LABELS, type UiLanguage } from "../shared/labels";
+import { partialClaimsNotice } from "../shared/messages";
 import type { AnalysisResult, StageName } from "../shared/types";
 import { analyzeArticle, fetchHealth } from "./api";
 import { detectedName, labelHelp, labelName, t, type MessageKey } from "./i18n";
@@ -525,8 +526,13 @@ function renderArticle() {
   $<HTMLElement>("#sample-banner").hidden = result.meta.model !== "sample";
   $<HTMLElement>("#truncated-banner").hidden = !result.truncated;
   const searchBanner = $<HTMLElement>("#search-banner");
-  searchBanner.hidden = !result.meta.searchDegraded;
-  searchBanner.textContent = t(state.lang, "searchFailedBanner");
+  if (result.degraded) {
+    searchBanner.hidden = false;
+    searchBanner.textContent = partialClaimsNotice(state.lang, result.claimsVerified, result.claimsTotal);
+  } else {
+    searchBanner.hidden = !result.meta.searchDegraded;
+    searchBanner.textContent = t(state.lang, "searchFailedBanner");
+  }
   const outletBanner = $<HTMLElement>("#outlet-banner");
   if (result.meta.outlet === "satire") {
     outletBanner.hidden = false;

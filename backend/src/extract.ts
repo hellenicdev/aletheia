@@ -1,7 +1,7 @@
 import { cleanArticleText, proseScore } from "../../shared/articleText";
 import { looksLikeOpinionSection, opinionCueFromHtml } from "../../shared/classify";
 import { combineSignals, raceAbort } from "./deadline";
-import { scrapeArticle } from "./firecrawl";
+import { scrapeArticle, type CacheCharge } from "./firecrawl";
 import { LIMITS } from "./limits";
 import { HttpError } from "./errors";
 import { assertPublicHttpUrl } from "./ssrf";
@@ -130,6 +130,8 @@ export async function fetchArticle(
   fetchImpl: typeof fetch,
   apiKey?: string,
   signal?: AbortSignal,
+  canSpend?: () => boolean,
+  charge?: CacheCharge,
 ): Promise<ExtractedArticle> {
   assertPublicHttpUrl(rawUrl);
   if (apiKey?.trim()) {
@@ -139,6 +141,8 @@ export async function fetchArticle(
       fetchImpl,
       signal,
       timeoutMs: 20_000,
+      canSpend,
+      charge,
     });
     const fromHtml = htmlBody(scraped.rawHtml, scraped.finalUrl);
     const text =

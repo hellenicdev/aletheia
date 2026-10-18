@@ -73,11 +73,25 @@ function years(text: string): string[] {
   return [...text.matchAll(/\b(?:1[5-9]\d{2}|20\d{2})\b/g)].map((match) => match[0]);
 }
 
+const PERSON_WORD =
+  "man|woman|boy|girl|male|female|suspect|victim|officer|soldier|passenger|driver|teenager|teen|defendant|protester";
+
+/** Ages identify a person. A bare count, such as a vote, is not an age. */
 function ages(text: string): number[] {
-  const found: number[] = [];
-  for (const match of text.matchAll(/\b(\d{1,2})[-\s]year[-\s]old\b/gi)) found.push(Number(match[1]));
-  for (const match of text.matchAll(/\baged\s+(\d{1,2})\b/gi)) found.push(Number(match[1]));
-  return found.filter((age) => age >= 1 && age <= 120);
+  const found = new Set<number>();
+  const add = (raw: string) => {
+    const age = Number(raw);
+    if (age >= 1 && age <= 120) found.add(age);
+  };
+  for (const match of text.matchAll(/\b(\d{1,3})[-\s]years?[-\s]olds?\b/gi)) add(match[1]);
+  for (const match of text.matchAll(/\baged\s+(\d{1,3})\b/gi)) add(match[1]);
+  for (const match of text.matchAll(/,\s*(\d{1,3})\s*,/g)) add(match[1]);
+  for (const match of text.matchAll(new RegExp(`\\b(\\d{1,3})\\s+(?:${PERSON_WORD})\\b`, "gi"))) add(match[1]);
+  for (const match of text.matchAll(new RegExp(`\\b(?:${PERSON_WORD})\\s*,?\\s*(\\d{1,3})\\b`, "gi"))) add(match[1]);
+  if (new RegExp(`\\b(?:${PERSON_WORD})\\b`, "i").test(text)) {
+    for (const match of text.matchAll(/\b(?:is|was)\s+(\d{1,3})\b/gi)) add(match[1]);
+  }
+  return [...found];
 }
 
 function normalize(text: string): string {

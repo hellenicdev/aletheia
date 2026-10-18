@@ -1,4 +1,5 @@
 import { parseModelJson } from "../../shared/json";
+import { isBudgetExhausted } from "./budget";
 import type { AppConfig } from "./config";
 import { combineSignals, isDeadline } from "./deadline";
 import { HttpError, UpstreamError, redactSecret } from "./errors";
@@ -160,7 +161,7 @@ export async function requestChat(
       signal,
     });
   } catch (error) {
-    if (isDeadline(error) || options.signal?.aborted) throw error;
+    if (isBudgetExhausted(error) || isDeadline(error) || options.signal?.aborted) throw error;
     throw loggedUpstream("llm", null, errorText(error), options.apiKey);
   }
 

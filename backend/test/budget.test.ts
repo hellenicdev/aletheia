@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { createSubrequestBudget, trackFetch } from "../src/budget";
+import {
+  SUBREQUEST_LIMIT,
+  BudgetExhausted,
+  createSubrequestBudget,
+  planEvidence,
+  trackFetch,
+} from "../src/budget";
 
 describe("subrequest budget", () => {
   it("counts each fetch and stops before the worker limit", async () => {
@@ -9,6 +15,38 @@ describe("subrequest budget", () => {
     await fetchImpl("https://example.com/b");
     expect(budget.remaining()).toBe(0);
     await expect(fetchImpl("https://example.com/c")).rejects.toThrow(/Too many subrequests/);
+    await expect(fetchImpl("https://example.com/c")).rejects.toBeInstanceOf(BudgetExhausted);
     expect(budget.used).toBe(2);
+  });
+
+  it("uses a hard budget under the free-plan limit and records the stage", () => {
+    expect(SUBREQUEST_LIMIT).toBe(40);
+    const budget = createSubrequestBudget();
+    expect(budget.limit).toBe(40);
+    budget.setStage("evidence");
+    expect(budget.trySpend()).toBe(true);
+    expect(budget.trySpend(100)).toBe(false);
+    expect(budget.used).toBe(1);
+    expect(budget.snapshot()).toEqual({
+      ingest: 0,
+      segment: 0,
+      evidence: 1,
+      verify: 0,
+      score: 0,
+      total: 1,
+    });
+  });
+
+  it("reserves model calls before it spends the rest on searches", () => {
+    const costs = { search: 2, verify: 2 };
+    const searches = planEvidence(40, 12, costs);
+    expect(searches).toBeGreaterThan(0);
+    expect(searches).toBeLessThanOrEqual(12);
+    const groups = Math.ceil(searches / 4);
+    const reserved = 1 + 1 + groups * costs.verify + searches * costs.search;
+    expect(reserved).toBeLessThanOrEqual(40);
+    expect(planEvidence(2, 8)).toBe(0);
+    expect(planEvidence(8, 3, { search: 2, verify: 1 })).toBe(2);
+    expect(planEvidence(40, 0)).toBe(0);
   });
 });

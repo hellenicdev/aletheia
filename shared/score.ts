@@ -1,5 +1,6 @@
 import type { Label, UiLanguage } from "./labels";
 import { LABELS } from "./labels";
+import { partialClaimsNotice } from "./messages";
 import type { OutletKind } from "./reputation";
 import type { ScoreResult } from "./types";
 
@@ -42,6 +43,11 @@ export interface ScoreSegment {
    * are not part of the coverage ratio. Omitted means the claim was selected.
    */
   inCoverage?: boolean;
+  /**
+   * A claim the run could not finish (budget, deadline, or an error) is shown
+   * as Unverifiable and left out of the score.
+   */
+  countsTowardScore?: boolean;
 }
 
 export interface ScoreOptions {
@@ -50,6 +56,9 @@ export interface ScoreOptions {
   uiLanguage: UiLanguage;
   searchDegraded?: boolean;
   outlet?: OutletKind;
+  degraded?: boolean;
+  claimsVerified?: number;
+  claimsTotal?: number;
 }
 
 export function emptyCounts(): Record<Label, number> {
@@ -83,18 +92,22 @@ export function aggregateScore(
     };
   }
 
+  const countsInScore = (segment: ScoreSegment) => segment.countsTowardScore !== false;
+  const inPool = (segment: ScoreSegment) => segment.inCoverage !== false && countsInScore(segment);
   const decided = segments.filter(
     (segment): segment is ScoreSegment & { label: keyof typeof FACT_POINTS } =>
       (segment.label === "True" ||
         segment.label === "False" ||
         segment.label === "Misleading") &&
-      segment.inCoverage !== false,
+      inPool(segment),
   );
   const checkable = segments.filter((segment) =>
     ["True", "False", "Misleading", "Unverifiable"].includes(segment.label),
   );
-  const coveragePool = checkable.filter((segment) => segment.inCoverage !== false);
-  const outsideSearch = checkable.length - coveragePool.length;
+  const coveragePool = checkable.filter((segment) => inPool(segment));
+  const outsideSearch = checkable.filter((segment) => segment.inCoverage === false).length;
+  const cutShort = checkable.some((segment) => segment.countsTowardScore === false);
+  const nothingScored = coveragePool.length === 0 && cutShort;
 
   let measured: number | null = null;
   if (decided.length > 0) {
@@ -110,7 +123,7 @@ export function aggregateScore(
 
   const coverage = coveragePool.length === 0 ? 1 : decided.length / coveragePool.length;
   const factualAccuracy =
-    checkable.length === 0
+    checkable.length === 0 || nothingScored
       ? null
       : round(
           measured === null ? NEUTRAL_FACTUAL : measured * coverage + NEUTRAL_FACTUAL * (1 - coverage),
@@ -123,7 +136,8 @@ export function aggregateScore(
     if (!options.searchEnabled) sourcing = Math.min(sourcing, SOURCING_CAP_NO_SEARCH);
   }
 
-  const tones = segments.map((segment) => segment.tone ?? 100);
+  const toneSource = segments.filter((segment) => countsInScore(segment));
+  const tones = (toneSource.length > 0 ? toneSource : segments).map((segment) => segment.tone ?? 100);
   const averageTone = tones.reduce((sum, value) => sum + value, 0) / tones.length;
   const worstTone = Math.min(...tones);
   const toneNeutrality = round(averageTone * 0.7 + worstTone * 0.3);
@@ -137,9 +151,15 @@ export function aggregateScore(
         );
 
   const outlet = options.outlet ?? "news";
-  const opinionPiece = options.outlet === "opinion" || isMostlyOpinion(counts, segments.length);
-  const factualBasis: ScoreResult["factualBasis"] =
-    checkable.length === 0 ? "commentary" : coverage < 0.6 || decided.length === 0 ? "uncertain" : "measured";
+  const opinionPiece =
+    !nothingScored && (options.outlet === "opinion" || isMostlyOpinion(counts, segments.length));
+  const factualBasis: ScoreResult["factualBasis"] = nothingScored
+    ? "uncertain"
+    : checkable.length === 0
+      ? "commentary"
+      : coverage < 0.6 || decided.length === 0
+        ? "uncertain"
+        : "measured";
 
   const factualForMix = factualAccuracy ?? (factualBasis === "commentary" ? COMMENTARY_FACTUAL : NEUTRAL_FACTUAL);
 
@@ -149,10 +169,14 @@ export function aggregateScore(
     WEIGHTS.tone * toneNeutrality +
     WEIGHTS.consistency * logicalConsistency;
 
-  const penalty = Math.min(
-    MAX_PENALTY,
-    counts.False * FALSE_PENALTY + counts.Misleading * MISLEADING_PENALTY,
-  );
+  let falseCount = 0;
+  let misleadingCount = 0;
+  for (const segment of segments) {
+    if (!countsInScore(segment)) continue;
+    if (segment.label === "False") falseCount += 1;
+    if (segment.label === "Misleading") misleadingCount += 1;
+  }
+  const penalty = Math.min(MAX_PENALTY, falseCount * FALSE_PENALTY + misleadingCount * MISLEADING_PENALTY);
 
   let overall = clamp(round(base - penalty), 0, 100);
   if (opinionPiece && factualBasis !== "commentary" && outlet !== "satire" && outlet !== "low-credibility") {
@@ -165,7 +189,7 @@ export function aggregateScore(
   }
   if (factualBasis === "commentary") overall = Math.min(overall, COMMENTARY_CAP);
   if (!options.searchEnabled) overall = Math.min(overall, SEARCH_OFF_CAP);
-  if (coveragePool.length >= 4 && coverage < LOW_COVERAGE_THRESHOLD) {
+  if (!options.degraded && coveragePool.length >= 4 && coverage < LOW_COVERAGE_THRESHOLD) {
     overall = Math.min(overall, LOW_COVERAGE_CAP);
   }
   if (outlet === "satire") overall = Math.min(overall, SATIRE_CAP);
@@ -186,6 +210,9 @@ export function aggregateScore(
       outlet,
       opinionPiece,
       thin: segments.length <= 1,
+      degraded: options.degraded === true,
+      claimsVerified: options.claimsVerified ?? 0,
+      claimsTotal: options.claimsTotal ?? 0,
     },
     options.uiLanguage,
   );
@@ -218,11 +245,27 @@ function buildVerdict(
     outlet: OutletKind;
     opinionPiece: boolean;
     thin: boolean;
+    degraded: boolean;
+    claimsVerified: number;
+    claimsTotal: number;
   },
   lang: UiLanguage,
 ): string {
-  const { overall, counts, poolCounts, outsideSearch, factualBasis, searchEnabled, searchDegraded, outlet, opinionPiece, thin } =
-    input;
+  const {
+    overall,
+    counts,
+    poolCounts,
+    outsideSearch,
+    factualBasis,
+    searchEnabled,
+    searchDegraded,
+    outlet,
+    opinionPiece,
+    thin,
+    degraded,
+    claimsVerified,
+    claimsTotal,
+  } = input;
   const checked = poolCounts.True + poolCounts.False + poolCounts.Misleading;
   const checkable = checked + poolCounts.Unverifiable;
   const parts: string[] = [];
@@ -265,6 +308,9 @@ function buildVerdict(
     );
   }
 
+  if (degraded && claimsTotal > 0) {
+    parts.push(partialClaimsNotice(lang, claimsVerified, claimsTotal));
+  }
   if (thin && checked === 0 && checkable > 0) {
     parts.push(
       lang === "el"

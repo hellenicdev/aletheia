@@ -96,8 +96,25 @@ describe("cleanArticleText", () => {
     expect(text).toContain("licence review");
     expect(text).not.toContain("Decentralize");
     expect(text).not.toContain("Brighteon");
+    expect(text).not.toContain("Episode");
     expect(text).not.toContain("Another harbour");
     expect(text).not.toContain("end marker");
+  });
+
+  it("drops an episode promo glued to the front of the article", () => {
+    const raw = [
+      "Decentralize.TV – Episode 166 The coastal plant received a federal loan that will fund the restart, according to the filing released on Monday.",
+      "Brighteon.TV – Episode 12 – BrighteonBroadcast",
+      "Decentralize.TV – Episode 166 " + "Store promo banner ".repeat(12),
+    ].join("\n");
+    const text = cleanArticleText(raw);
+    expect(text).toContain("federal loan");
+    expect(text).not.toContain("Decentralize");
+    expect(text).not.toContain("Episode 166");
+    expect(text).not.toContain("Brighteon");
+    const prose =
+      "The committee discussed episode 166 of the series during a hearing that lasted two hours and produced a written report for the board.";
+    expect(cleanArticleText(prose)).toContain("written report");
   });
 
   it("keeps a Greek opinion kicker and drops the related-story list under it", () => {

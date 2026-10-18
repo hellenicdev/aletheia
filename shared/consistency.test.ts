@@ -79,4 +79,49 @@ describe("acceptContradiction", () => {
       ),
     ).toBe(false);
   });
+
+  it("rejects two different people when only the ages differ, and keeps a vote about the same council", () => {
+    expect(
+      acceptContradiction(
+        {
+          a: "s1",
+          b: "s2",
+          explanation:
+            '"A woman, 21, was arrested near the station" is a different person from "a woman, 33, was arrested near the station" so the ages are not one subject.',
+        },
+        [
+          { id: "s1", text: "A woman, 21, was arrested near the station on Tuesday." },
+          { id: "s2", text: "A woman, 33, was arrested near the station on Tuesday." },
+        ],
+      ),
+    ).toBe(false);
+    expect(
+      acceptContradiction(
+        {
+          a: "s1",
+          b: "s2",
+          explanation:
+            '"Police charged a 21 year old woman" does not name the same person as "police charged a 33 year old man" after the protest.',
+        },
+        [
+          { id: "s1", text: "Police charged a 21 year old woman after the protest." },
+          { id: "s2", text: "Police charged a 33 year old man after the protest." },
+        ],
+      ),
+    ).toBe(false);
+    expect(
+      acceptContradiction(
+        {
+          a: "s1",
+          b: "s2",
+          explanation:
+            '"The council voted 7 to 2 on Monday" cannot also be true if "the council voted 4 to 5 on Monday" because both describe that same vote.',
+        },
+        [
+          { id: "s1", text: vote },
+          { id: "s2", text: otherVote },
+        ],
+      ),
+    ).toBe(true);
+  });
 });
