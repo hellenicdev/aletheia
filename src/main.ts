@@ -1,15 +1,22 @@
-import "@fontsource/ibm-plex-sans/400.css";
-import "@fontsource/ibm-plex-sans/600.css";
-import "@fontsource/ibm-plex-mono/400.css";
-import "@fontsource/source-serif-4/400.css";
-import "@fontsource/source-serif-4/600.css";
+import "@fontsource/ibm-plex-sans/latin-400.css";
+import "@fontsource/ibm-plex-sans/latin-600.css";
+import "@fontsource/ibm-plex-sans/greek-400.css";
+import "@fontsource/ibm-plex-sans/greek-600.css";
+import "@fontsource/ibm-plex-mono/latin-400.css";
+import "@fontsource/source-serif-4/latin-400.css";
+import "@fontsource/source-serif-4/latin-600.css";
+import "@fontsource/source-serif-4/greek-400.css";
+import "@fontsource/source-serif-4/greek-600.css";
 import "./styles.css";
 import { renderHighlighted } from "../shared/highlight";
 import { LABELS, type UiLanguage } from "../shared/labels";
 import { partialClaimsNotice } from "../shared/messages";
 import type { AnalysisResult, SearchOutageReason, SegmentResult, StageName } from "../shared/types";
+import { trackAnalyzeStarted } from "./analytics";
 import { analyzeArticle, fetchHealth, STALL_MESSAGE } from "./api";
 import { detectedName, labelHelp, labelName, t, type MessageKey } from "./i18n";
+import { scheduleKofi } from "./kofi";
+import { appBaseFromPath, documentMeta, langSearch, pageLangFromSearch, siteBase } from "./seo";
 import { CLAIM_LIMIT, joinNotice, parseFilter, presentLabels, visibleClaims, type ClaimFilter } from "./resultsView";
 import { buildSample } from "./sample";
 
@@ -67,6 +74,12 @@ app.innerHTML = `
       </div>
     </div>
     <div class="header-side">
+      <a class="github-link" href="https://github.com/hellenicdev/aletheia" target="_blank" rel="noopener noreferrer">
+        <svg class="github-mark" viewBox="0 0 16 16" aria-hidden="true">
+          <path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"></path>
+        </svg>
+        <span class="visually-hidden" data-i18n="github"></span>
+      </a>
       <p class="health" id="health" data-state="unknown"></p>
       <div class="langs" role="group" aria-labelledby="lang-label">
         <span id="lang-label" class="visually-hidden" data-i18n="languageGroup"></span>
@@ -80,14 +93,14 @@ app.innerHTML = `
     <div class="stack">
       <section class="composer" id="composer">
         <div class="tabs" role="tablist">
-          <button type="button" role="tab" id="tab-paste" aria-controls="panel-paste" aria-selected="true" data-i18n="paste"></button>
-          <button type="button" role="tab" id="tab-url" aria-controls="panel-url" aria-selected="false" data-i18n="url"></button>
+          <button type="button" role="tab" id="tab-paste" aria-controls="panel-paste" aria-selected="true" tabindex="0" data-i18n="paste"></button>
+          <button type="button" role="tab" id="tab-url" aria-controls="panel-url" aria-selected="false" tabindex="-1" data-i18n="url"></button>
         </div>
         <form id="analyze-form">
           <div id="panel-paste" role="tabpanel" aria-labelledby="tab-paste">
             <label class="field">
               <span data-i18n="articleLabel"></span>
-              <textarea id="article-text" data-i18n-placeholder="placeholderPaste" maxlength="12000"></textarea>
+              <textarea id="article-text" data-i18n-placeholder="placeholderPaste" maxlength="12000" aria-describedby="char-count-label"></textarea>
             </label>
           </div>
           <div id="panel-url" role="tabpanel" aria-labelledby="tab-url" hidden>
@@ -97,7 +110,7 @@ app.innerHTML = `
             </label>
           </div>
           <div class="composer-foot">
-            <span class="counter"><span id="char-count">0</span> / 12000 <span data-i18n="chars"></span></span>
+            <span class="counter" id="char-count-label"><span id="char-count">0</span> / 12000 <span data-i18n="chars"></span></span>
             <div class="actions">
               <button class="ghost" type="button" id="sample-button" data-i18n="sample"></button>
               <button class="primary" type="submit" id="analyze-button" data-i18n="analyze"></button>
@@ -107,7 +120,8 @@ app.innerHTML = `
           <button class="ghost" type="button" id="retry-button" data-i18n="retry" hidden></button>
         </form>
       </section>
-      <section id="stages" hidden>
+      <section id="stages" hidden aria-labelledby="stages-label">
+        <h2 id="stages-label" class="visually-hidden" data-i18n="stagesLabel"></h2>
         <ol class="stepper" id="stage-list"></ol>
         <p class="step-name" id="step-name" aria-live="polite"></p>
       </section>
@@ -120,7 +134,7 @@ app.innerHTML = `
       </details>
       <section id="report" hidden aria-labelledby="score-label">
         <div class="focal">
-          <div class="gauge" id="gauge" data-band="mid">
+          <div class="gauge" id="gauge" data-band="mid" role="img">
             <svg viewBox="0 0 120 120" aria-hidden="true">
               <circle class="gauge-track" cx="60" cy="60" r="52"></circle>
               <circle class="gauge-value" id="gauge-value" cx="60" cy="60" r="52"></circle>
@@ -133,7 +147,7 @@ app.innerHTML = `
           </div>
           <div>
             <p class="section-label" id="score-label" data-i18n="scoreLabel"></p>
-            <p class="verdict" id="verdict" tabindex="-1"></p>
+            <p class="verdict" id="verdict" tabindex="-1" aria-live="polite"></p>
             <p class="notice" id="notice" hidden></p>
           </div>
         </div>
@@ -217,9 +231,73 @@ function renderHealth() {
   node.textContent = t(state.lang, key);
 }
 
+function applyHead() {
+  const base = siteBase(location.hostname, location.origin, appBaseFromPath(location.pathname));
+  const meta = documentMeta(state.lang, base);
+  document.documentElement.lang = state.lang;
+  document.title = meta.title;
+  setMetaName("description", meta.description);
+  setMetaProperty("og:title", meta.title);
+  setMetaProperty("og:description", meta.description);
+  setMetaProperty("og:url", meta.canonical);
+  setMetaProperty("og:locale", meta.locale);
+  setMetaName("twitter:title", meta.title);
+  setMetaName("twitter:description", meta.description);
+  setCanonical(meta.canonical);
+  setAlternate("en", meta.alternates.en);
+  setAlternate("el", meta.alternates.el);
+  setAlternate("x-default", meta.alternates["x-default"]);
+}
+
+function setMetaName(name: string, content: string) {
+  let node = document.head.querySelector<HTMLMetaElement>(`meta[name="${name}"]`);
+  if (!node) {
+    node = document.createElement("meta");
+    node.name = name;
+    document.head.append(node);
+  }
+  node.content = content;
+}
+
+function setMetaProperty(property: string, content: string) {
+  let node = document.head.querySelector<HTMLMetaElement>(`meta[property="${property}"]`);
+  if (!node) {
+    node = document.createElement("meta");
+    node.setAttribute("property", property);
+    document.head.append(node);
+  }
+  node.content = content;
+}
+
+function setCanonical(href: string) {
+  let node = document.head.querySelector<HTMLLinkElement>('link[rel="canonical"]');
+  if (!node) {
+    node = document.createElement("link");
+    node.rel = "canonical";
+    document.head.append(node);
+  }
+  node.href = href;
+}
+
+function setAlternate(hreflang: string, href: string) {
+  let node = document.head.querySelector<HTMLLinkElement>(`link[rel="alternate"][hreflang="${hreflang}"]`);
+  if (!node) {
+    node = document.createElement("link");
+    node.rel = "alternate";
+    node.hreflang = hreflang;
+    document.head.append(node);
+  }
+  node.href = href;
+}
+
+function syncLangParam(lang: "en" | "el") {
+  const next = langSearch(location.search, lang);
+  if (next === location.search) return;
+  history.replaceState(null, "", `${location.pathname}${next}${location.hash}`);
+}
+
 function applyI18n() {
-  document.documentElement.lang = state.lang === "el" ? "el" : "en";
-  document.title = state.lang === "el" ? "Αλήθεια — αξιοπιστία ειδήσεων" : "Aletheia — claim-level news credibility";
+  applyHead();
   for (const node of app.querySelectorAll<HTMLElement>("[data-i18n]")) {
     const key = node.dataset.i18n as MessageKey;
     node.textContent = t(state.lang, key);
@@ -249,14 +327,19 @@ function setLanguage(lang: UiLanguage) {
   } catch {
     /* Storage can be blocked. */
   }
+  syncLangParam(lang);
   if (state.sample && state.result) state.result = buildSample(lang);
   applyI18n();
 }
 
 function setMode(mode: "paste" | "url") {
   state.mode = mode;
-  $<HTMLButtonElement>("#tab-paste").setAttribute("aria-selected", String(mode === "paste"));
-  $<HTMLButtonElement>("#tab-url").setAttribute("aria-selected", String(mode === "url"));
+  const paste = $<HTMLButtonElement>("#tab-paste");
+  const url = $<HTMLButtonElement>("#tab-url");
+  paste.setAttribute("aria-selected", String(mode === "paste"));
+  url.setAttribute("aria-selected", String(mode === "url"));
+  paste.tabIndex = mode === "paste" ? 0 : -1;
+  url.tabIndex = mode === "url" ? 0 : -1;
   $<HTMLElement>("#panel-paste").hidden = mode !== "paste";
   $<HTMLElement>("#panel-url").hidden = mode !== "url";
 }
@@ -511,6 +594,7 @@ function renderScore() {
   if (!result) {
     gauge.classList.remove("is-provisional");
     gauge.dataset.band = "mid";
+    gauge.setAttribute("aria-label", t(state.lang, "scoreLabel"));
     gaugeValue.style.strokeDashoffset = String(ARC);
     gaugeNumber.textContent = "—";
     gaugeStatus.hidden = true;
@@ -817,6 +901,7 @@ async function runAnalysis() {
     return;
   }
 
+  trackAnalyzeStarted(window.gtag);
   state.running = true;
   state.sample = false;
   state.result = null;
@@ -850,6 +935,13 @@ function wait(ms: number) {
 
 $<HTMLButtonElement>("#tab-paste").addEventListener("click", () => setMode("paste"));
 $<HTMLButtonElement>("#tab-url").addEventListener("click", () => setMode("url"));
+$<HTMLElement>(".tabs").addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  event.preventDefault();
+  const next = event.key === "ArrowRight" ? (state.mode === "paste" ? "url" : "paste") : state.mode === "url" ? "paste" : "url";
+  setMode(next);
+  $<HTMLButtonElement>(next === "paste" ? "#tab-paste" : "#tab-url").focus();
+});
 $<HTMLButtonElement>("#sample-button").addEventListener("click", () => void runSample(false));
 newAnalysis.addEventListener("click", () => {
   returnToInput();
@@ -899,8 +991,10 @@ const stored = (() => {
     return null;
   }
 })();
-state.lang = demo === "el" ? "el" : demo === "en" || demo === "1" ? "en" : stored === "el" || stored === "en" ? stored : navigator.language.toLowerCase().startsWith("el") ? "el" : "en";
+state.lang = pageLangFromSearch(location.search, stored, navigator.language);
+syncLangParam(state.lang);
 applyI18n();
+scheduleKofi();
 void fetchHealth().then((health) => {
   healthKind = !health ? "down" : health.searchConfigured ? "search" : "nosearch";
   renderHealth();
