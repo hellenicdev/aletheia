@@ -29,26 +29,32 @@ export function denyAnalytics(gtag?: (...args: unknown[]) => void): void {
   gtag?.("consent", "update", { ...CONSENT_DENIED });
 }
 
+/** Sent only after analytics consent is granted, so the hit is not a denied ping. */
+export function trackPageView(gtag?: (...args: unknown[]) => void): void {
+  gtag?.("event", "page_view");
+}
+
+export function readConsent(storage: Pick<Storage, "getItem"> | null): "accepted" | "declined" | null {
+  try {
+    const value = storage?.getItem(CONSENT_STORAGE_KEY);
+    return value === "accepted" || value === "declined" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * gtag.js is injected after load, on idle. The inline stub has already queued
- * consent and config, so the first page_view is sent when this script runs.
- * The library is much heavier than the Ko-fi widget, so it waits out the first
- * idle slice. An immediate idle callback still lands in the opening interaction
- * window and brings mobile performance back down.
+ * gtag.js loads only after Accept. A return visit schedules it on idle, or
+ * after this timeout, so a short visit is still measured. The library stays
+ * off the first view, which is what Lighthouse records.
  */
-export const GTAG_DELAY_MS = 6_000;
+export const GTAG_IDLE_TIMEOUT_MS = 1_500;
 
 export function scheduleGtag(target: Window = window): void {
-  const start = () => {
-    const run = () => injectGtag(target.document);
-    target.setTimeout(() => {
-      const idle = target.requestIdleCallback?.bind(target);
-      if (idle) idle(run, { timeout: 2_000 });
-      else run();
-    }, GTAG_DELAY_MS);
-  };
-  if (target.document.readyState === "complete") start();
-  else target.addEventListener("load", start, { once: true });
+  const run = () => injectGtag(target.document);
+  const idle = target.requestIdleCallback?.bind(target);
+  if (idle) idle(run, { timeout: GTAG_IDLE_TIMEOUT_MS });
+  else target.setTimeout(run, GTAG_IDLE_TIMEOUT_MS);
 }
 
 export function injectGtag(doc: Document, id = GA_MEASUREMENT_ID): void {
