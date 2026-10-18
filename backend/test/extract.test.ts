@@ -105,6 +105,16 @@ describe("extractArticle", () => {
     expect(bbc.text).not.toContain("another health story");
     expect(bbc.text).not.toContain("cookies");
 
+    const related = extractArticle(
+      fixture("tails/bbc-related.html"),
+      "https://www.bbc.com/news/articles/ck62y33489zqo",
+    );
+    expect(related.text).toContain("not considered a healthy");
+    expect(related.text).not.toContain("panic-buy");
+    expect(related.text).not.toContain("lie-ins");
+    expect(related.text).not.toContain("life-changing drug");
+    expect(related.ignoredLines).toBeGreaterThan(0);
+
     const onion = extractArticle(
       fixture("onion-monarch.html"),
       "https://theonion.com/epa-to-monarch-butterflies-count-your-fucking-days/",

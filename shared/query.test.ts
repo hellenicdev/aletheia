@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { stabilizeQuery } from "./query";
+import { deterministicQuery, queryCacheKey, stabilizeQuery } from "./query";
 
 describe("stabilizeQuery", () => {
   it("keeps the named entity and the figure the model dropped", () => {
@@ -16,6 +16,21 @@ describe("stabilizeQuery", () => {
     expect(query).toMatch(/[\u0370-\u03FF]/);
     expect(query).toMatch(/4[,.]9/);
     expect(query.split(/\s+/).length).toBeLessThanOrEqual(12);
+  });
+
+  it("builds the same query from the claim text and includes the pipeline version in the cache key", () => {
+    const claim = "5.4 million people aged 16 and over vape in Britain.";
+    expect(deterministicQuery(claim, "en")).toBe(deterministicQuery(claim, "en"));
+    expect(deterministicQuery(claim, "en")).toMatch(/5\.4/);
+    expect(queryCacheKey(`  ${claim} `, "11")).toBe(queryCacheKey(claim, "11"));
+    expect(queryCacheKey(claim, "11")).not.toBe(queryCacheKey(claim, "10"));
+  });
+
+  it("uses a Greek query for a Greek headline even when the article language is English", () => {
+    const claim = "Ίσως το αρχαιότερο ναυάγιο που έχει εντοπιστεί στη Μεσόγειο βρέθηκε στα ανοιχτά της Αττάλειας.";
+    const query = deterministicQuery(claim, "en");
+    expect(query).toMatch(/[\u0370-\u03FF]/);
+    expect(query).toMatch(/ναυάγιο|αρχαιότερο|Αττάλειας|Μεσόγειο/);
   });
 
   it("leaves a query that already has the entity and the figures", () => {

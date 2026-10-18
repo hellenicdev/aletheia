@@ -29,5 +29,7 @@ describe("i18n", () => {
     expect(t("el", "scrapeFailed")).toContain("Επικολλήστε το κείμενο του άρθρου");
     expect(t("en", "searchViaTavily")).toBe("Search: Tavily");
     expect(t("el", "searchViaTavily")).toBe("Αναζήτηση: Tavily");
+    expect(t("en", "ignoredNav")).toBe("Ignored {n} lines of page navigation / related headlines");
+    expect(t("el", "ignoredNav")).toContain("Αγνοήθηκαν");
   });
 });

@@ -37,12 +37,21 @@ const FIRST_PERSON =
 const PRIVATE_ROLE =
   /\b(?:teacher|student|pupil|nurse|mother|father|mum|dad|resident|smoker|vaper|woman|man|girl|boy|teenager|pensioner|δάσκαλος|μαθητ\p{L}*|μητέρα|πατέρας)\b/iu;
 
+const PUBLIC_ROLE =
+  /\b(?:chief|administrator|spokesperson|spokesman|spokeswoman|minister|secretary|professor|archaeologist|scientists?|experts?|officials?|directors?|agenc(?:y|ies)|mayor|governor|president|senator|commissioner|regulator|researcher|historian|EPA)\b|υπουργ\p{L}*|αρχαιολόγ\p{L}*|εκπρόσωπ\p{L}*|καθηγητ\p{L}*|ερευνητ\p{L}*|δήμαρχ\p{L}*/iu;
+
+/** Officials, experts, and spokespeople stay checkable. Personal is only a private individual. */
+function isPublicRole(text: string): boolean {
+  return PUBLIC_ROLE.test(text);
+}
+
 /**
- * Personal testimony, a private individual's story, or a first-person quotation.
- * These are not selected for search. A public figure stating a checkable fact is not one of these.
+ * Personal testimony or a private individual's story.
+ * These are not selected for search. A quote from an official, expert, or spokesperson is not one of these.
  */
 export function isPersonalAccount(text: string): boolean {
   const value = text.replace(/\s+/g, " ").trim();
+  if (isPublicRole(value)) return false;
   if (AGE_ANECDOTE.test(value)) return true;
   if (AGE_AT.test(value) && AGE_PRONOUN.test(value)) return true;
   if (AGE_RANGE.test(value)) return true;
@@ -100,6 +109,7 @@ export function inferClaimType(text: string): ClaimType {
 export function reconcileClaimType(text: string, model: ClaimType): ClaimType {
   if (isDateFiller(text)) return "rhetorical";
   if (isPersonalAccount(text)) return "personal";
+  if (isPublicRole(text) && model === "personal") return "checkable_factual";
   if (isAttributedClaim(text) && model === "opinion") return "checkable_factual";
   const local = inferClaimType(text);
   if (local === "rhetorical" || local === "opinion") return local;

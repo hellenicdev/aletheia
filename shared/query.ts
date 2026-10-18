@@ -22,6 +22,25 @@ export function boundQuery(query: string): string {
   return query.replace(/\s+/g, " ").trim().split(/\s+/).filter(Boolean).slice(0, 12).join(" ").slice(0, 180);
 }
 
+/** Greek claims keep a Greek query even when the article language was detected as English. */
+export function queryLanguage(claim: string, detected: DetectedLanguage): DetectedLanguage {
+  if (detected === "el" || GREEK.test(claim)) return "el";
+  return detected;
+}
+
+/**
+ * The same claim text and language always produce the same query.
+ * Retrieval does not depend on a sampled model string.
+ */
+export function deterministicQuery(claim: string, language: DetectedLanguage): string {
+  return stabilizeQuery("", claim, queryLanguage(claim, language));
+}
+
+/** Cache key for one claim. The pipeline version is part of the key so a rule change drops old queries. */
+export function queryCacheKey(claim: string, version: string): string {
+  return `query:v${version}:${claim.replace(/\s+/g, " ").trim().toLowerCase()}`;
+}
+
 /**
  * Retrieval is unstable when the model drops the number or switches a Greek
  * claim into English. Put the named entity and any figure first, and rebuild

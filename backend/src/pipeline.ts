@@ -1,4 +1,4 @@
-import { isSkippableFragment, stripCredits, stripPromoItems } from "../../shared/articleText";
+import { cleanupArticle, filterClaimSpans, isSkippableFragment, stripCredits, stripPromoItems } from "../../shared/articleText";
 import {
   evaluativeDensity,
   inferClaimType,
@@ -23,9 +23,9 @@ import {
   rhetoricalExplanation,
   unverifiableExplanation,
 } from "../../shared/messages";
-import { claimImportance, compareClaims, tokenOverlap } from "../../shared/rank";
+import { claimImportance, compareClaims, pinHeadlineFirst, tokenOverlap } from "../../shared/rank";
 import { outletFromDomain, resolveOutlet } from "../../shared/reputation";
-import { stabilizeQuery } from "../../shared/query";
+import { deterministicQuery, queryLanguage, stabilizeQuery } from "../../shared/query";
 import { aggregateScore, coverageOf, isProvisionalScore } from "../../shared/score";
 import { splitPastedTitle, splitSentences } from "../../shared/sentences";
 import { blendTone, combineTone, type Rhetoric } from "../../shared/tone";
@@ -68,9 +68,12 @@ import { deadlineReached, isDeadline, raceAbort } from "./deadline";
 import {
   cacheCountsAsSubrequest,
   createProviderGate,
+  peekQuery,
+  readCachedQuery,
   readVerification,
   searchWeb,
   verificationCacheKey,
+  writeCachedQuery,
   writeVerification,
   type CacheCharge,
 } from "./firecrawl";
@@ -198,7 +201,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   budget.setStage("evidence");
   stage("evidence", "start");
   const searchable = segmented.segments.filter((segment) => isSearchable(segment.claimType));
-  const budgeted = [...searchable].sort(compareClaims).slice(0, LIMITS.maxSearches);
+  const budgeted = pinHeadlineFirst(searchable, ingested.title, LIMITS.maxSearches);
   const budgetedIds = new Set(budgeted.map((segment) => segment.id));
   const overBudget = new Set(searchable.filter((segment) => !budgetedIds.has(segment.id)).map((segment) => segment.id));
   const echoOnly = new Set<string>();
@@ -264,6 +267,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
             deadline,
             budget,
             signal,
+            selected.length * searchCost + verifyGroups * verifyCost + selected.length + 6,
           );
     llmHold = 1 + verifyGroups;
     let finishedSearches = planned < budgeted.length ? budgeted.length - planned : 0;
@@ -292,16 +296,18 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
         searchDegraded = true;
         break;
       }
+      const queryLanguageForClaim = queryLanguage(segment.text, segmented.detectedLanguage);
       const query = stabilizeQuery(
-        queries.get(segment.id) || segment.text,
+        queries.get(segment.id) || deterministicQuery(segment.text, queryLanguageForClaim),
         segment.text,
-        segmented.detectedLanguage,
+        queryLanguageForClaim,
       );
       const timeoutMs = Math.max(1_000, Math.min(10_000, deadline - Date.now() - 2_000));
       try {
         searchAttempts += 1;
         const found = await retrieveHits({
           query,
+          claim: segment.text,
           language: segmented.detectedLanguage,
           firecrawlKey: searchKey,
           tavilyKey,
@@ -645,9 +651,10 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       warnings,
       outlet,
       subrequests: budget.snapshot(),
+      ignoredLines: (ingested.ignoredLines ?? 0) + segmented.ignoredLines,
     },
   };
-  } finally {
+} finally {
     clearTimeout(budgetTimer);
     deps.signal?.removeEventListener("abort", abortOwned);
   }
@@ -707,6 +714,7 @@ async function ingest(
       extraction: extracted.via,
       truncated: false,
       opinionSection: extracted.opinionSection === true,
+      ignoredLines: extracted.ignoredLines,
     };
   }
 
@@ -724,15 +732,20 @@ async function ingest(
   if (split.body.length < LIMITS.minArticleChars) {
     throw new HttpError(400, "Paste a longer article. Very short text cannot be audited.");
   }
+  const cleaned = cleanupArticle(split.body);
+  if (cleaned.text.length < LIMITS.minArticleChars) {
+    throw new HttpError(400, "Paste a longer article. Very short text cannot be audited.");
+  }
   return {
     title: split.title,
-    text: split.body.slice(0, LIMITS.maxArticleChars),
+    text: cleaned.text.slice(0, LIMITS.maxArticleChars),
     sourceDomain: null,
     sourceUrl: null,
     publishedAt: null,
     extraction: "pasted" as const,
     truncated,
-    opinionSection: looksLikeOpinionSection(null, split.title, split.body),
+    opinionSection: looksLikeOpinionSection(null, split.title, cleaned.text),
+    ignoredLines: cleaned.ignoredLines,
   };
 }
 
@@ -753,9 +766,15 @@ async function segmentArticle(options: {
   detectedLanguage: DetectedLanguage;
   truncated: boolean;
   genre: string | null;
+  ignoredLines: number;
 }> {
   const localLanguage = detectLanguage(options.text);
-  const spans = uniqueSpans(splitSentences(options.text).filter((span) => !isSkippableFragment(span.text)));
+  const filtered = filterClaimSpans(
+    splitSentences(options.text).filter((span) => !isSkippableFragment(span.text)),
+    options.title,
+    options.text,
+  );
+  const spans = uniqueSpans(filtered.spans);
   const ranked = spans
     .map((span, index) => ({ span, importance: claimImportance(span.text, options.title, index) }))
     .sort((a, b) => compareClaims(
@@ -763,7 +782,14 @@ async function segmentArticle(options: {
       { importance: b.importance, start: b.span.start, text: b.span.text },
     ));
   const truncated = ranked.length > LIMITS.maxSegments;
-  const kept = ranked.slice(0, LIMITS.maxSegments).sort((a, b) => a.span.start - b.span.start);
+  let chosen = ranked.slice(0, LIMITS.maxSegments);
+  if (options.title) {
+    const headline = ranked.find((item) => titleMatchesSpan(item.span.text, options.title));
+    if (headline && !chosen.includes(headline)) {
+      chosen = [headline, ...chosen.slice(0, LIMITS.maxSegments - 1)];
+    }
+  }
+  const kept = chosen.sort((a, b) => a.span.start - b.span.start);
   const drafts = kept.map((item, index) => ({
     id: `s${index + 1}`,
     text: item.span.text,
@@ -823,7 +849,7 @@ async function segmentArticle(options: {
   for (const draft of drafts) {
     draft.claimType = reconcileClaimType(draft.text, draft.claimType);
   }
-  return { segments: drafts, detectedLanguage: detected, truncated, genre };
+  return { segments: drafts, detectedLanguage: detected, truncated, genre, ignoredLines: filtered.ignored };
 }
 
 function validateSegments(data: unknown): {
@@ -864,11 +890,28 @@ async function buildQueries(
   warnings: string[],
   deadline: number,
   budget: SubrequestBudget,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  reserve: number,
 ): Promise<Map<string, string>> {
   const queries = new Map<string, string>();
   if (segments.length === 0) return queries;
-  for (const batch of chunk(segments, LIMITS.maxSearches)) {
+  const queryCharge: CacheCharge = () => {
+    if (budget.remaining() - 1 < reserve) return false;
+    return budget.trySpend(1);
+  };
+  const pending: DraftSegment[] = [];
+  for (const segment of segments) {
+    const stable = deterministicQuery(segment.text, language);
+    const cached = peekQuery(segment.text) ?? (await readCachedQuery(segment.text, queryCharge));
+    if (cached) {
+      queries.set(segment.id, stabilizeQuery(cached, segment.text, queryLanguage(segment.text, language)));
+      continue;
+    }
+    queries.set(segment.id, stable);
+    pending.push(segment);
+  }
+  if (pending.length === 0) return queries;
+  for (const batch of chunk(pending, LIMITS.maxSearches)) {
     if (Date.now() > deadline - 8_000 || !budget.canSpend(1)) {
       remember(warnings, new Error("query generation stopped before the deadline or subrequest limit"), "llm");
       break;
@@ -889,12 +932,21 @@ async function buildQueries(
       });
       for (const item of parsed) {
         const claim = batch.find((segment) => segment.id === item.id);
-        queries.set(item.id, stabilizeQuery(item.query, claim?.text ?? item.query, language));
+        if (!claim) continue;
+        // Temperature is 0, and the stored query is still the deterministic form.
+        // A sampled wording must not change the next run's search.
+        const stable = deterministicQuery(claim.text, language);
+        queries.set(claim.id, stable);
+        await writeCachedQuery(claim.text, stable, queryCharge);
       }
     } catch (error) {
       remember(warnings, error, "llm");
       if (isBudgetExhausted(error)) break;
     }
+  }
+  for (const segment of pending) {
+    const stable = queries.get(segment.id);
+    if (stable && !peekQuery(segment.text)) await writeCachedQuery(segment.text, stable, queryCharge);
   }
   return queries;
 }
@@ -1251,6 +1303,7 @@ function tavilyCanCover(error: unknown): boolean {
 
 async function retrieveHits(options: {
   query: string;
+  claim: string;
   language: DetectedLanguage;
   firecrawlKey: string;
   tavilyKey: string;
@@ -1270,6 +1323,7 @@ async function retrieveHits(options: {
         searchWeb({
           apiKey: options.firecrawlKey,
           query: options.query,
+          claim: options.claim,
           language: options.language,
           fetchImpl: options.fetchImpl,
           timeoutMs: options.timeoutMs,
@@ -1297,11 +1351,13 @@ async function retrieveHits(options: {
     if (options.signal?.aborted || Date.now() > options.deadline - 3_000) throw deadlineReached();
     throw new BudgetExhausted();
   }
-  // The search response already includes the snippet. Do not scrape each URL.
+  // The search response already includes raw page text. Expand the top hits
+  // from that text. Do not scrape each URL.
   const hits = await withTimeout(
     searchTavily({
       apiKey: options.tavilyKey,
       query: options.query,
+      claim: options.claim,
       fetchImpl: options.fetchImpl,
       timeoutMs: options.timeoutMs,
       signal: options.signal,
@@ -1380,6 +1436,14 @@ async function withTimeout<T>(work: Promise<T>, ms: number, message: string): Pr
 
 function isSearchable(claimType: ClaimType): boolean {
   return claimType === "checkable_factual" || claimType === "mixed";
+}
+
+function titleMatchesSpan(text: string, title: string | null): boolean {
+  if (!title || !title.trim()) return false;
+  const left = text.replace(/\s+/g, " ").trim().toLowerCase();
+  const right = title.replace(/\s+/g, " ").trim().toLowerCase();
+  if (!left || !right) return false;
+  return left.includes(right) || right.includes(left) || tokenOverlap(text, title) >= 0.34 || tokenOverlap(title, text) >= 0.6;
 }
 
 function rhetoricOf(label: Label, claimType: ClaimType | undefined): Rhetoric {

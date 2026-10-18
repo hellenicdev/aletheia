@@ -1,5 +1,7 @@
-import { cleanArticleText } from "../../shared/articleText";
+import { cleanupArticle } from "../../shared/articleText";
 import type { EvidenceItem } from "../../shared/citations";
+import { focusPassage, passageAddsFigure, passageMissesFigure } from "../../shared/passages";
+import { queryCacheKey } from "../../shared/query";
 import { BudgetExhausted, isBudgetExhausted } from "./budget";
 import { combineSignals, deadlineReached, isDeadline, raceAbort } from "./deadline";
 import { HttpError, UpstreamError, redactSecret } from "./errors";
@@ -13,6 +15,7 @@ const CACHE_TTL_SECONDS = 86_400;
 const searchCache = new Map<string, { at: number; hits: EvidenceItem[] }>();
 const scrapeCache = new Map<string, { at: number; page: ScrapedPage }>();
 const verifyCache = new Map<string, { at: number; verdict: CachedVerdict }>();
+const queryMemory = new Map<string, { at: number; query: string }>();
 let queue: Promise<void> = Promise.resolve();
 
 /** Request-scoped note that Firecrawl rejected the call, so later searches do not wait. */
@@ -51,6 +54,7 @@ export function clearSearchCache(): void {
   searchCache.clear();
   scrapeCache.clear();
   verifyCache.clear();
+  queryMemory.clear();
   clearTavilyCache();
   resetOutboundBudget();
 }
@@ -134,12 +138,15 @@ export async function searchWeb(options: {
   signal?: AbortSignal;
   charge?: CacheCharge;
   gate?: ProviderGate;
+  /** When set, the first one or two hits keep a longer passage around this claim's figures. */
+  claim?: string;
   /** Health checks must hit Firecrawl. A cached hit is not evidence the provider is up. */
   bypassCache?: boolean;
 }): Promise<EvidenceItem[]> {
   const query = options.query.trim().slice(0, 240);
   if (!query) return [];
-  const cacheKey = `${options.language}:${query}`;
+  const claimKey = options.claim?.replace(/\s+/g, " ").trim().slice(0, 180) ?? "";
+  const cacheKey = claimKey ? `${options.language}:${query}:${claimKey}` : `${options.language}:${query}`;
   if (!options.bypassCache) {
     const cached = searchCache.get(cacheKey);
     if (cached && Date.now() - cached.at < 10 * 60_000) return cached.hits;
@@ -202,8 +209,9 @@ export async function searchWeb(options: {
     throw new Error("Firecrawl search did not succeed.");
   }
 
+  const expand = { used: 0 };
   const hits = readHits(parsed)
-    .map((hit) => toEvidence(hit))
+    .map((hit) => toEvidence(hit, options.claim, expand))
     .filter((item): item is EvidenceItem => item !== null)
     .slice(0, 4);
   if (!options.bypassCache) {
@@ -271,6 +279,7 @@ export interface ScrapedPage {
   siteName: string | null;
   finalUrl: string;
   rawHtml: string | null;
+  ignoredLines: number;
 }
 
 export async function scrapeArticle(options: {
@@ -289,7 +298,12 @@ export async function scrapeArticle(options: {
   if (memo && Date.now() - memo.at < 10 * 60_000) return memo.page;
   const persisted = await readPersisted<ScrapedPage>(`scrape:${cacheKey}`, options.charge);
   if (persisted && persisted.text) {
-    const page = { ...persisted, byline: persisted.byline ?? null, siteName: persisted.siteName ?? null };
+    const page = {
+      ...persisted,
+      byline: persisted.byline ?? null,
+      siteName: persisted.siteName ?? null,
+      ignoredLines: persisted.ignoredLines ?? 0,
+    };
     scrapeCache.set(cacheKey, { at: Date.now(), page });
     return page;
   }
@@ -303,7 +317,26 @@ export async function scrapeArticle(options: {
         url: pageUrl.toString(),
         formats: ["markdown", "html"],
         onlyMainContent: true,
-        excludeTags: ["nav", "header", "footer", "aside", "form", "script", "style", "noscript"],
+        excludeTags: [
+          "nav",
+          "header",
+          "footer",
+          "aside",
+          "form",
+          "script",
+          "style",
+          "noscript",
+          ".related",
+          ".related-stories",
+          ".related-content",
+          ".most-read",
+          ".most-popular",
+          ".top-stories",
+          ".recommendations",
+          ".recirc",
+          ".newsletter",
+          ".app-promo",
+        ],
         timeout: timeoutMs,
       },
       options.apiKey,
@@ -339,7 +372,8 @@ export async function scrapeArticle(options: {
   const markdown = typeof data.markdown === "string" ? data.markdown : "";
   const metadata = isRecord(data.metadata) ? data.metadata : {};
   const html = typeof data.html === "string" ? data.html : null;
-  const article = cleanArticleText(markdownToText(markdown));
+  const cleaned = cleanupArticle(markdownToText(markdown));
+  const article = cleaned.text;
   if (article.length < LIMITS.minArticleChars && !html) {
     throw new HttpError(
       422,
@@ -371,6 +405,7 @@ export async function scrapeArticle(options: {
     siteName: metaString(metadata, ["og:site_name", "ogSiteName", "siteName", "site_name"]),
     finalUrl,
     rawHtml: html,
+    ignoredLines: cleaned.ignoredLines,
   };
   scrapeCache.set(cacheKey, { at: Date.now(), page });
   await writePersisted(`scrape:${cacheKey}`, page, options.charge);
@@ -406,8 +441,34 @@ async function readPersisted<T>(key: string, charge?: CacheCharge): Promise<T | 
   }
 }
 
-/** Bump when verification rules change so a cached verdict is not reused. */
-export const PIPELINE_VERSION = "9";
+/** Bump when verification or the claim set changes so a cached verdict is not reused. */
+export const PIPELINE_VERSION = "11";
+
+export function peekQuery(claim: string): string | null {
+  const hit = queryMemory.get(queryCacheKey(claim, PIPELINE_VERSION));
+  if (!hit || Date.now() - hit.at > CACHE_TTL_SECONDS * 1000) return null;
+  return hit.query;
+}
+
+export async function readCachedQuery(claim: string, charge?: CacheCharge): Promise<string | null> {
+  const memo = peekQuery(claim);
+  if (memo) return memo;
+  const key = queryCacheKey(claim, PIPELINE_VERSION);
+  const persisted = await readPersisted<{ query: string }>(key, charge);
+  if (!persisted || typeof persisted.query !== "string") return null;
+  const query = persisted.query.replace(/\s+/g, " ").trim();
+  if (!query) return null;
+  queryMemory.set(key, { at: Date.now(), query });
+  return query;
+}
+
+export async function writeCachedQuery(claim: string, query: string, charge?: CacheCharge): Promise<void> {
+  const clean = query.replace(/\s+/g, " ").trim();
+  if (!clean) return;
+  const key = queryCacheKey(claim, PIPELINE_VERSION);
+  queryMemory.set(key, { at: Date.now(), query: clean });
+  await writePersisted(key, { query: clean }, charge);
+}
 
 export function verificationCacheKey(claim: string, urls: string[], language: string): string {
   const list = [...urls]
@@ -516,18 +577,25 @@ function readHits(payload: Record<string, unknown>): Hit[] {
   return [];
 }
 
-function toEvidence(hit: Hit): EvidenceItem | null {
+function toEvidence(hit: Hit, claim?: string, expand?: { used: number }): EvidenceItem | null {
   if (typeof hit.url !== "string" || !/^https?:\/\//i.test(hit.url)) return null;
   const markdown = markdownToText(stringValue(hit.markdown));
   const snippetSource =
     stringValue(hit.description) || stringValue(hit.snippet) || markdown;
   const byline = apByline(markdown) || apByline(stringValue(hit.title));
-  const snippet = [snippetSource, byline && !apByline(snippetSource) ? byline : ""]
+  let snippet = [snippetSource, byline && !apByline(snippetSource) ? byline : ""]
     .filter(Boolean)
     .join(" ")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 400);
+  if (claim && expand && expand.used < 2 && passageMissesFigure(claim, snippet)) {
+    const focused = focusPassage(claim, markdown.length > snippet.length ? markdown : snippet);
+    if (focused && passageAddsFigure(claim, snippet, focused)) {
+      snippet = focused.slice(0, 1500);
+      expand.used += 1;
+    }
+  }
   return {
     url: hit.url,
     title: (stringValue(hit.title) || hit.url).replace(/\s+/g, " ").trim().slice(0, 180),

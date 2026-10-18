@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { cleanArticleText, isSkippableFragment } from "./articleText";
+import { cleanupArticle, cleanArticleText, filterClaimSpans, isSkippableFragment } from "./articleText";
+import { splitSentences } from "./sentences";
 
 describe("cleanArticleText", () => {
   it("drops navigation and keeps the article paragraphs", () => {
@@ -147,5 +148,77 @@ describe("cleanArticleText", () => {
     const text = cleanArticleText(raw);
     expect(text).toContain("τουρισμό");
     expect(text).not.toContain("Σικελία");
+  });
+
+  it("cuts the article at English and Greek related-story markers", () => {
+    const raw = [
+      "The council voted 7 to 2 on Monday and published the full minutes for residents of the harbour district.",
+      "",
+      "Η κυβέρνηση ανακοίνωσε νέο πλαίσιο για τον τουρισμό μετά τη σύνοδο των υπουργών.",
+      "",
+      "Most read",
+      "A different harbour fire that is not part of this story.",
+      "More on this story",
+      "Fees in a neighbouring town were left unchanged last year.",
+      "Τα πιο διαβασμένα",
+      "Άλλο ναυάγιο στη Σικελία που δεν ανήκει στο κείμενο.",
+      "Δείτε ακόμα",
+      "Περισσότερα",
+      "Μία λίστα τίτλων που ακολουθεί το άρθρο.",
+    ].join("\n");
+    const cleaned = cleanupArticle(raw);
+    expect(cleaned.text).toContain("voted 7 to 2");
+    expect(cleaned.text).toContain("τουρισμό");
+    expect(cleaned.text).not.toContain("neighbouring");
+    expect(cleaned.text).not.toContain("Σικελία");
+    expect(cleaned.text).not.toContain("Most read");
+    expect(cleaned.ignoredLines).toBeGreaterThanOrEqual(4);
+  });
+
+  it("drops a trailing run of headline-like lines and keeps a real closing sentence", () => {
+    const raw = [
+      "The council voted 7 to 2 on Monday and published the full minutes for residents of the harbour district.",
+      "",
+      "The harbour master signed the notice after the meeting.",
+      "Harbour Fees Rise Again",
+      "Boats Remain On The Waiting List",
+      "Council Publishes The Minutes",
+    ].join("\n");
+    const cleaned = cleanupArticle(raw);
+    expect(cleaned.text).toContain("harbour master");
+    expect(cleaned.text).not.toContain("Fees Rise");
+    expect(cleaned.text).not.toContain("Waiting List");
+    expect(cleaned.ignoredLines).toBe(3);
+  });
+
+  it("drops markdown links and off-topic headlines near the end, and keeps the lede", () => {
+    const article = [
+      "The council voted 7 to 2 on Monday and published the full minutes for residents of the harbour district.",
+      "",
+      "Fees rose from 800 to 880 euros, and twelve boats remain on the waiting list after the harbour master signs the notice.",
+      "",
+      "[Celebrity wedding photos](https://example.com/wedding)",
+      "Red Carpet Photos From Another City",
+    ].join("\n");
+    const spans = splitSentences(article).filter((span) => !isSkippableFragment(span.text));
+    const filtered = filterClaimSpans(spans, "Harbour vote", article);
+    const text = filtered.spans.map((span) => span.text).join(" ");
+    expect(text).toContain("voted 7 to 2");
+    expect(text).toContain("880 euros");
+    expect(text).not.toContain("Celebrity");
+    expect(text).not.toContain("Red Carpet");
+    expect(filtered.ignored).toBeGreaterThanOrEqual(2);
+  });
+
+  it("keeps a title headline that has no sentence punctuation", () => {
+    const title = "Oldest Shipwreck Found Off Antalya";
+    const article = [
+      title,
+      "",
+      "Archaeologists described the wreck as the oldest known in the Mediterranean and published the first photographs.",
+    ].join("\n");
+    const spans = splitSentences(article).filter((span) => !isSkippableFragment(span.text));
+    const filtered = filterClaimSpans(spans, title, article);
+    expect(filtered.spans.some((span) => span.text.includes("Oldest Shipwreck"))).toBe(true);
   });
 });

@@ -1,5 +1,6 @@
-import { cleanArticleText } from "../../shared/articleText";
+import { cleanupArticle } from "../../shared/articleText";
 import type { EvidenceItem } from "../../shared/citations";
+import { focusPassage, passageAddsFigure, passageMissesFigure } from "../../shared/passages";
 import { isRecord } from "../../shared/json";
 import { BudgetExhausted, isBudgetExhausted } from "./budget";
 import { deadlineReached, isDeadline, raceAbort } from "./deadline";
@@ -41,6 +42,8 @@ export async function searchTavily(options: {
   signal?: AbortSignal;
   topic?: "news" | "general";
   includeRawContent?: boolean;
+  /** When set, the first one or two hits keep a longer passage around this claim's figures. */
+  claim?: string;
   gate?: TavilyGate;
   bypassCache?: boolean;
 }): Promise<EvidenceItem[]> {
@@ -52,7 +55,10 @@ export async function searchTavily(options: {
   }
   const topic = options.topic ?? "general";
   const includeRaw = options.includeRawContent === true;
-  const cacheKey = `${topic}:${includeRaw ? "raw" : "snip"}:${query}`;
+  const claimKey = options.claim?.replace(/\s+/g, " ").trim().slice(0, 180) ?? "";
+  const cacheKey = claimKey
+    ? `${topic}:${includeRaw ? "raw" : "snip"}:${query}:${claimKey}`
+    : `${topic}:${includeRaw ? "raw" : "snip"}:${query}`;
   if (!options.bypassCache) {
     const cached = searchCache.get(cacheKey);
     if (cached && Date.now() - cached.at < 10 * 60_000) return cached.hits;
@@ -75,7 +81,7 @@ export async function searchTavily(options: {
     options.signal,
     options.gate,
   );
-  const hits = readSearchHits(text, options.apiKey);
+  const hits = readSearchHits(text, options.apiKey, options.claim);
   if (!options.bypassCache) searchCache.set(cacheKey, { at: Date.now(), hits });
   return hits;
 }
@@ -87,7 +93,7 @@ export async function extractTavily(options: {
   timeoutMs?: number;
   signal?: AbortSignal;
   gate?: TavilyGate;
-}): Promise<{ title: string | null; text: string; finalUrl: string }> {
+}): Promise<{ title: string | null; text: string; finalUrl: string; ignoredLines: number; raw: string }> {
   if (options.gate?.block) {
     const block = options.gate.block;
     throw new UpstreamError("tavily", block.status, block.detail);
@@ -116,9 +122,10 @@ export async function extractTavily(options: {
   const original = first.raw_content.replace(/\r\n/g, "\n");
   const title = titleFromExtract(original);
   const withoutTitle = title && original.startsWith(title) ? original.slice(title.length) : original;
-  const articleText = cleanArticleText(withoutTitle).trim() || cleanArticleText(original);
+  const cleaned = cleanupArticle(withoutTitle);
+  const fallback = cleaned.text.trim() ? cleaned : cleanupArticle(original);
   const finalUrl = typeof first.url === "string" && /^https?:\/\//i.test(first.url) ? first.url : options.url;
-  return { title, text: articleText, finalUrl };
+  return { title, text: fallback.text, finalUrl, ignoredLines: fallback.ignoredLines, raw: original };
 }
 
 async function postTavily(
@@ -169,7 +176,7 @@ async function postTavily(
   return raceAbort(response.text(), signal);
 }
 
-function readSearchHits(text: string, apiKey: string): EvidenceItem[] {
+function readSearchHits(text: string, apiKey: string, claim?: string): EvidenceItem[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -179,16 +186,25 @@ function readSearchHits(text: string, apiKey: string): EvidenceItem[] {
   if (!isRecord(parsed)) throw new UpstreamError("tavily", 502, "Tavily search did not succeed.");
   const results = Array.isArray(parsed.results) ? parsed.results : [];
   const hits: EvidenceItem[] = [];
+  let expanded = 0;
   for (const item of results) {
     if (!isRecord(item) || typeof item.url !== "string" || !/^https?:\/\//i.test(item.url)) continue;
     const content = cleanText(item.content);
     const raw = cleanText(item.raw_content);
-    const snippet = (content.length >= 40 ? content : raw || content).slice(0, 400);
+    const shortSource = content.length >= 40 ? content : raw || content;
+    let snippet = shortSource.slice(0, 400);
+    if (claim && expanded < 2 && passageMissesFigure(claim, snippet)) {
+      const focused = focusPassage(claim, raw.length > snippet.length ? raw : shortSource);
+      if (focused && passageAddsFigure(claim, snippet, focused)) {
+        snippet = focused.slice(0, 1500);
+        expanded += 1;
+      }
+    }
     const published = publishedAt(item.published_date);
     hits.push({
       url: item.url,
       title: (cleanText(item.title) || item.url).slice(0, 180),
-      snippet: redactSecret(snippet, apiKey),
+      snippet: snippet.replaceAll(apiKey, "[redacted]"),
       ...(published ? { publishedAt: published } : {}),
     });
   }

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { clearSearchCache } from "../src/firecrawl";
+import { clearTavilyCache } from "../src/tavily";
 import { clearProbeCache } from "../src/probe";
 import { handleRequest } from "../src/index";
 import type { RateState } from "../src/limits";
@@ -2203,6 +2204,72 @@ describe("handleRequest", () => {
     expect(skipped?.explanation).toBe("This claim was not selected for checking.");
     expect(skipped?.explanation).not.toContain("budget");
     expect(result.meta.warnings.join(" ")).not.toContain("subrequest limit");
+  });
+
+  it("reuses a deterministic query for the same claim and reads a buried figure", async () => {
+    clearSearchCache();
+    const claim = "5.4 million people aged 16 and over vape in Britain according to the health survey.";
+    const text = `${claim} Researchers said the survey asked adults about daily use and published the tables the same afternoon.`;
+    const searches: string[] = [];
+    let queryCalls = 0;
+    let verifyClaim = "";
+    const prefix = "Site navigation and an unrelated introduction. ".repeat(24);
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.tavily.com/search")) {
+        const body = JSON.parse(String(init?.body)) as { query?: string };
+        searches.push(body.query ?? "");
+        return new Response(
+          JSON.stringify({
+            results: [
+              {
+                title: "Adult vaping",
+                url: "https://www.ons.gov.uk/vaping",
+                content: "The health survey discusses adult habits in Britain.",
+                raw_content: `${prefix} Official figures say 5.4 million people aged 16 and over vape in Britain.`,
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(classifyPayload(user, () => ({ claimType: "checkable_factual", note: "A recorded claim." })));
+      }
+      if (system.startsWith("TASK:queries")) {
+        queryCalls += 1;
+        return llmPayload({ queries: [{ id: "s1", query: "vaping habits survey" }] });
+      }
+      if (system.startsWith("TASK:verify")) {
+        verifyClaim = user;
+        const payload = JSON.parse(user) as { claims: { id: string; evidence: { url: string }[] }[] };
+        return llmPayload({
+          results: payload.claims.map((item) => ({
+            id: item.id,
+            label: "True",
+            confidence: 0.9,
+            explanation: "The survey reports 5.4 million people.",
+            sourceUrls: item.evidence.map((entry) => entry.url),
+          })),
+        });
+      }
+      if (system.startsWith("TASK:consistency")) return llmPayload({ contradictions: [] });
+      throw new Error(system.slice(0, 24));
+    };
+    const envWithTavily = { ...env, TAVILY_API_KEY: "tavily-test-key", FIRECRAWL_API_KEY: "" };
+    await analyze({ text, uiLanguage: "en" }, { env: envWithTavily, fetchImpl });
+    expect(queryCalls).toBe(1);
+    expect(verifyClaim).toContain("Official figures say 5.4 million");
+    const first = searches[0] ?? "";
+    expect(first).toMatch(/5\.4/);
+    searches.length = 0;
+    clearTavilyCache();
+    await analyze({ text, uiLanguage: "en" }, { env: envWithTavily, fetchImpl });
+    expect(queryCalls).toBe(1);
+    expect(searches[0]).toBe(first);
   });
 
   it("sends an error event when the request is aborted", async () => {
