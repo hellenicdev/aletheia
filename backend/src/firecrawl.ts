@@ -130,16 +130,20 @@ export async function searchWeb(options: {
   signal?: AbortSignal;
   charge?: CacheCharge;
   gate?: ProviderGate;
+  /** Health checks must hit Firecrawl. A cached hit is not evidence the provider is up. */
+  bypassCache?: boolean;
 }): Promise<EvidenceItem[]> {
   const query = options.query.trim().slice(0, 240);
   if (!query) return [];
   const cacheKey = `${options.language}:${query}`;
-  const cached = searchCache.get(cacheKey);
-  if (cached && Date.now() - cached.at < 10 * 60_000) return cached.hits;
-  const persisted = await readPersisted<EvidenceItem[]>(`search:${cacheKey}`, options.charge);
-  if (persisted) {
-    searchCache.set(cacheKey, { at: Date.now(), hits: persisted });
-    return persisted;
+  if (!options.bypassCache) {
+    const cached = searchCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < 10 * 60_000) return cached.hits;
+    const persisted = await readPersisted<EvidenceItem[]>(`search:${cacheKey}`, options.charge);
+    if (persisted) {
+      searchCache.set(cacheKey, { at: Date.now(), hits: persisted });
+      return persisted;
+    }
   }
   if (options.gate?.block) {
     const block = options.gate.block;
@@ -198,8 +202,10 @@ export async function searchWeb(options: {
     .map((hit) => toEvidence(hit))
     .filter((item): item is EvidenceItem => item !== null)
     .slice(0, 4);
-  searchCache.set(cacheKey, { at: Date.now(), hits });
-  await writePersisted(`search:${cacheKey}`, hits, options.charge);
+  if (!options.bypassCache) {
+    searchCache.set(cacheKey, { at: Date.now(), hits });
+    await writePersisted(`search:${cacheKey}`, hits, options.charge);
+  }
   return hits;
 }
 

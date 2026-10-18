@@ -1,10 +1,16 @@
 export class HttpError extends Error {
+  readonly extraction?: "direct" | "firecrawl" | "local" | "none";
+  readonly reason?: string;
+
   constructor(
     readonly status: number,
     message: string,
+    detail?: { extraction?: "direct" | "firecrawl" | "local" | "none"; reason?: string },
   ) {
     super(message);
     this.name = "HttpError";
+    this.extraction = detail?.extraction;
+    this.reason = detail?.reason;
   }
 }
 
