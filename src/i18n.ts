@@ -124,7 +124,14 @@ const en = {
   metaTitle: "Aletheia — claim-level news credibility",
   metaDescription:
     "Aletheia labels each claim in a news article and scores credibility from evidence, sourcing, tone, and consistency.",
+  imageAlt: "Aletheia mark on a dark background",
   stagesLabel: "Analysis progress",
+  skipResults: "Skip to the results",
+  skipProgress: "Skip to progress",
+  consentTitle: "Analytics cookies",
+  consentBody: "Aletheia counts visits only if you accept. It does not use advertising cookies.",
+  consentAccept: "Accept",
+  consentDecline: "Decline",
 };
 
 const el: Record<keyof typeof en, string> = {
@@ -251,7 +258,14 @@ const el: Record<keyof typeof en, string> = {
   metaTitle: "Αλήθεια — αξιοπιστία ειδήσεων",
   metaDescription:
     "Η Αλήθεια χαρακτηρίζει κάθε ισχυρισμό ενός ειδησεογραφικού άρθρου και βαθμολογεί την αξιοπιστία από τεκμήρια, πηγές, ύφος και συνέπεια.",
+  imageAlt: "Το σήμα της Αλήθειας σε σκούρο φόντο",
   stagesLabel: "Πρόοδος ανάλυσης",
+  skipResults: "Μετάβαση στα αποτελέσματα",
+  skipProgress: "Μετάβαση στην πρόοδο",
+  consentTitle: "Cookies ανάλυσης",
+  consentBody: "Η Αλήθεια μετρά τις επισκέψεις μόνο αν το αποδεχτείτε. Δεν χρησιμοποιεί διαφημιστικά cookies.",
+  consentAccept: "Αποδοχή",
+  consentDecline: "Απόρριψη",
 };
 
 export const STRINGS = { en, el };

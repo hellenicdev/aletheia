@@ -107,7 +107,7 @@ try {
     "Chrome",
   );
   try {
-    const pages = [root, `${root}?lang=el`];
+    const pages = [root, `${root}el/`];
     const failures = [];
     for (const url of pages) {
       const page = await withTimeout(browser.newPage(), 10_000, "new page");

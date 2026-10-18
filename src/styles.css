@@ -128,16 +128,65 @@ h1 {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 44px;
+  gap: 6px;
+  min-width: 44px;
+  min-height: 44px;
   height: 44px;
+  padding: 0 12px;
   color: var(--muted);
   border-radius: 999px;
   flex: none;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
 }
 
 .github-link:hover { color: var(--text); }
 
-.github-mark { width: 20px; height: 20px; }
+.github-mark { width: 20px; height: 20px; flex: none; }
+
+.github-label { line-height: 1; }
+
+.consent {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 16px;
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #10151c;
+}
+
+.consent[hidden] { display: none; }
+
+.consent p { margin: 0; color: var(--text); }
+
+.consent-copy { flex: 1 1 220px; min-width: 0; }
+
+.consent-title { font-weight: 600; }
+
+.consent-body { color: var(--muted); }
+
+.consent-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.consent-actions button {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+}
+
+.consent-actions .consent-accept {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: transparent;
+  font-weight: 600;
+}
 
 .health[data-state="search"] { color: var(--true); }
 .health[data-state="nosearch"] { color: var(--misleading); }
@@ -673,7 +722,9 @@ input::placeholder {
 .method-provider { color: var(--faint); font-size: 13px; }
 
 .foot {
-  margin-top: 32px;
+  margin-top: 40px;
+  /* Clears the Ko-fi button, which sits just left of this line on a laptop. */
+  padding-left: 32px;
   color: var(--faint);
   font-size: 13px;
 }

@@ -12,7 +12,7 @@
     />
     <link rel="canonical" href="https://hellenicdev.eu/aletheia/" />
     <link rel="alternate" hreflang="en" href="https://hellenicdev.eu/aletheia/" />
-    <link rel="alternate" hreflang="el" href="https://hellenicdev.eu/aletheia/?lang=el" />
+    <link rel="alternate" hreflang="el" href="https://hellenicdev.eu/aletheia/el/" />
     <link rel="alternate" hreflang="x-default" href="https://hellenicdev.eu/aletheia/" />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Aletheia" />
@@ -23,6 +23,7 @@
     />
     <meta property="og:url" content="https://hellenicdev.eu/aletheia/" />
     <meta property="og:image" content="https://hellenicdev.eu/aletheia/og.png" />
+    <meta property="og:image:alt" content="Aletheia mark on a dark background" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
     <meta property="og:locale" content="en_GB" />
@@ -34,6 +35,7 @@
       content="Aletheia labels each claim in a news article and scores credibility from evidence, sourcing, tone, and consistency."
     />
     <meta name="twitter:image" content="https://hellenicdev.eu/aletheia/og.png" />
+    <meta name="twitter:image:alt" content="Aletheia mark on a dark background" />
     <link rel="icon" href="%BASE_URL%favicon.svg" />
     <script type="application/ld+json">
       {
@@ -48,13 +50,31 @@
         "offers": { "@type": "Offer", "price": "0", "priceCurrency": "EUR" }
       }
     </script>
-    <!-- Google tag (gtag.js) -->
-    <script async src="https://www.googletagmanager.com/gtag/js?id=G-9FWQFZME3Z"></script>
+    <!-- Google tag (gtag.js). The library itself loads on idle. Consent defaults come first. -->
     <script>
       window.dataLayer = window.dataLayer || [];
       function gtag(){dataLayer.push(arguments);}
+      gtag('consent', 'default', {
+        analytics_storage: 'denied',
+        ad_storage: 'denied',
+        ad_user_data: 'denied',
+        ad_personalization: 'denied'
+      });
+      try {
+        if (localStorage.getItem('aletheia-consent') === 'accepted') {
+          gtag('consent', 'update', {
+            analytics_storage: 'granted',
+            ad_storage: 'denied',
+            ad_user_data: 'denied',
+            ad_personalization: 'denied'
+          });
+        }
+      } catch (e) {}
       gtag('js', new Date());
-      gtag('config', 'G-9FWQFZME3Z');
+      gtag('config', 'G-9FWQFZME3Z', {
+        allow_google_signals: false,
+        allow_ad_personalization_signals: false
+      });
     </script>
   </head>
   <body>
