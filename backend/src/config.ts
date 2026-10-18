@@ -7,9 +7,12 @@ export interface Env {
   ALLOWED_ORIGINS?: string;
   RATE_LIMIT_PER_IP?: string;
   RATE_LIMIT_WINDOW_SEC?: string;
-  /** Tavily credits reserved per UTC day. Default 30. A var, not a secret. */
+  /** Tavily credits reserved per UTC day. Default 120. A var, not a secret. */
   TAVILY_DAILY_CREDITS?: string;
-  RATE_LIMITER?: DurableObjectNamespace;
+  /** Tavily credits reserved per calendar month. Default 950. A var, not a secret. */
+  TAVILY_MONTHLY_CREDITS?: string;
+  /** Edge guard: 3 requests per 60 seconds for one IP. The Cache API book is stricter. */
+  ANALYZE_IP?: { limit(options: { key: string }): Promise<{ success: boolean }> };
 }
 
 export interface AppConfig {

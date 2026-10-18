@@ -387,13 +387,15 @@ function presentCaught(error: unknown): string {
   if (error instanceof AnalysisError && error.code && error.retryAfterSeconds) {
     const time = formatWait(error.retryAfterSeconds, state.lang);
     const key =
-      error.code === "tavily_daily"
-        ? "rateLimitCredits"
-        : error.code === "ip_daily"
-          ? "rateLimitDaily"
-          : error.code === "ip_concurrent"
-            ? "rateLimitConcurrent"
-            : "rateLimitBurst";
+      error.code === "tavily_monthly"
+        ? "rateLimitCreditsMonth"
+        : error.code === "tavily_daily"
+          ? "rateLimitCredits"
+          : error.code === "ip_daily"
+            ? "rateLimitDaily"
+            : error.code === "ip_concurrent"
+              ? "rateLimitConcurrent"
+              : "rateLimitBurst";
     return t(state.lang, key).replace("{time}", time);
   }
   return error instanceof Error ? presentError(error.message) : t(state.lang, "errorEmpty");
@@ -406,8 +408,13 @@ function formatWait(seconds: number, lang: "en" | "el"): string {
     return minutes === 1 ? "1 minute" : `${minutes} minutes`;
   }
   const hours = Math.ceil(minutes / 60);
-  if (lang === "el") return hours === 1 ? "1 ώρα" : `${hours} ώρες`;
-  return hours === 1 ? "1 hour" : `${hours} hours`;
+  if (hours < 48) {
+    if (lang === "el") return hours === 1 ? "1 ώρα" : `${hours} ώρες`;
+    return hours === 1 ? "1 hour" : `${hours} hours`;
+  }
+  const days = Math.ceil(hours / 24);
+  if (lang === "el") return days === 1 ? "1 ημέρα" : `${days} ημέρες`;
+  return days === 1 ? "1 day" : `${days} days`;
 }
 
 function presentError(message: string): string {

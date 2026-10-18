@@ -6,18 +6,18 @@ import { HttpError } from "./errors";
 import { LIMITS, allowRequest, type RateState } from "./limits";
 import { probeUpstreams } from "./probe";
 import { analyze, type AnalyzeInput } from "./pipeline";
-import { AnalysisRateLimiter } from "./rateLimiter";
+import { cacheApiRateGate } from "./rateLimiter";
 import {
   MemoryRateGate,
   TAVILY_CREDITS_PER_ANALYSIS,
   TAVILY_DAILY_CREDITS,
+  TAVILY_MONTHLY_CREDITS,
   rateLimitMessage,
   type RateDecision,
+  type RateGate,
 } from "./rateLimit";
 import { resolveFetch } from "./runtime";
 import { assertPublicHttpUrl } from "./ssrf";
-
-export { AnalysisRateLimiter };
 
 export interface HandlerDeps {
   fetchImpl?: typeof fetch;
@@ -31,8 +31,10 @@ export interface HandlerDeps {
   waitUntil?: (promise: Promise<unknown>) => void;
   /** Test hook. Production pings every 10 seconds, on its own timer. */
   pingMs?: number;
-  /** Shared across requests in production via the Durable Object. Tests pass one gate. */
-  gate?: MemoryRateGate;
+  /** Shared book. Tests pass one gate. Production uses the Cache API. */
+  gate?: RateGate;
+  /** Test hook. Production uses the ANALYZE_IP binding (3 per 60 seconds). */
+  ipLimit?: { limit(options: { key: string }): Promise<{ success: boolean }> };
   /** Same URL on this pipeline version, for 24 hours. A hit skips the per-IP quota. */
   analysisCache?: AnalysisCache;
 }
@@ -146,10 +148,22 @@ export async function handleRequest(
     return limitResponse("ip_concurrent", 30, lang, cors);
   }
 
-  const gate = await resolveGate(env, deps.gate);
+  const edge = deps.ipLimit ?? env.ANALYZE_IP;
+  if (edge) {
+    let allowed = true;
+    try {
+      allowed = (await edge.limit({ key })).success;
+    } catch (error) {
+      console.error(error);
+    }
+    if (!allowed) return limitResponse("ip_burst", 60, lang, cors);
+  }
+
+  const gate = resolveGate(deps.gate);
   const credits = env.TAVILY_API_KEY?.trim() ? TAVILY_CREDITS_PER_ANALYSIS : 0;
   const dailyCreditCap = positiveCap(env.TAVILY_DAILY_CREDITS, TAVILY_DAILY_CREDITS);
-  const decision = await gate.reserve({ ip: key, now: now(), credits, dailyCreditCap });
+  const monthlyCreditCap = positiveCap(env.TAVILY_MONTHLY_CREDITS, TAVILY_MONTHLY_CREDITS);
+  const decision = await gate.reserve({ ip: key, now: now(), credits, dailyCreditCap, monthlyCreditCap });
   if (!decision.ok) return limitResponse(decision.code, decision.retryAfter, lang, cors);
 
   rate.inFlight.count += 1;
@@ -389,38 +403,9 @@ function streamResponse(
   return new Response(encoder.encode(chunks.join("")), { status: 200, headers });
 }
 
-async function resolveGate(env: Env, gate?: MemoryRateGate): Promise<MemoryRateGate | DurableGate> {
+function resolveGate(gate?: RateGate): RateGate {
   if (gate) return gate;
-  if (!env.RATE_LIMITER) return new MemoryRateGate();
-  return new DurableGate(env.RATE_LIMITER);
-}
-
-class DurableGate {
-  constructor(private readonly namespace: DurableObjectNamespace) {}
-
-  private stub(): DurableObjectStub {
-    return this.namespace.get(this.namespace.idFromName("global"));
-  }
-
-  async reserve(input: {
-    ip: string;
-    now: number;
-    credits: number;
-    dailyCreditCap: number;
-  }): Promise<RateDecision> {
-    const response = await this.stub().fetch("https://limiter.internal/reserve", {
-      method: "POST",
-      body: JSON.stringify(input),
-    });
-    return (await response.json()) as RateDecision;
-  }
-
-  async release(ip: string, now: number): Promise<void> {
-    await this.stub().fetch("https://limiter.internal/release", {
-      method: "POST",
-      body: JSON.stringify({ ip, now }),
-    });
-  }
+  return cacheApiRateGate() ?? new MemoryRateGate();
 }
 
 function positiveCap(value: string | undefined, fallback: number): number {

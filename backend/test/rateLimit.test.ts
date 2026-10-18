@@ -2,13 +2,16 @@ import { describe, expect, it } from "vitest";
 import type { AnalysisResult } from "../../shared/types";
 import { handleRequest } from "../src/index";
 import { LIMITS } from "../src/limits";
+import { CacheRateGate } from "../src/rateLimiter";
 import {
   IP_BURST_LIMIT,
   IP_DAILY_LIMIT,
   MemoryRateGate,
   TAVILY_CREDITS_PER_ANALYSIS,
   TAVILY_DAILY_CREDITS,
+  TAVILY_MONTHLY_CREDITS,
   utcDate,
+  utcMonth,
 } from "../src/rateLimit";
 
 const env = { OPENAI_API_KEY: "test-key", TAVILY_API_KEY: "tavily-test-key" };
@@ -76,7 +79,7 @@ describe("analysis rate gate", () => {
       gate.release(`203.0.113.${used}`, now);
       used += TAVILY_CREDITS_PER_ANALYSIS;
     }
-    expect(gate.book.creditsUsed).toBeGreaterThanOrEqual(TAVILY_DAILY_CREDITS);
+    expect(gate.book.creditsUsed).toBe(TAVILY_DAILY_CREDITS);
     const blocked = gate.reserve({
       ip: "203.0.113.50",
       now: now + 1_000,
@@ -94,6 +97,75 @@ describe("analysis rate gate", () => {
         dailyCreditCap: TAVILY_DAILY_CREDITS,
       }).ok,
     ).toBe(true);
+  });
+
+  it("stops before a calendar month passes 950 Tavily credits", () => {
+    const gate = new MemoryRateGate();
+    const now = Date.UTC(2026, 9, 1, 0, 0, 0);
+    let used = 0;
+    let i = 0;
+    while (used + TAVILY_CREDITS_PER_ANALYSIS <= TAVILY_MONTHLY_CREDITS) {
+      const decision = gate.reserve({
+        ip: `month-${i}`,
+        now,
+        credits: TAVILY_CREDITS_PER_ANALYSIS,
+        dailyCreditCap: 10_000,
+        monthlyCreditCap: TAVILY_MONTHLY_CREDITS,
+      });
+      expect(decision.ok, String(used)).toBe(true);
+      gate.release(`month-${i}`, now);
+      used += TAVILY_CREDITS_PER_ANALYSIS;
+      i += 1;
+    }
+    expect(gate.book.creditsMonthUsed).toBe(948);
+    const blocked = gate.reserve({
+      ip: "month-blocked",
+      now,
+      credits: TAVILY_CREDITS_PER_ANALYSIS,
+      dailyCreditCap: 10_000,
+      monthlyCreditCap: TAVILY_MONTHLY_CREDITS,
+    });
+    expect(blocked.code).toBe("tavily_monthly");
+    const nextMonth = Date.UTC(2026, 10, 1, 0, 5, 0);
+    expect(
+      gate.reserve({
+        ip: "month-next",
+        now: nextMonth,
+        credits: TAVILY_CREDITS_PER_ANALYSIS,
+        dailyCreditCap: 10_000,
+        monthlyCreditCap: TAVILY_MONTHLY_CREDITS,
+      }).ok,
+    ).toBe(true);
+    expect(gate.book.creditsMonthUsed).toBe(TAVILY_CREDITS_PER_ANALYSIS);
+  });
+
+  it("shares the credit book through the cache", async () => {
+    const cache = new Map<string, string>();
+    const bookCache = {
+      async match(request: Request) {
+        const body = cache.get(request.url);
+        return body ? new Response(body) : undefined;
+      },
+      async put(request: Request, response: Response) {
+        cache.set(request.url, await response.text());
+      },
+    };
+    const now = Date.UTC(2026, 9, 18, 12, 0, 0);
+    const first = new CacheRateGate(bookCache);
+    expect(
+      (
+        await first.reserve({
+          ip: "203.0.113.8",
+          now,
+          credits: TAVILY_CREDITS_PER_ANALYSIS,
+          dailyCreditCap: TAVILY_DAILY_CREDITS,
+        })
+      ).ok,
+    ).toBe(true);
+    const second = new CacheRateGate(bookCache);
+    await second.release("203.0.113.8", now);
+    const stored = JSON.parse(cache.values().next().value as string) as { creditsUsed: number };
+    expect(stored.creditsUsed).toBe(TAVILY_CREDITS_PER_ANALYSIS);
   });
 });
 
@@ -150,7 +222,9 @@ describe("analyze guards", () => {
     const gate = new MemoryRateGate();
     const now = Date.UTC(2026, 9, 18, 18, 0, 0);
     gate.book.creditsDate = utcDate(now);
+    gate.book.creditsMonth = utcMonth(now);
     gate.book.creditsUsed = TAVILY_DAILY_CREDITS;
+    gate.book.creditsMonthUsed = TAVILY_DAILY_CREDITS;
     const response = await handleRequest(post({ text: "a".repeat(80), uiLanguage: "el" }), env, {
       gate,
       now: () => now,
@@ -160,5 +234,23 @@ describe("analyze guards", () => {
     const body = (await response.json()) as { error: string; code: string };
     expect(body.code).toBe("tavily_daily");
     expect(body.error).toContain("αύριο");
+  });
+
+  it("returns 429 from the edge limiter without charging Tavily credits", async () => {
+    const gate = new MemoryRateGate();
+    const response = await handleRequest(post({ text: "a".repeat(80) }), env, {
+      gate,
+      now: () => Date.UTC(2026, 9, 18, 12, 0, 0),
+      ipLimit: {
+        async limit() {
+          return { success: false };
+        },
+      },
+    });
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("60");
+    const body = (await response.json()) as { code: string };
+    expect(body.code).toBe("ip_burst");
+    expect(gate.book.creditsUsed).toBe(0);
   });
 });

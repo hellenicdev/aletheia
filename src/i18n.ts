@@ -136,6 +136,7 @@ const en = {
   rateLimitDaily: "The daily analysis limit was reached. Try again in {time}.",
   rateLimitConcurrent: "An analysis is already running from this network. Try again in {time}.",
   rateLimitCredits: "Daily limit reached. Try again tomorrow ({time}).",
+  rateLimitCreditsMonth: "Monthly limit reached. Try again next month ({time}).",
 };
 
 const el: Record<keyof typeof en, string> = {
@@ -274,6 +275,7 @@ const el: Record<keyof typeof en, string> = {
   rateLimitDaily: "Συμπληρώθηκε το ημερήσιο όριο αναλύσεων. Δοκιμάστε ξανά σε {time}.",
   rateLimitConcurrent: "Μια ανάλυση εκτελείται ήδη από αυτό το δίκτυο. Δοκιμάστε ξανά σε {time}.",
   rateLimitCredits: "Συμπληρώθηκε το ημερήσιο όριο. Δοκιμάστε ξανά αύριο ({time}).",
+  rateLimitCreditsMonth: "Συμπληρώθηκε το μηνιαίο όριο. Δοκιμάστε ξανά τον επόμενο μήνα ({time}).",
 };
 
 export const STRINGS = { en, el };

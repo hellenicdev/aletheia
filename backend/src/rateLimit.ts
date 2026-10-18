@@ -3,11 +3,12 @@ export const IP_BURST_WINDOW_MS = 10 * 60 * 1000;
 export const IP_DAILY_LIMIT = 15;
 export const IP_DAILY_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const TAVILY_CREDITS_PER_ANALYSIS = 12;
-export const TAVILY_DAILY_CREDITS = 30;
+export const TAVILY_DAILY_CREDITS = 120;
+export const TAVILY_MONTHLY_CREDITS = 950;
 /** A crashed isolate must not hold the per-IP lock forever. */
 export const IN_FLIGHT_MS = 90_000;
 
-export type RateCode = "ok" | "ip_burst" | "ip_daily" | "ip_concurrent" | "tavily_daily";
+export type RateCode = "ok" | "ip_burst" | "ip_daily" | "ip_concurrent" | "tavily_daily" | "tavily_monthly";
 
 export interface RateDecision {
   ok: boolean;
@@ -24,7 +25,9 @@ interface IpLedger {
 export interface RateBook {
   ips: Record<string, IpLedger>;
   creditsDate: string;
+  creditsMonth: string;
   creditsUsed: number;
+  creditsMonthUsed: number;
 }
 
 export interface ReserveInput {
@@ -32,10 +35,18 @@ export interface ReserveInput {
   now: number;
   credits: number;
   dailyCreditCap: number;
+  /** Defaults to TAVILY_MONTHLY_CREDITS when a caller omits it. */
+  monthlyCreditCap?: number;
 }
 
 export function emptyBook(now = 0): RateBook {
-  return { ips: {}, creditsDate: utcDate(now), creditsUsed: 0 };
+  return {
+    ips: {},
+    creditsDate: utcDate(now),
+    creditsMonth: utcMonth(now),
+    creditsUsed: 0,
+    creditsMonthUsed: 0,
+  };
 }
 
 export function applyReserve(book: RateBook, input: ReserveInput): { book: RateBook; decision: RateDecision } {
@@ -60,7 +71,14 @@ export function applyReserve(book: RateBook, input: ReserveInput): { book: RateB
     next.ips[input.ip] = ledger;
     return { book: next, decision: { ok: false, code: "ip_daily", retryAfter: secondsUntil(retryAt, input.now) } };
   }
-  if (input.credits > 0 && next.creditsUsed >= input.dailyCreditCap) {
+  const monthlyCap = input.monthlyCreditCap ?? TAVILY_MONTHLY_CREDITS;
+  if (input.credits > 0 && next.creditsMonthUsed + input.credits > monthlyCap) {
+    return {
+      book: next,
+      decision: { ok: false, code: "tavily_monthly", retryAfter: secondsUntilUtcMonth(input.now) },
+    };
+  }
+  if (input.credits > 0 && next.creditsUsed + input.credits > input.dailyCreditCap) {
     return {
       book: next,
       decision: { ok: false, code: "tavily_daily", retryAfter: secondsUntilUtcMidnight(input.now) },
@@ -70,7 +88,10 @@ export function applyReserve(book: RateBook, input: ReserveInput): { book: RateB
   ledger.day.push(input.now);
   ledger.inFlightUntil = input.now + IN_FLIGHT_MS;
   next.ips[input.ip] = ledger;
-  if (input.credits > 0) next.creditsUsed += input.credits;
+  if (input.credits > 0) {
+    next.creditsUsed += input.credits;
+    next.creditsMonthUsed += input.credits;
+  }
   return { book: next, decision: { ok: true, code: "ok", retryAfter: 0 } };
 }
 
@@ -82,7 +103,12 @@ export function applyRelease(book: RateBook, ip: string, now: number): RateBook 
   return next;
 }
 
-export class MemoryRateGate {
+export interface RateGate {
+  reserve(input: ReserveInput): RateDecision | Promise<RateDecision>;
+  release(ip: string, now: number): void | Promise<void>;
+}
+
+export class MemoryRateGate implements RateGate {
   book: RateBook = emptyBook();
 
   reserve(input: ReserveInput): RateDecision {
@@ -98,6 +124,11 @@ export class MemoryRateGate {
 
 export function rateLimitMessage(code: RateCode, retryAfter: number, lang: "en" | "el"): string {
   const time = formatWait(retryAfter, lang);
+  if (code === "tavily_monthly") {
+    return lang === "el"
+      ? `Συμπληρώθηκε το μηνιαίο όριο. Δοκιμάστε ξανά τον επόμενο μήνα (${time}).`
+      : `Monthly limit reached. Try again next month (${time}).`;
+  }
   if (code === "tavily_daily") {
     return lang === "el"
       ? `Συμπληρώθηκε το ημερήσιο όριο. Δοκιμάστε ξανά αύριο (${time}).`
@@ -126,16 +157,33 @@ export function formatWait(seconds: number, lang: "en" | "el"): string {
     return minutes === 1 ? "1 minute" : `${minutes} minutes`;
   }
   const hours = Math.ceil(minutes / 60);
-  if (lang === "el") return hours === 1 ? "1 ώρα" : `${hours} ώρες`;
-  return hours === 1 ? "1 hour" : `${hours} hours`;
+  if (hours < 48) {
+    if (lang === "el") return hours === 1 ? "1 ώρα" : `${hours} ώρες`;
+    return hours === 1 ? "1 hour" : `${hours} hours`;
+  }
+  const days = Math.ceil(hours / 24);
+  if (lang === "el") return days === 1 ? "1 ημέρα" : `${days} ημέρες`;
+  return days === 1 ? "1 day" : `${days} days`;
 }
 
 export function utcDate(now: number): string {
   return new Date(now).toISOString().slice(0, 10);
 }
 
+export function utcMonth(now: number): string {
+  return utcDate(now).slice(0, 7);
+}
+
 function rollCredits(book: RateBook, now: number): void {
   const date = utcDate(now);
+  const month = utcMonth(now);
+  if (book.creditsMonth !== month) {
+    book.creditsMonth = month;
+    book.creditsMonthUsed = 0;
+    book.creditsDate = date;
+    book.creditsUsed = 0;
+    return;
+  }
   if (book.creditsDate !== date) {
     book.creditsDate = date;
     book.creditsUsed = 0;
@@ -160,5 +208,11 @@ function secondsUntil(at: number, now: number): number {
 function secondsUntilUtcMidnight(now: number): number {
   const date = new Date(now);
   const next = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1);
+  return secondsUntil(next, now);
+}
+
+function secondsUntilUtcMonth(now: number): number {
+  const date = new Date(now);
+  const next = Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1);
   return secondsUntil(next, now);
 }

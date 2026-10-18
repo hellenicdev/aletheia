@@ -16,7 +16,7 @@ export function analysisCacheUrl(pageUrl: string): string {
 export function cacheApiAnalysisCache(): AnalysisCache {
   return {
     async get(pageUrl) {
-      const cache = defaultCache();
+      const cache = workerCache();
       if (!cache) return null;
       const hit = await cache.match(new Request(analysisCacheUrl(pageUrl)));
       if (!hit) return null;
@@ -27,7 +27,7 @@ export function cacheApiAnalysisCache(): AnalysisCache {
       }
     },
     async put(pageUrl, result) {
-      const cache = defaultCache();
+      const cache = workerCache();
       if (!cache) return;
       await cache.put(
         new Request(analysisCacheUrl(pageUrl)),
@@ -44,7 +44,7 @@ interface ResultCache {
   put(request: Request, response: Response): Promise<void>;
 }
 
-function defaultCache(): ResultCache | null {
+export function workerCache(): ResultCache | null {
   const host = globalThis as unknown as { caches?: { default?: ResultCache } };
   return host.caches?.default ?? null;
 }
