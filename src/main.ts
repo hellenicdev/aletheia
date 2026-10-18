@@ -1,17 +1,16 @@
 import "@fontsource/ibm-plex-sans/400.css";
-import "@fontsource/ibm-plex-sans/500.css";
 import "@fontsource/ibm-plex-sans/600.css";
 import "@fontsource/ibm-plex-mono/400.css";
-import "@fontsource/ibm-plex-mono/500.css";
 import "@fontsource/source-serif-4/400.css";
 import "@fontsource/source-serif-4/600.css";
 import "./styles.css";
 import { renderHighlighted } from "../shared/highlight";
 import { LABELS, type UiLanguage } from "../shared/labels";
 import { partialClaimsNotice } from "../shared/messages";
-import type { AnalysisResult, SearchOutageReason, StageName } from "../shared/types";
+import type { AnalysisResult, SearchOutageReason, SegmentResult, StageName } from "../shared/types";
 import { analyzeArticle, fetchHealth } from "./api";
 import { detectedName, labelHelp, labelName, t, type MessageKey } from "./i18n";
+import { CLAIM_LIMIT, joinNotice, parseFilter, presentLabels, visibleClaims, type ClaimFilter } from "./resultsView";
 import { buildSample } from "./sample";
 
 const STAGES: StageName[] = ["ingest", "segment", "evidence", "verify", "score"];
@@ -31,15 +30,19 @@ const state: {
   mode: "paste" | "url";
   running: boolean;
   result: AnalysisResult | null;
-  selectedId: string | null;
   sample: boolean;
+  claimFilter: ClaimFilter;
+  showAllClaims: boolean;
+  openClaimId: string | null;
 } = {
   lang: "en",
   mode: "paste",
   running: false,
   result: null,
-  selectedId: null,
   sample: false,
+  claimFilter: "all",
+  showAllClaims: false,
+  openClaimId: null,
 };
 
 const mount = document.querySelector<HTMLElement>("#app");
@@ -70,68 +73,52 @@ app.innerHTML = `
         <button type="button" data-lang="en" aria-pressed="true">EN</button>
         <button type="button" data-lang="el" aria-pressed="false">EL</button>
       </div>
+      <button class="ghost" type="button" id="expand-button" data-i18n="newAnalysis" hidden></button>
     </div>
   </header>
   <main class="layout" id="layout">
     <div class="stack">
-      <section class="card composer" id="composer">
-        <div id="composer-full">
-          <div class="tabs" role="tablist">
-            <button type="button" role="tab" id="tab-paste" aria-controls="panel-paste" aria-selected="true" data-i18n="paste"></button>
-            <button type="button" role="tab" id="tab-url" aria-controls="panel-url" aria-selected="false" data-i18n="url"></button>
+      <section class="composer" id="composer">
+        <div class="tabs" role="tablist">
+          <button type="button" role="tab" id="tab-paste" aria-controls="panel-paste" aria-selected="true" data-i18n="paste"></button>
+          <button type="button" role="tab" id="tab-url" aria-controls="panel-url" aria-selected="false" data-i18n="url"></button>
+        </div>
+        <form id="analyze-form">
+          <div id="panel-paste" role="tabpanel" aria-labelledby="tab-paste">
+            <label class="field">
+              <span data-i18n="articleLabel"></span>
+              <textarea id="article-text" data-i18n-placeholder="placeholderPaste" maxlength="12000"></textarea>
+            </label>
           </div>
-          <form id="analyze-form">
-            <div id="panel-paste" role="tabpanel" aria-labelledby="tab-paste">
-              <label class="field">
-                <span data-i18n="articleLabel"></span>
-                <textarea id="article-text" data-i18n-placeholder="placeholderPaste" maxlength="12000"></textarea>
-              </label>
+          <div id="panel-url" role="tabpanel" aria-labelledby="tab-url" hidden>
+            <label class="field">
+              <span data-i18n="urlLabel"></span>
+              <input id="article-url" type="url" inputmode="url" autocomplete="off" spellcheck="false" data-i18n-placeholder="placeholderUrl" />
+            </label>
+          </div>
+          <div class="composer-foot">
+            <span class="counter"><span id="char-count">0</span> / 12000 <span data-i18n="chars"></span></span>
+            <div class="actions">
+              <button class="ghost" type="button" id="sample-button" data-i18n="sample"></button>
+              <button class="primary" type="submit" id="analyze-button" data-i18n="analyze"></button>
             </div>
-            <div id="panel-url" role="tabpanel" aria-labelledby="tab-url" hidden>
-              <label class="field">
-                <span data-i18n="urlLabel"></span>
-                <input id="article-url" type="url" inputmode="url" autocomplete="off" spellcheck="false" data-i18n-placeholder="placeholderUrl" />
-              </label>
-            </div>
-            <div class="composer-foot">
-              <span class="counter"><span id="char-count">0</span> / 12000 <span data-i18n="chars"></span></span>
-              <div class="actions">
-                <button class="ghost" type="button" id="sample-button" data-i18n="sample"></button>
-                <button class="primary" type="submit" id="analyze-button" data-i18n="analyze"></button>
-              </div>
-            </div>
-            <p class="error" id="form-error" hidden></p>
-          </form>
-        </div>
-        <div class="compact" id="composer-compact" hidden>
-          <p data-i18n="readyAnother"></p>
-          <button class="ghost" type="button" id="expand-button" data-i18n="newAnalysis"></button>
-        </div>
+          </div>
+          <p class="error" id="form-error" role="alert" hidden></p>
+        </form>
       </section>
-      <section class="card stages" id="stages" hidden>
-        <ol id="stage-list"></ol>
+      <section id="stages" hidden>
+        <ol class="stepper" id="stage-list"></ol>
+        <p class="step-name" id="step-name" aria-live="polite"></p>
       </section>
-      <section class="card preview" id="extract-preview" hidden>
-        <p class="section-label" data-i18n="extracted"></p>
-        <p class="hint" data-i18n="extractedHint"></p>
-        <h2 id="preview-title"></h2>
-        <div class="article-body preview-body" id="preview-body"></div>
-      </section>
-      <article class="card paper" id="paper" hidden>
-        <div class="paper-head">
-          <h2 id="article-title"></h2>
+      <details class="fold" id="extract-preview" hidden>
+        <summary><span data-i18n="extracted"></span><span class="fold-aside" id="preview-title"></span></summary>
+        <div class="fold-body">
+          <p class="hint" data-i18n="extractedHint"></p>
+          <div class="article-body preview-body" id="preview-body"></div>
         </div>
-        <p class="meta" id="article-meta"></p>
-        <p class="banner" id="sample-banner" hidden data-i18n="sampleBanner"></p>
-        <p class="banner warn" id="search-banner" hidden></p>
-        <p class="banner warn" id="outlet-banner" hidden></p>
-        <p class="banner" id="truncated-banner" hidden data-i18n="truncated"></p>
-        <div class="article-body" id="article-body"></div>
-      </article>
-    </div>
-    <aside class="rail" id="rail" hidden>
-      <section class="card scorecard" aria-labelledby="score-label">
-        <div class="score-top">
+      </details>
+      <section id="report" hidden aria-labelledby="score-label">
+        <div class="focal">
           <div class="gauge" id="gauge" data-band="mid">
             <svg viewBox="0 0 120 120" aria-hidden="true">
               <circle class="gauge-track" cx="60" cy="60" r="52"></circle>
@@ -145,32 +132,42 @@ app.innerHTML = `
           </div>
           <div>
             <p class="section-label" id="score-label" data-i18n="scoreLabel"></p>
+            <p class="verdict" id="verdict" tabindex="-1"></p>
+            <p class="notice" id="notice" hidden></p>
           </div>
         </div>
-        <p class="section-label verdict-label" data-i18n="verdict"></p>
-        <p class="verdict" id="verdict" tabindex="-1"></p>
-        <ul class="notes" id="score-notes" hidden></ul>
-        <p class="section-label" id="warnings-label" data-i18n="warnings" hidden></p>
-        <ul class="warnings" id="warnings" hidden></ul>
-        <div class="subs" id="subscores"></div>
+        <div class="summary" id="summary" role="group" aria-labelledby="claims-heading"></div>
+        <h2 class="claims-heading" id="claims-heading" data-i18n="claimsHeading"></h2>
+        <div class="claim-list" id="claim-list"></div>
+        <button class="ghost show-all" type="button" id="show-all-claims" hidden></button>
+        <div class="folds">
+          <details class="fold" id="breakdown">
+            <summary data-i18n="breakdownTitle"></summary>
+            <div class="fold-body">
+              <div class="subs" id="subscores"></div>
+              <div id="contradictions"></div>
+              <ul class="warnings" id="warnings" hidden></ul>
+            </div>
+          </details>
+          <details class="fold" id="article-fold">
+            <summary><span data-i18n="articleFold"></span><span class="fold-aside" id="article-title"></span></summary>
+            <div class="fold-body">
+              <h3 class="article-title" id="article-heading"></h3>
+              <p class="meta" id="article-meta"></p>
+              <div class="article-body" id="article-body"></div>
+            </div>
+          </details>
+          <details class="fold" id="labels-fold">
+            <summary data-i18n="labelsFold"></summary>
+            <div class="fold-body"><div class="legend-list" id="legend"></div></div>
+          </details>
+          <details class="fold method">
+            <summary data-i18n="howTitle"></summary>
+            <div class="fold-body"><p data-i18n="howBody"></p></div>
+          </details>
+        </div>
       </section>
-      <section class="card detail" id="detail" aria-live="polite">
-        <p class="section-label" data-i18n="detailTitle"></p>
-        <div id="detail-body"></div>
-      </section>
-      <section class="card counts">
-        <p class="section-label" data-i18n="countsTitle"></p>
-        <div class="count-grid" id="counts"></div>
-      </section>
-      <section class="card legend">
-        <p class="section-label" data-i18n="legend"></p>
-        <div class="legend-list" id="legend"></div>
-      </section>
-      <details class="card method">
-        <summary data-i18n="howTitle"></summary>
-        <p data-i18n="howBody"></p>
-      </details>
-    </aside>
+    </div>
   </main>
   <footer class="foot" data-i18n="disclaimer"></footer>
 `;
@@ -187,16 +184,17 @@ const form = $<HTMLFormElement>("#analyze-form");
 const errorBox = $<HTMLParagraphElement>("#form-error");
 const analyzeButton = $<HTMLButtonElement>("#analyze-button");
 const charCount = $<HTMLElement>("#char-count");
-const layout = $<HTMLElement>("#layout");
-const rail = $<HTMLElement>("#rail");
+const composer = $<HTMLElement>("#composer");
 const stagesEl = $<HTMLElement>("#stages");
 const stageList = $<HTMLOListElement>("#stage-list");
-const paper = $<HTMLElement>("#paper");
+const stepName = $<HTMLElement>("#step-name");
+const report = $<HTMLElement>("#report");
 const verdictEl = $<HTMLElement>("#verdict");
 const gauge = $<HTMLElement>("#gauge");
 const gaugeValue = $<SVGCircleElement>("#gauge-value");
 const gaugeNumber = $<HTMLElement>("#gauge-number");
 const gaugeStatus = $<HTMLElement>("#gauge-status");
+const newAnalysis = $<HTMLButtonElement>("#expand-button");
 let healthKind: "unknown" | "down" | "search" | "nosearch" = "unknown";
 
 function renderHealth() {
@@ -229,10 +227,9 @@ function applyI18n() {
   }
   renderLegend();
   renderHealth();
-  renderCounts();
   renderStages(currentStages());
   renderScore();
-  renderDetail();
+  renderClaims();
   if (state.result) renderArticle();
 }
 
@@ -243,7 +240,7 @@ function setLanguage(lang: UiLanguage) {
   } catch {
     /* Storage can be blocked. */
   }
-  if (state.sample) state.result = buildSample(lang);
+  if (state.sample && state.result) state.result = buildSample(lang);
   applyI18n();
 }
 
@@ -309,22 +306,26 @@ function setStage(stage: StageName, status: "start" | "done" | "progress", done?
 
 function renderStages(stages: Record<StageName, StageState>) {
   stageList.replaceChildren();
+  let current: StageName | null = null;
   for (const stage of STAGES) {
     const item = document.createElement("li");
     item.dataset.state = stages[stage];
-    const dot = document.createElement("span");
-    dot.className = "dot";
-    const name = document.createElement("span");
-    name.textContent = t(state.lang, STAGE_KEY[stage]);
-    const status = document.createElement("span");
-    status.className = "stage-state";
-    const progress = stageDetail[stage];
+    const label = t(state.lang, STAGE_KEY[stage]);
     const statusKey: MessageKey =
       stages[stage] === "active" ? "stageActive" : stages[stage] === "done" ? "stageDone" : "stagePending";
-    status.textContent = progress && stages[stage] === "active" ? progress : t(state.lang, statusKey);
-    item.append(dot, name, status);
+    item.setAttribute("aria-label", `${label}, ${t(state.lang, statusKey)}`);
+    if (stages[stage] === "active") {
+      item.setAttribute("aria-current", "step");
+      current = stage;
+    }
+    const dot = document.createElement("span");
+    dot.className = "step-dot";
+    item.append(dot);
     stageList.append(item);
   }
+  const named = current ?? STAGES.find((stage) => stages[stage] === "pending") ?? null;
+  const progress = named ? stageDetail[named] : "";
+  stepName.textContent = named ? `${t(state.lang, STAGE_KEY[named])}${progress ? ` ${progress}` : ""}` : "";
 }
 
 function renderLegend() {
@@ -347,104 +348,236 @@ function renderLegend() {
   }
 }
 
-function renderCounts() {
-  const grid = $<HTMLElement>("#counts");
-  grid.replaceChildren();
-  for (const label of LABELS) {
-    const cell = document.createElement("div");
-    cell.className = "count";
-    cell.dataset.label = label;
-    const value = document.createElement("strong");
-    value.textContent = String(state.result?.score.counts[label] ?? 0);
-    const name = document.createElement("span");
-    name.textContent = labelName(state.lang, label);
-    cell.append(value, name);
-    grid.append(cell);
+function renderSummary(segments: SegmentResult[]) {
+  const row = $<HTMLElement>("#summary");
+  row.replaceChildren();
+  const all = document.createElement("button");
+  all.type = "button";
+  all.dataset.filter = "all";
+  all.setAttribute("aria-pressed", String(state.claimFilter === "all"));
+  all.textContent = `${t(state.lang, "filterAll")} ${segments.length}`;
+  row.append(all);
+  for (const label of presentLabels(segments)) {
+    const count = segments.filter((segment) => segment.label === label).length;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.filter = label;
+    button.setAttribute("aria-pressed", String(state.claimFilter === label));
+    const swatch = document.createElement("span");
+    swatch.className = "swatch";
+    swatch.setAttribute("aria-hidden", "true");
+    button.append(swatch, document.createTextNode(`${count} ${labelName(state.lang, label)}`));
+    row.append(button);
   }
+  const tone = document.createElement("span");
+  tone.className = "tone-chip";
+  const toneValue = state.result?.score.toneNeutrality;
+  tone.textContent = `${t(state.lang, "toneShort")} ${toneValue === null || toneValue === undefined ? "—" : toneValue}`;
+  row.append(tone);
+}
+
+function renderClaims() {
+  const list = $<HTMLElement>("#claim-list");
+  const more = $<HTMLButtonElement>("#show-all-claims");
+  list.replaceChildren();
+  const segments = state.result?.segments ?? [];
+  renderSummary(segments);
+  const { visible, total } = visibleClaims(segments, state.claimFilter, state.showAllClaims);
+  for (const segment of visible) list.append(claimCard(segment));
+  more.hidden = total <= CLAIM_LIMIT;
+  more.textContent = state.showAllClaims ? t(state.lang, "showFewer") : `${t(state.lang, "showAll")} (${total})`;
+  more.setAttribute("aria-expanded", String(state.showAllClaims));
+}
+
+function claimCard(segment: SegmentResult): HTMLElement {
+  const open = state.openClaimId === segment.id;
+  const card = document.createElement("article");
+  card.className = "claim-card";
+  card.id = `claim-${segment.id}`;
+  card.dataset.label = segment.label;
+  const top = document.createElement("div");
+  top.className = "claim-top";
+  const pill = document.createElement("span");
+  pill.className = "pill";
+  pill.dataset.label = segment.label;
+  const swatch = document.createElement("span");
+  swatch.className = "swatch";
+  swatch.setAttribute("aria-hidden", "true");
+  pill.append(swatch, document.createTextNode(labelName(state.lang, segment.label)));
+  const confidence = document.createElement("span");
+  confidence.className = "claim-confidence";
+  const percent = Math.round(segment.confidence * 100);
+  const confidenceName = document.createElement("span");
+  confidenceName.className = "visually-hidden";
+  confidenceName.textContent = `${t(state.lang, "confidence")} `;
+  confidence.append(confidenceName, document.createTextNode(`${percent}%`));
+  top.append(pill, confidence);
+  const text = document.createElement("p");
+  text.className = "claim-text";
+  text.textContent = segment.text;
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "claim-toggle";
+  toggle.id = `toggle-${segment.id}`;
+  toggle.setAttribute("aria-expanded", String(open));
+  toggle.setAttribute("aria-controls", `reason-${segment.id}`);
+  toggle.textContent = open ? t(state.lang, "hideClaim") : t(state.lang, "whyClaim");
+  toggle.addEventListener("click", () => {
+    state.openClaimId = open ? null : segment.id;
+    renderClaims();
+    $<HTMLButtonElement>(`#toggle-${segment.id}`).focus();
+  });
+  card.append(top, text, toggle);
+  const reason = document.createElement("div");
+  reason.className = "claim-more";
+  reason.id = `reason-${segment.id}`;
+  reason.hidden = !open;
+  if (open) reason.append(claimReason(segment));
+  card.append(reason);
+  return card;
+}
+
+function claimReason(segment: SegmentResult): DocumentFragment {
+  const fragment = document.createDocumentFragment();
+  const explanation = document.createElement("p");
+  explanation.className = "explanation";
+  explanation.textContent = segment.explanation;
+  const mode = document.createElement("p");
+  mode.className = "mode";
+  mode.textContent = t(
+    state.lang,
+    segment.evidenceMode === "web-search"
+      ? "evidenceWeb"
+      : segment.evidenceMode === "model-knowledge-only"
+        ? "evidenceModel"
+        : "evidenceNa",
+  );
+  fragment.append(explanation, mode);
+  if (segment.sources.length === 0) {
+    const none = document.createElement("p");
+    none.className = "explanation";
+    none.textContent = t(state.lang, "noSources");
+    fragment.append(none);
+    return fragment;
+  }
+  const list = document.createElement("ul");
+  list.className = "sources";
+  for (const source of segment.sources) {
+    const item = document.createElement("li");
+    const link = document.createElement("a");
+    link.href = source.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = source.title || source.url;
+    const snippet = document.createElement("p");
+    snippet.textContent = source.snippet;
+    const address = document.createElement("small");
+    address.textContent = source.url;
+    item.append(link, snippet, address);
+    list.append(item);
+  }
+  fragment.append(list);
+  return fragment;
 }
 
 function renderScore() {
   const result = state.result;
-  const notes = $<HTMLElement>("#score-notes");
-  notes.replaceChildren();
   if (!result) {
-    gauge.classList.toggle("is-running", state.running);
     gauge.classList.remove("is-provisional");
     gauge.dataset.band = "mid";
-    gaugeValue.style.strokeDashoffset = state.running ? "230" : String(ARC);
+    gaugeValue.style.strokeDashoffset = String(ARC);
     gaugeNumber.textContent = "—";
     gaugeStatus.hidden = true;
-    verdictEl.textContent = t(state.lang, state.running ? "runningVerdict" : "idleVerdict");
-    notes.hidden = true;
+    verdictEl.textContent = "";
+    $<HTMLElement>("#notice").hidden = true;
+    $<HTMLElement>("#subscores").replaceChildren();
+    $<HTMLElement>("#contradictions").replaceChildren();
     $<HTMLElement>("#warnings").hidden = true;
-    $<HTMLElement>("#warnings-label").hidden = true;
-    renderSubs(null);
     return;
   }
-  gauge.classList.remove("is-running");
   const overall = result.score.overall;
   const provisional = result.provisional === true;
   gauge.classList.toggle("is-provisional", provisional);
   gauge.dataset.band = overall < 45 ? "low" : overall < 75 ? "mid" : "high";
   gaugeStatus.hidden = !provisional;
   gaugeStatus.textContent = provisional ? t(state.lang, "provisional") : "";
+  gauge.setAttribute(
+    "aria-label",
+    `${t(state.lang, "scoreLabel")} ${overall}${provisional ? `, ${t(state.lang, "provisional")}` : ""}`,
+  );
   animateGauge(overall);
   verdictEl.textContent = result.score.verdict;
-  const extra: string[] = [];
-  if (result.meta.searchDegraded) extra.push(t(state.lang, "searchDegraded"));
-  for (const item of result.contradictions) extra.push(item.explanation);
-  notes.hidden = extra.length === 0;
-  for (const line of extra) {
-    const li = document.createElement("li");
-    li.textContent = line;
-    notes.append(li);
-  }
+  const notice = $<HTMLElement>("#notice");
+  const line = joinNotice(noticeParts(result));
+  notice.hidden = line.length === 0;
+  notice.textContent = line;
+  renderSubs(result);
+  renderContradictions(result);
   const warnings = $<HTMLElement>("#warnings");
-  const warningsLabel = $<HTMLElement>("#warnings-label");
   warnings.replaceChildren();
-  const lines = result?.meta.warnings ?? [];
+  const lines = result.meta.warnings ?? [];
   warnings.hidden = lines.length === 0;
-  warningsLabel.hidden = lines.length === 0;
-  for (const line of lines) {
+  for (const lineItem of lines) {
     const item = document.createElement("li");
-    item.textContent = line;
+    item.textContent = lineItem;
     warnings.append(item);
   }
-  renderSubs(result);
 }
 
-function renderSubs(result: AnalysisResult | null) {
+function noticeParts(result: AnalysisResult): string[] {
+  const parts: string[] = [];
+  if (result.meta.model === "sample") parts.push(t(state.lang, "sampleBanner"));
+  const outage = outageMessage(result);
+  if (outage) parts.push(outage);
+  else if (result.degraded) parts.push(partialClaimsNotice(state.lang, result.claimsVerified, result.claimsTotal));
+  else if (result.meta.searchDegraded) parts.push(t(state.lang, "searchFailedBanner"));
+  if (result.meta.outlet === "satire") parts.push(t(state.lang, "satireBanner"));
+  else if (result.meta.outlet === "low-credibility") parts.push(t(state.lang, "lowCredBanner"));
+  if (result.truncated) parts.push(t(state.lang, "truncated"));
+  return parts;
+}
+
+function renderContradictions(result: AnalysisResult) {
+  const root = $<HTMLElement>("#contradictions");
+  root.replaceChildren();
+  if (result.contradictions.length === 0) return;
+  const heading = document.createElement("p");
+  heading.className = "section-label";
+  heading.textContent = t(state.lang, "contradictionTitle");
+  const list = document.createElement("ul");
+  list.className = "contradictions";
+  for (const item of result.contradictions) {
+    const li = document.createElement("li");
+    li.textContent = item.explanation;
+    list.append(li);
+  }
+  root.append(heading, list);
+}
+
+function renderSubs(result: AnalysisResult) {
   const root = $<HTMLElement>("#subscores");
   root.replaceChildren();
-  const rows: { label: MessageKey; value: number | null; note: string }[] = result
-    ? [
-        {
-          label: "factual",
-          value: result.score.factualAccuracy,
-          note: t(
-            state.lang,
-            result.score.factualBasis === "measured"
-              ? "factualMeasured"
-              : result.score.factualBasis === "commentary"
-                ? "factualCommentary"
-                : "factualUncertain",
-          ),
-        },
-        {
-          label: "sourcing",
-          value: result.score.sourcing,
-          note: result.score.sourcing === null ? t(state.lang, "sourcingEmpty") : "",
-        },
-        { label: "tone", value: result.score.toneNeutrality, note: "" },
-        { label: "consistency", value: result.score.logicalConsistency, note: "" },
-      ]
-    : [
-        { label: "factual", value: null, note: "" },
-        { label: "sourcing", value: null, note: "" },
-        { label: "tone", value: null, note: "" },
-        { label: "consistency", value: null, note: "" },
-      ];
-
+  const rows: { label: MessageKey; value: number | null; note: string }[] = [
+    {
+      label: "factual",
+      value: result.score.factualAccuracy,
+      note: t(
+        state.lang,
+        result.score.factualBasis === "measured"
+          ? "factualMeasured"
+          : result.score.factualBasis === "commentary"
+            ? "factualCommentary"
+            : "factualUncertain",
+      ),
+    },
+    {
+      label: "sourcing",
+      value: result.score.sourcing,
+      note: result.score.sourcing === null ? t(state.lang, "sourcingEmpty") : "",
+    },
+    { label: "tone", value: result.score.toneNeutrality, note: "" },
+    { label: "consistency", value: result.score.logicalConsistency, note: "" },
+  ];
   for (const row of rows) {
     const block = document.createElement("div");
     block.className = "sub";
@@ -480,7 +613,7 @@ function animateGauge(target: number) {
   }
   const started = performance.now();
   const step = (now: number) => {
-    const progress = Math.min(1, (now - started) / 900);
+    const progress = Math.min(1, (now - started) / 700);
     const eased = 1 - (1 - progress) ** 3;
     gaugeNumber.textContent = String(Math.round(target * eased));
     if (progress < 1) requestAnimationFrame(step);
@@ -503,12 +636,10 @@ function outageMessage(result: AnalysisResult): string | null {
 
 function renderArticle() {
   const result = state.result;
-  if (!result) {
-    paper.hidden = true;
-    return;
-  }
-  paper.hidden = false;
-  $<HTMLElement>("#article-title").textContent = result.article.title || t(state.lang, "pasted");
+  if (!result) return;
+  const title = result.article.title || t(state.lang, "pasted");
+  $<HTMLElement>("#article-title").textContent = title;
+  $<HTMLElement>("#article-heading").textContent = title;
   const meta = $<HTMLElement>("#article-meta");
   meta.replaceChildren();
   const bits: Node[] = [];
@@ -539,9 +670,6 @@ function renderArticle() {
   const detected = document.createElement("span");
   detected.textContent = `${t(state.lang, "detected")}: ${detectedName(state.lang, result.article.detectedLanguage)}`;
   bits.push(detected);
-  const count = document.createElement("span");
-  count.textContent = `${result.segments.length} ${t(state.lang, "claims")}`;
-  bits.push(count);
   if (result.meta.extraction === "local") {
     const local = document.createElement("span");
     local.textContent = t(state.lang, "localExtract");
@@ -551,133 +679,34 @@ function renderArticle() {
     if (index) meta.append(" · ");
     meta.append(bit);
   });
-  $<HTMLElement>("#sample-banner").hidden = result.meta.model !== "sample";
-  $<HTMLElement>("#truncated-banner").hidden = !result.truncated;
-  const searchBanner = $<HTMLElement>("#search-banner");
-  const outage = outageMessage(result);
-  if (outage) {
-    searchBanner.hidden = false;
-    searchBanner.textContent = outage;
-  } else if (result.degraded) {
-    searchBanner.hidden = false;
-    searchBanner.textContent = partialClaimsNotice(state.lang, result.claimsVerified, result.claimsTotal);
-  } else {
-    searchBanner.hidden = !result.meta.searchDegraded;
-    searchBanner.textContent = t(state.lang, "searchFailedBanner");
-  }
-  const outletBanner = $<HTMLElement>("#outlet-banner");
-  if (result.meta.outlet === "satire") {
-    outletBanner.hidden = false;
-    outletBanner.textContent = t(state.lang, "satireBanner");
-  } else if (result.meta.outlet === "low-credibility") {
-    outletBanner.hidden = false;
-    outletBanner.textContent = t(state.lang, "lowCredBanner");
-  } else {
-    outletBanner.hidden = true;
-  }
   const body = $<HTMLElement>("#article-body");
   body.innerHTML = renderHighlighted(result.article.text, result.segments);
   for (const button of body.querySelectorAll<HTMLButtonElement>(".claim")) {
-    const selected = button.dataset.id === state.selectedId;
+    const selected = button.dataset.id === state.openClaimId;
     button.classList.toggle("is-selected", selected);
     button.setAttribute("aria-pressed", String(selected));
   }
 }
 
-function renderDetail() {
-  const root = $<HTMLElement>("#detail-body");
-  root.replaceChildren();
-  const segment = state.result?.segments.find((item) => item.id === state.selectedId);
-  if (!segment) {
-    const empty = document.createElement("p");
-    empty.className = "explanation";
-    empty.textContent = t(state.lang, "selectClaim");
-    root.append(empty);
-    return;
-  }
-  const kicker = document.createElement("div");
-  kicker.className = "detail-kicker";
-  const pill = document.createElement("span");
-  pill.className = "pill";
-  pill.dataset.label = segment.label;
-  const swatch = document.createElement("span");
-  swatch.className = "swatch";
-  pill.append(swatch, document.createTextNode(labelName(state.lang, segment.label)));
-  kicker.append(pill);
-  const confidence = document.createElement("p");
-  confidence.className = "confidence-label";
-  const percent = Math.round(segment.confidence * 100);
-  confidence.textContent = `${t(state.lang, "confidence")} ${percent}%`;
-  const track = document.createElement("div");
-  track.className = "confidence-track";
-  const fill = document.createElement("span");
-  fill.style.width = `${percent}%`;
-  track.append(fill);
-  const explanation = document.createElement("p");
-  explanation.className = "explanation";
-  explanation.textContent = segment.explanation;
-  const mode = document.createElement("p");
-  mode.className = "mode";
-  mode.textContent = t(
-    state.lang,
-    segment.evidenceMode === "web-search"
-      ? "evidenceWeb"
-      : segment.evidenceMode === "model-knowledge-only"
-        ? "evidenceModel"
-        : "evidenceNa",
-  );
-  root.append(kicker, confidence, track, explanation, mode);
-  const heading = document.createElement("p");
-  heading.className = "section-label";
-  heading.textContent = t(state.lang, "sources");
-  root.append(heading);
-  if (segment.sources.length === 0) {
-    const none = document.createElement("p");
-    none.className = "explanation";
-    none.textContent = t(state.lang, "noSources");
-    root.append(none);
-    return;
-  }
-  const list = document.createElement("ul");
-  list.className = "sources";
-  for (const source of segment.sources) {
-    const item = document.createElement("li");
-    const link = document.createElement("a");
-    link.href = source.url;
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
-    link.textContent = source.title || source.url;
-    const snippet = document.createElement("p");
-    snippet.textContent = source.snippet;
-    const address = document.createElement("small");
-    address.textContent = source.url;
-    item.append(link, snippet, address);
-    list.append(item);
-  }
-  root.append(list);
-}
-
-function selectClaim(id: string | null, scroll: boolean) {
-  if (id === state.selectedId && !scroll) return;
-  state.selectedId = id;
-  for (const button of app.querySelectorAll<HTMLButtonElement>(".claim")) {
-    const selected = button.dataset.id === id;
-    button.classList.toggle("is-selected", selected);
-    button.setAttribute("aria-pressed", String(selected));
-  }
-  renderDetail();
-  if (scroll && window.matchMedia("(max-width: 960px)").matches) {
-    $<HTMLElement>("#detail").scrollIntoView({ block: "nearest" });
-  }
+function openClaim(id: string) {
+  const segments = state.result?.segments ?? [];
+  const index = segments.findIndex((segment) => segment.id === id);
+  if (index < 0) return;
+  state.claimFilter = "all";
+  if (index >= CLAIM_LIMIT) state.showAllClaims = true;
+  state.openClaimId = id;
+  renderClaims();
+  renderArticle();
+  document.getElementById(`claim-${id}`)?.scrollIntoView({ block: "nearest" });
 }
 
 function showReport(result: AnalysisResult, sample: boolean) {
   state.result = result;
   state.sample = sample;
   state.running = false;
-  state.selectedId = result.segments[0]?.id ?? null;
-  $<HTMLElement>("#composer-full").hidden = true;
-  $<HTMLElement>("#composer-compact").hidden = false;
+  state.claimFilter = "all";
+  state.showAllClaims = false;
+  state.openClaimId = null;
   analyzeButton.disabled = false;
   analyzeButton.textContent = t(state.lang, "analyze");
   setPhase("result");
@@ -689,9 +718,9 @@ function returnToInput() {
   state.result = null;
   state.sample = false;
   state.running = false;
-  state.selectedId = null;
-  $<HTMLElement>("#composer-full").hidden = false;
-  $<HTMLElement>("#composer-compact").hidden = true;
+  state.openClaimId = null;
+  state.claimFilter = "all";
+  state.showAllClaims = false;
   showError(null);
   setPhase("idle");
   applyI18n();
@@ -700,12 +729,11 @@ function returnToInput() {
 
 function setPhase(phase: "idle" | "running" | "result") {
   app.dataset.phase = phase;
-  layout.classList.toggle("has-result", phase === "result");
-  layout.classList.toggle("is-running", phase === "running");
-  rail.hidden = phase !== "result";
+  composer.hidden = phase !== "idle";
   stagesEl.hidden = phase !== "running";
+  report.hidden = phase !== "result";
+  newAnalysis.hidden = phase !== "result";
   if (phase !== "running") $<HTMLElement>("#extract-preview").hidden = true;
-  if (phase !== "result") paper.hidden = true;
 }
 
 function showPreview(article: { title: string | null; text: string }) {
@@ -724,7 +752,6 @@ async function runSample(instant: boolean) {
   analyzeButton.disabled = true;
   setPhase("running");
   resetStages();
-  renderScore();
   const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   if (!instant && !reduce) {
     for (const stage of STAGES) {
@@ -760,14 +787,11 @@ async function runAnalysis() {
   state.running = true;
   state.sample = false;
   state.result = null;
-  state.selectedId = null;
+  state.openClaimId = null;
   analyzeButton.disabled = true;
   analyzeButton.textContent = t(state.lang, "analyzing");
   setPhase("running");
   resetStages();
-  renderScore();
-  renderDetail();
-  renderCounts();
 
   try {
     const result = await analyzeArticle(
@@ -782,7 +806,6 @@ async function runAnalysis() {
     analyzeButton.disabled = false;
     analyzeButton.textContent = t(state.lang, "analyze");
     setPhase("idle");
-    renderScore();
     showError(error instanceof Error ? error.message : t(state.lang, "errorEmpty"));
   }
 }
@@ -794,7 +817,7 @@ function wait(ms: number) {
 $<HTMLButtonElement>("#tab-paste").addEventListener("click", () => setMode("paste"));
 $<HTMLButtonElement>("#tab-url").addEventListener("click", () => setMode("url"));
 $<HTMLButtonElement>("#sample-button").addEventListener("click", () => void runSample(false));
-$<HTMLButtonElement>("#expand-button").addEventListener("click", () => {
+newAnalysis.addEventListener("click", () => {
   returnToInput();
 });
 form.addEventListener("submit", (event) => {
@@ -810,21 +833,24 @@ for (const button of app.querySelectorAll<HTMLButtonElement>("[data-lang]")) {
     setLanguage(lang);
   });
 }
+$<HTMLElement>("#summary").addEventListener("click", (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-filter]");
+  if (!button) return;
+  state.claimFilter = parseFilter(button.dataset.filter);
+  state.showAllClaims = false;
+  state.openClaimId = null;
+  renderClaims();
+  app.querySelector<HTMLButtonElement>(`[data-filter="${state.claimFilter}"]`)?.focus();
+});
+$<HTMLButtonElement>("#show-all-claims").addEventListener("click", () => {
+  state.showAllClaims = !state.showAllClaims;
+  renderClaims();
+  $<HTMLButtonElement>("#show-all-claims").focus();
+});
 $<HTMLElement>("#article-body").addEventListener("click", (event) => {
   const claim = (event.target as HTMLElement).closest<HTMLButtonElement>(".claim");
   if (!claim?.dataset.id) return;
-  selectClaim(claim.dataset.id, true);
-});
-$<HTMLElement>("#article-body").addEventListener("focusin", (event) => {
-  const claim = (event.target as HTMLElement).closest<HTMLButtonElement>(".claim");
-  if (!claim?.dataset.id) return;
-  selectClaim(claim.dataset.id, false);
-});
-$<HTMLElement>("#article-body").addEventListener("mouseover", (event) => {
-  if (!window.matchMedia("(hover: hover)").matches) return;
-  const claim = (event.target as HTMLElement).closest<HTMLButtonElement>(".claim");
-  if (!claim?.dataset.id) return;
-  selectClaim(claim.dataset.id, false);
+  openClaim(claim.dataset.id);
 });
 
 const params = new URLSearchParams(location.search);
