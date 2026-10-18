@@ -25,6 +25,36 @@ export function isAttributedClaim(text: string): boolean {
   return Boolean(quoted && quoted[1].length >= value.length * 0.45);
 }
 
+const AGE_ANECDOTE = /\b\d{1,2}[-\s]?year[-\s]?old\b|\b\d{1,2}\s*(?:ετών|χρονών)\b/iu;
+const PRIVATE_NARRATIVE =
+  /\b[\p{Lu}][\p{L}'’-]{2,}'s\s+(?:school|home|family|flat|house|mum|dad|mother|father)\b/u;
+const WHO_EXPERIENCE = /\bwho (?:has |had |have )?(?:been |started |used |smoked |vaped |quit )/i;
+const FIRST_PERSON =
+  /\b(?:i|i've|i’ve|i'm|i’m|i am|i was|i had|i have|i'd|i’d|my|we|we've|we're|our|εγώ|μου|έχω|είμαι|ήμουν)\b/iu;
+const PRIVATE_ROLE =
+  /\b(?:teacher|student|pupil|nurse|mother|father|mum|dad|resident|smoker|vaper|woman|man|girl|boy|teenager|pensioner|δάσκαλος|μαθητ\p{L}*|μητέρα|πατέρας)\b/iu;
+
+/**
+ * Personal testimony, a private individual's story, or a first-person quotation.
+ * These are not selected for search. A public figure stating a checkable fact is not one of these.
+ */
+export function isPersonalAccount(text: string): boolean {
+  const value = text.replace(/\s+/g, " ").trim();
+  if (AGE_ANECDOTE.test(value)) return true;
+  if (PRIVATE_NARRATIVE.test(value)) return true;
+  if (WHO_EXPERIENCE.test(value)) return true;
+  const quoted = [...value.matchAll(/["“«]([^"”»]{8,})["”»]/g)].map((match) => match[1]);
+  if (quoted.some((span) => FIRST_PERSON.test(span))) return true;
+  if (
+    ATTRIBUTED.test(value) &&
+    PRIVATE_ROLE.test(value) &&
+    (quoted.length > 0 || FIRST_PERSON.test(value))
+  ) {
+    return true;
+  }
+  return false;
+}
+
 /**
  * A calendar aside or a sentence whose only fact is the year. "But check the
  * calendar and it is 2026" is not a news claim.
@@ -47,6 +77,7 @@ export function isDateFiller(text: string): boolean {
 export function inferClaimType(text: string): ClaimType {
   const value = text.replace(/\s+/g, " ").trim();
   if (isDateFiller(value)) return "rhetorical";
+  if (isPersonalAccount(value)) return "opinion";
   const factual = FACTUAL.test(value) || FACTUAL_FIGURE.test(value);
   const rhetorical = RHETORICAL.test(value);
   const opinion = OPINION.test(value) && !isAttributedClaim(value);
@@ -63,6 +94,7 @@ export function inferClaimType(text: string): ClaimType {
 /** Keep a local opinion or insult label when the model treated it as a fact. */
 export function reconcileClaimType(text: string, model: ClaimType): ClaimType {
   if (isDateFiller(text)) return "rhetorical";
+  if (isPersonalAccount(text)) return "opinion";
   if (isAttributedClaim(text) && model === "opinion") return "checkable_factual";
   const local = inferClaimType(text);
   if (local === "rhetorical" || local === "opinion") return local;

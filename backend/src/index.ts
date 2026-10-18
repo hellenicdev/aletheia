@@ -118,24 +118,51 @@ export async function handleRequest(
   const encoder = new TextEncoder();
   const deadlineMs = deps.deadlineMs ?? LIMITS.analysisDeadlineMs;
   const abort = new AbortController();
+  const interruptedMessage = "The analysis was interrupted before a verdict could be sent.";
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let hardStop: ReturnType<typeof setTimeout> | undefined;
   let grace: ReturnType<typeof setTimeout> | undefined;
   let closed = false;
+  let terminal = false;
+  const onRequestAbort = () => abort.abort();
+  if (request.signal.aborted) onRequestAbort();
+  else request.signal.addEventListener("abort", onRequestAbort, { once: true });
   const stream = new ReadableStream({
     start(controller) {
       const send = (event: string, data: unknown) => {
         if (closed) return;
-        controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+        try {
+          controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+        } catch {
+          /* The client is already gone. finish still clears the timers. */
+        }
       };
+      const sendTerminal = (event: "result" | "error", data: unknown) => {
+        if (terminal || closed) return;
+        terminal = true;
+        send(event, data);
+      };
+      let deadlineSignal: AbortSignal | undefined;
+      let onDeadline: () => void = () => {};
       const finish = () => {
         if (closed) return;
         closed = true;
         if (heartbeat) clearInterval(heartbeat);
         if (hardStop) clearTimeout(hardStop);
         if (grace) clearTimeout(grace);
-        deadlineSignal.removeEventListener("abort", onDeadline);
+        deadlineSignal?.removeEventListener("abort", onDeadline);
+        request.signal.removeEventListener("abort", onRequestAbort);
         abort.abort();
+        if (!terminal) {
+          terminal = true;
+          try {
+            controller.enqueue(
+              encoder.encode(`event: error\ndata: ${JSON.stringify({ message: interruptedMessage })}\n\n`),
+            );
+          } catch {
+            /* The client is already gone. */
+          }
+        }
         rate.inFlight.count = Math.max(0, rate.inFlight.count - 1);
         try {
           controller.close();
@@ -144,25 +171,32 @@ export async function handleRequest(
         }
       };
       const ping = () => {
+        if (closed) return;
         try {
-          if (!closed) controller.enqueue(encoder.encode(`: ping\n\n`));
+          controller.enqueue(encoder.encode(`: ping\n\n`));
         } catch {
           if (heartbeat) clearInterval(heartbeat);
+          abort.abort();
+          sendTerminal("error", { message: interruptedMessage });
+          finish();
         }
       };
-      // Keepalive and the deadline are armed before ingest, scrape, or the segment call.
-      ping();
-      heartbeat = setInterval(ping, 10_000);
-
-      const deadlineSignal = AbortSignal.timeout(deadlineMs);
-      let resolveDeadline: (value: "timeout") => void = () => {};
       const deadline = new Promise<"timeout">((resolve) => {
-        resolveDeadline = resolve;
+        onDeadline = () => resolve("timeout");
       });
-      const onDeadline = () => resolveDeadline("timeout");
+      deadlineSignal = AbortSignal.timeout(deadlineMs);
       if (deadlineSignal.aborted) onDeadline();
       else deadlineSignal.addEventListener("abort", onDeadline, { once: true });
       hardStop = setTimeout(onDeadline, deadlineMs);
+      // Keepalive and the deadline are armed before ingest, scrape, or the segment call.
+      ping();
+      heartbeat = setInterval(ping, 10_000);
+      let resolveAbort: (value: "aborted") => void = () => {};
+      const aborted = new Promise<"aborted">((resolve) => {
+        resolveAbort = resolve;
+      });
+      if (request.signal.aborted) resolveAbort("aborted");
+      else request.signal.addEventListener("abort", () => resolveAbort("aborted"), { once: true });
       const work: Promise<AnalysisResult> = analyze(input, {
         env,
         fetchImpl: deps.fetchImpl,
@@ -177,8 +211,12 @@ export async function handleRequest(
       void (async () => {
         const timeoutMessage = "The analysis timed out before a verdict could be sent.";
         try {
-          const winner = await Promise.race([work, deadline]);
-          if (winner === "timeout") {
+          const winner = await Promise.race([work, deadline, aborted]);
+          if (winner === "aborted") {
+            abort.abort();
+            void work.catch(() => undefined);
+            sendTerminal("error", { message: interruptedMessage });
+          } else if (winner === "timeout") {
             abort.abort();
             const late = await Promise.race([
               work.catch(() => null),
@@ -186,23 +224,25 @@ export async function handleRequest(
                 grace = setTimeout(() => resolve(null), 1_500);
               }),
             ]);
-            if (late) send("result", late);
-            else send("error", { message: timeoutMessage });
+            if (late) sendTerminal("result", late);
+            else sendTerminal("error", { message: timeoutMessage });
           } else {
-            send("result", winner);
+            sendTerminal("result", winner);
           }
         } catch (error) {
           const timedOut =
             abort.signal.aborted || (error instanceof Error && /deadline|timed out/i.test(error.message));
-          const message = timedOut
-            ? timeoutMessage
-            : error instanceof HttpError
-              ? error.message
-              : "The analysis could not be completed.";
-          if (!(error instanceof HttpError) && !timedOut) console.error(error);
-          const late = await work.catch(() => null);
-          if (late) send("result", late);
-          else send("error", errorEvent(error, message));
+          const message = request.signal.aborted
+            ? interruptedMessage
+            : timedOut
+              ? timeoutMessage
+              : error instanceof HttpError
+                ? error.message
+                : "The analysis could not be completed.";
+          if (!(error instanceof HttpError) && !timedOut && !request.signal.aborted) console.error(error);
+          const late = request.signal.aborted ? null : await work.catch(() => null);
+          if (late) sendTerminal("result", late);
+          else sendTerminal("error", errorEvent(error, message));
         } finally {
           finish();
         }

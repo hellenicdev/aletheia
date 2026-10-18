@@ -88,13 +88,19 @@ export interface AnalysisResult {
   truncated: boolean;
   /** True when budget, the deadline, or an error left some selected claims unchecked. */
   degraded: boolean;
-  /** Selected claims that have at least one relevant cited source. */
+  /**
+   * Selected claims labelled True, False, or Misleading that have at least one
+   * relevant cited source. The verdict sentence uses this same count.
+   */
   claimsVerified: number;
-  /** Selected claims that were meant to be checked, up to the search cap. */
+  /**
+   * Selected checkable claims in the coverage total. A personal anecdote is not
+   * selected, and a claim whose only pages are the article or a copy of it is left out.
+   */
   claimsTotal: number;
   /**
-   * True when live search is not ok, or fewer than half of the selected claims
-   * have a relevant cited source. The gauge is provisional, the factual and sourcing sub-scores
+   * True when live search is not ok, or fewer than half of the coverage claims
+   * are verified. The gauge is provisional, the factual and sourcing sub-scores
    * are empty, and the overall is pulled toward a neutral prior by coverage.
    */
   provisional: boolean;

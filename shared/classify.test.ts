@@ -4,6 +4,7 @@ import {
   inferClaimType,
   isAttributedClaim,
   isDateFiller,
+  isPersonalAccount,
   looksLikeOpinionSection,
   opinionCueFromHtml,
   reconcileClaimType,
@@ -39,7 +40,7 @@ describe("inferClaimType", () => {
     expect(reconcileClaimType("The council voted 7 to 2.", "checkable_factual")).toBe("checkable_factual");
     expect(
       reconcileClaimType("\"I have been vaping for two years,\" said Maria, a teacher from Leeds.", "opinion"),
-    ).toBe("checkable_factual");
+    ).toBe("opinion");
   });
 
   it("treats a calendar aside as rhetorical and keeps a dated news claim", () => {
@@ -54,11 +55,25 @@ describe("inferClaimType", () => {
   });
 
   it("treats reported testimony as an attributed claim, not the author's opinion", () => {
-    const quote = "\"I've been vaping for two years,\" said Maria, a teacher from Leeds.";
+    const quote = "\"The ban starts in June,\" the health secretary said.";
     expect(isAttributedClaim(quote)).toBe(true);
     expect(inferClaimType(quote)).toBe("checkable_factual");
     expect(inferClaimType("I think the waterfront deserves better lighting.")).toBe("opinion");
     expect(isAttributedClaim("I think the fee doubled in 2024.")).toBe(false);
+  });
+
+  it("does not select personal testimony, an age anecdote, or a private story", () => {
+    const quote = "\"I've been vaping for two years,\" said Maria, a teacher from Leeds.";
+    expect(isPersonalAccount(quote)).toBe(true);
+    expect(inferClaimType(quote)).toBe("opinion");
+    expect(reconcileClaimType(quote, "checkable_factual")).toBe("opinion");
+    expect(isPersonalAccount("A 26-year-old from Leeds said she started vaping at university.")).toBe(true);
+    expect(
+      isPersonalAccount("When vaping first took off at Gracey Mungulu's school, the habit looked like a fad."),
+    ).toBe(true);
+    const statistic = "4.9 million adults in the UK smoke, according to the health survey.";
+    expect(isPersonalAccount(statistic)).toBe(false);
+    expect(inferClaimType(statistic)).toBe("checkable_factual");
   });
 });
 

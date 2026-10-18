@@ -43,6 +43,12 @@ export function rhetoricalExplanation(lang: UiLanguage): string {
     : "This passage uses loaded or emotional language without a discrete factual proposition.";
 }
 
+export function anecdoteExplanation(lang: UiLanguage): string {
+  return lang === "el"
+    ? "Πρόκειται για προσωπική μαρτυρία, παράθεμα ή περιστατικό, οπότε δεν επιλέχθηκε για έλεγχο."
+    : "This is a personal anecdote or quotation, so it was not selected for checking.";
+}
+
 export function unverifiableExplanation(
   lang: UiLanguage,
   reason:
@@ -67,7 +73,7 @@ export function unverifiableExplanation(
     "search-failed":
       "Η ανάκτηση τεκμηρίων απέτυχε για αυτόν τον ισχυρισμό, οπότε μένει μη επαληθεύσιμος.",
     budget:
-      "Ο ισχυρισμός δεν ελέγχθηκε σε ζωντανή αναζήτηση σε αυτό το αίτημα, επειδή ξεπεράστηκε το όριο τεκμηρίων.",
+      "Αυτός ο ισχυρισμός δεν επιλέχθηκε για έλεγχο.",
     "model-only":
       "Χωρίς ζωντανή αναζήτηση ο ισχυρισμός μένει μη επαληθεύσιμος. Δεν παρατίθεται πηγή.",
     "not-independent":
@@ -89,7 +95,7 @@ export function unverifiableExplanation(
     "search-failed":
       "Evidence retrieval failed for this claim, so it stays unverified.",
     budget:
-      "This claim was not checked against live search in this request because the evidence budget was reached.",
+      "This claim was not selected for checking.",
     "model-only":
       "Without live web search this claim stays unverified. No source is cited.",
     "not-independent":

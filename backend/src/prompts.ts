@@ -11,7 +11,8 @@ claimType is one of:
 - rhetorical: a slogan, insult, profanity, emotional appeal, or rhetorical question with no discrete factual proposition. A calendar aside or a sentence whose only fact is the year ("check the calendar", "it is 2026") is rhetorical, not checkable_factual
 - mixed: a factual proposition wrapped in loaded language
 A value judgement (willingness, ought, deserves, debilitating) or an insult is not checkable_factual.
-Quoted testimony and attributed statements (said, told, according to, είπε, δήλωσε, σύμφωνα με) are the speaker's claim, not the author's opinion. Classify those as checkable_factual or mixed. Opinion is only the author's own evaluation.
+A personal anecdote, a private individual's story, or a first-person quotation ("I've been", "my", "a 26-year-old") is opinion, not checkable_factual. Do not treat it as a claim to check.
+A public official, agency, or study stating a checkable fact stays checkable_factual, including when the sentence says "said" or "according to". Opinion is only the author's own evaluation or that personal testimony.
 genre is one of news, opinion, satire, unreliable. Use satire for jokes presented as news, and unreliable for conspiracy or fabricated health claims.
 detectedLanguage is "el" for Greek, "en" for English, otherwise "other".
 note is at most 12 words in ${languageName(lang)}. Do not include a URL.
@@ -48,6 +49,7 @@ Use the evidence items. Never invent sources, quotations, numbers, or URLs.
 Every sourceUrls entry must be copied exactly from that claim's evidence list.
 Also return sources as {"url","relevant"} for each evidence item you considered. relevant is true only when the page is about the same people, event, and figures as the claim. A shared year, the word calendar, or another generic word is not enough. sourceUrls lists only the urls you marked relevant.
 True when credible evidence supports the main assertion, even if a secondary detail is missing.
+A rate or percentage for the same population can support a count of that population. "9.8% of adults smoke" and "4.9 million adults smoke" can describe the same statistic. Mark that page relevant, and use True when the figures can describe the same fact. Do not use Unverifiable only because the page states a percentage instead of the absolute number.
 Misleading when the main assertion is only partly true, or accurate words create a false impression, such as a partial ban described as a total lift.
 False only when evidence about the same thing states an incompatible fact: a different number, a denial, or a condition that cannot be true together with the claim. A missing detail, a later event, or a different detail that can both be true is not False. Use Unverifiable, or True when the core assertion is still consistent with the evidence.
 A different loan, plant, or person is not a contradiction; use Unverifiable. The evidence has to be about the same plant, person, or event.
