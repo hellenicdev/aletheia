@@ -1,7 +1,13 @@
 import { isSkippableFragment, stripCredits, stripPromoItems } from "../../shared/articleText";
 import { evaluativeDensity, inferClaimType, looksLikeOpinionSection, reconcileClaimType } from "../../shared/classify";
 import { acceptContradiction } from "../../shared/consistency";
-import { applyEvidence, independentEvidence, type EvidenceItem } from "../../shared/citations";
+import {
+  applyEvidence,
+  canonicalUrl,
+  independentEvidence,
+  isRelevantEvidence,
+  type EvidenceItem,
+} from "../../shared/citations";
 import { detectLanguage, languageMatches } from "../../shared/language";
 import type { ClaimType, DetectedLanguage, Label, UiLanguage } from "../../shared/labels";
 import { CLAIM_TYPES, LABELS, isUiLanguage } from "../../shared/labels";
@@ -210,9 +216,18 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     );
     searchDegraded = true;
   } else if (searchEnabled && (searchKey || tavilyKey) && budgeted.length > 0) {
-    const searchCost = cacheOn ? 2 : 1;
+    // Tavily returns a snippet in the search response, so a search is one
+    // subrequest and the result URLs are not scraped. Firecrawl search still
+    // pays for a cache read. One extra subrequest is held back for the
+    // Firecrawl call that may fail before the Tavily fallback.
+    const tavilySearch = Boolean(tavilyKey);
+    const searchCost = tavilySearch ? 1 : cacheOn ? 2 : 1;
     const verifyCost = cacheOn ? 2 : 1;
-    const planned = planEvidence(budget.remaining(), budgeted.length, { search: searchCost, verify: verifyCost });
+    const firecrawlProbe = tavilySearch && searchKey && !providerGate.block ? 1 : 0;
+    const planned = planEvidence(Math.max(0, budget.remaining() - firecrawlProbe), budgeted.length, {
+      search: searchCost,
+      verify: verifyCost,
+    });
     const selected = budgeted.slice(0, planned);
     const verifyGroups = planned === 0 ? 0 : Math.ceil(planned / 4);
     llmHold = 1 + verifyGroups;
@@ -285,7 +300,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
           articleText: ingested.text,
           articleTitle: ingested.title,
           claimText: segment.text,
-        });
+        }).filter((item) => isRelevantEvidence(segment.text, item));
         if (hits.length > 0 && independent.length === 0) echoOnly.add(segment.id);
         evidence.set(segment.id, independent);
       } catch (error) {
@@ -526,7 +541,10 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       if (segment.sources.length === 0 && segment.confidence > 0.4) segment.confidence = 0.4;
     }
   }
-  const claimsVerified = budgeted.filter((segment) => !cutShort.has(segment.id)).length;
+  const claimsVerified = budgeted.filter((segment) => {
+    const checked = verified.get(segment.id);
+    return Boolean(checked && checked.sources.length > 0);
+  }).length;
   const claimsTotal = budgeted.length;
   const provisional = isProvisionalScore({
     searchEnabled,
@@ -812,7 +830,7 @@ async function buildQueries(
 ): Promise<Map<string, string>> {
   const queries = new Map<string, string>();
   if (segments.length === 0) return queries;
-  for (const batch of chunk(segments, 6)) {
+  for (const batch of chunk(segments, LIMITS.maxSearches)) {
     if (Date.now() > deadline - 8_000 || !budget.canSpend(1)) {
       remember(warnings, new Error("query generation stopped before the deadline or subrequest limit"), "llm");
       break;
@@ -894,6 +912,7 @@ async function judgeGroup(options: {
           explanation: cached.explanation,
           claimText: segment.text,
           sourceUrls: cached.sourceUrls,
+          relevance: cached.relevance ?? null,
           evidence: options.evidence.get(segment.id) ?? [],
           searchEnabled: options.searchEnabled,
           uiLanguage: options.uiLanguage,
@@ -955,6 +974,7 @@ async function judgeGroup(options: {
       explanation: verdict.explanation,
       claimText: segment.text,
       sourceUrls: verdict.sourceUrls,
+      relevance: verdict.relevance,
       evidence: options.evidence.get(segment.id) ?? [],
       searchEnabled: options.searchEnabled,
       uiLanguage: options.uiLanguage,
@@ -975,6 +995,7 @@ async function judgeGroup(options: {
         confidence: verdict.confidence,
         explanation: verdict.explanation,
         sourceUrls: verdict.sourceUrls,
+        ...(verdict.relevance ? { relevance: verdict.relevance } : {}),
       },
       options.charge,
     );
@@ -986,7 +1007,14 @@ function validateVerdicts(
   data: unknown,
   ids: Set<string>,
   uiLanguage: UiLanguage,
-): { id: string; label: Label; confidence: number; explanation: string; sourceUrls: string[] }[] {
+): {
+  id: string;
+  label: Label;
+  confidence: number;
+  explanation: string;
+  sourceUrls: string[];
+  relevance: Record<string, boolean> | null;
+}[] {
   if (!isRecord(data) || !Array.isArray(data.results)) {
     throw new Error("results must be an array");
   }
@@ -1005,6 +1033,7 @@ function validateVerdicts(
       confidence: expectNumber(item.confidence, `result ${index} confidence`, 0, 1),
       explanation,
       sourceUrls,
+      relevance: readRelevance(item),
     };
   });
   const seen = new Set(results.map((item) => item.id));
@@ -1012,6 +1041,18 @@ function validateVerdicts(
     if (!seen.has(id)) throw new Error(`missing verdict for ${id}`);
   }
   return results.filter((item) => ids.has(item.id));
+}
+
+function readRelevance(item: Record<string, unknown>): Record<string, boolean> | null {
+  if (!Array.isArray(item.sources)) return null;
+  const relevance: Record<string, boolean> = {};
+  let flagged = false;
+  for (const source of item.sources) {
+    if (!isRecord(source) || typeof source.url !== "string" || typeof source.relevant !== "boolean") continue;
+    relevance[canonicalUrl(source.url)] = source.relevant;
+    flagged = true;
+  }
+  return flagged ? relevance : null;
 }
 
 async function findContradictions(options: {
@@ -1215,6 +1256,7 @@ async function retrieveHits(options: {
     if (options.signal?.aborted || Date.now() > options.deadline - 3_000) throw deadlineReached();
     throw new BudgetExhausted();
   }
+  // The search response already includes the snippet. Do not scrape each URL.
   const hits = await withTimeout(
     searchTavily({
       apiKey: options.tavilyKey,

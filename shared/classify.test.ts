@@ -3,6 +3,7 @@ import {
   evaluativeDensity,
   inferClaimType,
   isAttributedClaim,
+  isDateFiller,
   looksLikeOpinionSection,
   opinionCueFromHtml,
   reconcileClaimType,
@@ -39,6 +40,17 @@ describe("inferClaimType", () => {
     expect(
       reconcileClaimType("\"I have been vaping for two years,\" said Maria, a teacher from Leeds.", "opinion"),
     ).toBe("checkable_factual");
+  });
+
+  it("treats a calendar aside as rhetorical and keeps a dated news claim", () => {
+    expect(isDateFiller("But check the calendar and it is 2026.")).toBe(true);
+    expect(inferClaimType("But check the calendar and it is 2026.")).toBe("rhetorical");
+    expect(reconcileClaimType("But check the calendar and it is 2026.", "checkable_factual")).toBe(
+      "rhetorical",
+    );
+    expect(inferClaimType("The council voted 7 to 2 in 2026 and published the minutes.")).toBe(
+      "checkable_factual",
+    );
   });
 
   it("treats reported testimony as an attributed claim, not the author's opinion", () => {

@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { applyEvidence, canonicalUrl, isSyndicatedCopy, isWireCopy } from "./citations";
+import {
+  applyEvidence,
+  canonicalUrl,
+  hasContradictingSpan,
+  isRelevantEvidence,
+  isSyndicatedCopy,
+  isWireCopy,
+} from "./citations";
 
 const minutes = {
   url: "https://example.com/minutes/",
@@ -300,7 +307,7 @@ describe("wire reprints and entity match", () => {
         {
           url: "https://www.reuters.com/world/us/coast-guard",
           title: "Coast Guard intercepts vessel off California",
-          snippet: "Reuters — Crews stopped the boat after a separate overnight search.",
+          snippet: "Reuters — The coastal plant received a one billion dollar loan after a separate review.",
         },
       ],
       searchEnabled: true,
@@ -462,7 +469,7 @@ describe("wire reprints and entity match", () => {
     const samePlant = applyEvidence({
       label: "False",
       confidence: 0.9,
-      explanation: "Palisades received a larger loan.",
+      explanation: 'The report says "Palisades received a $1.9 billion loan, not $1 billion."',
       claimText: claim,
       sourceUrls: ["https://www.reuters.com/business/energy/palisades"],
       evidence: [
@@ -507,6 +514,69 @@ describe("wire reprints and entity match", () => {
       uiLanguage: "en",
     });
     expect(news.label).toBe("Unverifiable");
+  });
+});
+
+describe("relevance and contradiction", () => {
+  it("does not mark False from a different detail that does not deny the claim", () => {
+    const claim = "Two were in critical condition.";
+    const quote = "the survivors were treated for cold exposure";
+    const evidence = [
+      {
+        url: "https://www.cbc.ca/news/coast-guard",
+        title: "Coast Guard survivors",
+        snippet: `Two survivors were ${quote} and their condition was monitored.`,
+      },
+    ];
+    expect(hasContradictingSpan(claim, `The CBC report says "${quote}".`, evidence)).toBe(false);
+    const applied = applyEvidence({
+      label: "False",
+      confidence: 0.9,
+      explanation: `The CBC report says "${quote}".`,
+      claimText: claim,
+      sourceUrls: [evidence[0].url],
+      evidence,
+      searchEnabled: true,
+      uiLanguage: "en",
+    });
+    expect(applied.label).toBe("Unverifiable");
+    expect(applied.explanation.toLowerCase()).toContain("does not");
+    expect(applied.sources).toEqual([]);
+  });
+
+  it("drops an off-topic page and a page the verifier marked irrelevant", () => {
+    const claim = "Disposable vapes will be banned across Britain next year.";
+    expect(
+      isRelevantEvidence(claim, {
+        title: "Cosmetology catalogue",
+        snippet: "Grayson College lists courses in colour and salon management.",
+      }),
+    ).toBe(false);
+    const minutes = "https://example.com/minutes";
+    const shop = "https://shopping.example/advent";
+    const applied = applyEvidence({
+      label: "True",
+      confidence: 0.8,
+      explanation: "The minutes record the vote.",
+      claimText: "The council voted 7 to 2 on Monday.",
+      sourceUrls: [minutes, shop],
+      evidence: [
+        {
+          url: minutes,
+          title: "Council minutes",
+          snippet: "The council voted 7 to 2 on Monday.",
+        },
+        {
+          url: shop,
+          title: "Council Bluffs advent calendar",
+          snippet: "The council gift shop lists an advent calendar for the holiday.",
+        },
+      ],
+      relevance: { [canonicalUrl(shop)]: false, [canonicalUrl(minutes)]: true },
+      searchEnabled: true,
+      uiLanguage: "en",
+    });
+    expect(applied.sources.map((source) => source.url)).toEqual([minutes]);
   });
 });
 
