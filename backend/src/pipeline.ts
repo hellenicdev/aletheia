@@ -1,4 +1,4 @@
-import { isSkippableFragment, stripCredits, stripPromoItems } from "../../shared/articleText";
+import { cleanupArticle, filterClaimSpans, isSkippableFragment, stripCredits, stripPromoItems } from "../../shared/articleText";
 import {
   evaluativeDensity,
   inferClaimType,
@@ -645,9 +645,10 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       warnings,
       outlet,
       subrequests: budget.snapshot(),
+      ignoredLines: (ingested.ignoredLines ?? 0) + segmented.ignoredLines,
     },
   };
-  } finally {
+} finally {
     clearTimeout(budgetTimer);
     deps.signal?.removeEventListener("abort", abortOwned);
   }
@@ -707,6 +708,7 @@ async function ingest(
       extraction: extracted.via,
       truncated: false,
       opinionSection: extracted.opinionSection === true,
+      ignoredLines: extracted.ignoredLines,
     };
   }
 
@@ -724,15 +726,20 @@ async function ingest(
   if (split.body.length < LIMITS.minArticleChars) {
     throw new HttpError(400, "Paste a longer article. Very short text cannot be audited.");
   }
+  const cleaned = cleanupArticle(split.body);
+  if (cleaned.text.length < LIMITS.minArticleChars) {
+    throw new HttpError(400, "Paste a longer article. Very short text cannot be audited.");
+  }
   return {
     title: split.title,
-    text: split.body.slice(0, LIMITS.maxArticleChars),
+    text: cleaned.text.slice(0, LIMITS.maxArticleChars),
     sourceDomain: null,
     sourceUrl: null,
     publishedAt: null,
     extraction: "pasted" as const,
     truncated,
-    opinionSection: looksLikeOpinionSection(null, split.title, split.body),
+    opinionSection: looksLikeOpinionSection(null, split.title, cleaned.text),
+    ignoredLines: cleaned.ignoredLines,
   };
 }
 
@@ -753,9 +760,15 @@ async function segmentArticle(options: {
   detectedLanguage: DetectedLanguage;
   truncated: boolean;
   genre: string | null;
+  ignoredLines: number;
 }> {
   const localLanguage = detectLanguage(options.text);
-  const spans = uniqueSpans(splitSentences(options.text).filter((span) => !isSkippableFragment(span.text)));
+  const filtered = filterClaimSpans(
+    splitSentences(options.text).filter((span) => !isSkippableFragment(span.text)),
+    options.title,
+    options.text,
+  );
+  const spans = uniqueSpans(filtered.spans);
   const ranked = spans
     .map((span, index) => ({ span, importance: claimImportance(span.text, options.title, index) }))
     .sort((a, b) => compareClaims(
@@ -823,7 +836,7 @@ async function segmentArticle(options: {
   for (const draft of drafts) {
     draft.claimType = reconcileClaimType(draft.text, draft.claimType);
   }
-  return { segments: drafts, detectedLanguage: detected, truncated, genre };
+  return { segments: drafts, detectedLanguage: detected, truncated, genre, ignoredLines: filtered.ignored };
 }
 
 function validateSegments(data: unknown): {

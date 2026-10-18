@@ -142,6 +142,9 @@ app.innerHTML = `
         <div class="claim-list" id="claim-list"></div>
         <button class="ghost show-all" type="button" id="show-all-claims" hidden></button>
         <div class="folds">
+          <details class="fold" id="ignored-fold" hidden>
+            <summary id="ignored-summary"></summary>
+          </details>
           <details class="fold" id="breakdown">
             <summary data-i18n="breakdownTitle"></summary>
             <div class="fold-body">
@@ -234,6 +237,7 @@ function applyI18n() {
   renderHealth();
   renderStages(currentStages());
   renderScore();
+  renderIgnored();
   renderClaims();
   if (state.result) renderArticle();
 }
@@ -492,6 +496,14 @@ function claimReason(segment: SegmentResult): DocumentFragment {
   }
   fragment.append(list);
   return fragment;
+}
+
+function renderIgnored() {
+  const fold = $<HTMLDetailsElement>("#ignored-fold");
+  const count = state.result?.meta.ignoredLines ?? 0;
+  fold.hidden = count <= 0;
+  if (count <= 0) return;
+  $<HTMLElement>("#ignored-summary").textContent = t(state.lang, "ignoredNav").replace("{n}", String(count));
 }
 
 function renderScore() {

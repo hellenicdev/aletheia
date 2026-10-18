@@ -1,4 +1,4 @@
-import { cleanArticleText } from "../../shared/articleText";
+import { cleanupArticle } from "../../shared/articleText";
 import type { EvidenceItem } from "../../shared/citations";
 import { isRecord } from "../../shared/json";
 import { BudgetExhausted, isBudgetExhausted } from "./budget";
@@ -87,7 +87,7 @@ export async function extractTavily(options: {
   timeoutMs?: number;
   signal?: AbortSignal;
   gate?: TavilyGate;
-}): Promise<{ title: string | null; text: string; finalUrl: string }> {
+}): Promise<{ title: string | null; text: string; finalUrl: string; ignoredLines: number; raw: string }> {
   if (options.gate?.block) {
     const block = options.gate.block;
     throw new UpstreamError("tavily", block.status, block.detail);
@@ -116,9 +116,10 @@ export async function extractTavily(options: {
   const original = first.raw_content.replace(/\r\n/g, "\n");
   const title = titleFromExtract(original);
   const withoutTitle = title && original.startsWith(title) ? original.slice(title.length) : original;
-  const articleText = cleanArticleText(withoutTitle).trim() || cleanArticleText(original);
+  const cleaned = cleanupArticle(withoutTitle);
+  const fallback = cleaned.text.trim() ? cleaned : cleanupArticle(original);
   const finalUrl = typeof first.url === "string" && /^https?:\/\//i.test(first.url) ? first.url : options.url;
-  return { title, text: articleText, finalUrl };
+  return { title, text: fallback.text, finalUrl, ignoredLines: fallback.ignoredLines, raw: original };
 }
 
 async function postTavily(

@@ -119,6 +119,7 @@ const en = {
   openSource: "Open source",
   searchViaTavily: "Search: Tavily",
   searchViaFirecrawl: "Search: Firecrawl",
+  ignoredNav: "Ignored {n} lines of page navigation / related headlines",
 };
 
 const el: Record<keyof typeof en, string> = {
@@ -240,6 +241,7 @@ const el: Record<keyof typeof en, string> = {
   openSource: "Άνοιγμα πηγής",
   searchViaTavily: "Αναζήτηση: Tavily",
   searchViaFirecrawl: "Αναζήτηση: Firecrawl",
+  ignoredNav: "Αγνοήθηκαν {n} γραμμές πλοήγησης της σελίδας / σχετικών τίτλων",
 };
 
 export const STRINGS = { en, el };

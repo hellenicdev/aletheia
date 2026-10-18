@@ -10,6 +10,35 @@ const MENU_BLOB =
 const REFERENCE_HEADING =
   /^(?:references|sources|popular articles|related articles|related stories|related posts|you may also like|you might also like|read more|also read|more stories|more from|trending|end of article|about the author|σχετικά άρθρα|σχετικά θέματα|διαβάστε επίσης|διαβάστε περισσότερα|δείτε επίσης|περισσότερα άρθρα)$/iu;
 
+/** Short end-of-article labels. A long sentence that merely contains one of these words is kept. */
+const RELATED_MARKERS = [
+  "related",
+  "related stories",
+  "related articles",
+  "related posts",
+  "more on this story",
+  "more from",
+  "more stories",
+  "most read",
+  "most popular",
+  "read more",
+  "top stories",
+  "you may also like",
+  "you might also like",
+  "recommended",
+  "recommended for you",
+  "sign up",
+  "διαβάστε επίσης",
+  "διαβάστε περισσότερα",
+  "σχετικά άρθρα",
+  "σχετικά θέματα",
+  "περισσότερα",
+  "περισσότερα άρθρα",
+  "τα πιο διαβασμένα",
+  "δείτε ακόμα",
+  "δείτε επίσης",
+];
+
 const SECTION_LABEL =
   /^(?:opinion|opinions|comment|άποψη|αποψη|σχόλιο|σχολιο|απόψεις|αποψεις|γνώμες|γνωμες|δημόσιο βήμα|δημοσιο βημα|αρθρογραφία|αρθρογραφια)$/iu;
 
@@ -93,28 +122,58 @@ export function isSkippableFragment(text: string): boolean {
   return false;
 }
 
+export interface ArticleCleanup {
+  text: string;
+  /** Non-empty lines removed as page navigation or related headlines. */
+  ignoredLines: number;
+}
+
 export function cleanArticleText(raw: string): string {
+  return cleanupArticle(raw).text;
+}
+
+export function cleanupArticle(raw: string): ArticleCleanup {
   const lines = stripPromoItems(stripCredits(raw)).replace(/\r\n/g, "\n").split("\n");
   const seenLines = new Set<string>();
   let droppingTail = false;
   let keptProse = false;
-  const kept = lines.filter((line) => {
+  let ignoredLines = 0;
+  const kept: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
     const trimmed = line.trim();
-    if (keptProse && REFERENCE_HEADING.test(trimmed)) {
+    if (keptProse && isRelatedHeading(trimmed) && tailIsRelated(lines.slice(index + 1))) {
       droppingTail = true;
-      return false;
     }
-    if (droppingTail) return false;
-    if (isPromoLine(trimmed) || isLinkTitle(trimmed)) return false;
-    if (looksLikeBoilerplate(line)) return false;
+    if (droppingTail) {
+      if (trimmed) ignoredLines += 1;
+      continue;
+    }
+    if (keptProse && isRelatedHeading(trimmed)) {
+      if (trimmed) ignoredLines += 1;
+      continue;
+    }
+    if (isPromoLine(trimmed) || isLinkTitle(trimmed)) {
+      if (trimmed && isLinkTitle(trimmed)) ignoredLines += 1;
+      continue;
+    }
+    if (looksLikeBoilerplate(line)) {
+      if (trimmed && trimmed.length < 160 && !/[.!?…]$/.test(trimmed)) ignoredLines += 1;
+      continue;
+    }
     const key = line.replace(/\s+/g, " ").trim().toLowerCase();
-    if (!key) return true;
-    if (seenLines.has(key)) return false;
+    if (!key) {
+      kept.push(line);
+      continue;
+    }
+    if (seenLines.has(key)) continue;
     seenLines.add(key);
     if (proseWeight(key) >= 12) keptProse = true;
-    return true;
-  });
-  const paragraphs = kept
+    kept.push(line);
+  }
+  const trimmedTail = dropTrailingHeadlineRun(kept);
+  ignoredLines += trimmedTail.dropped;
+  const paragraphs = trimmedTail.lines
     .join("\n")
     .split(/\n{2,}/)
     .map((paragraph) => stripGluedMenu(paragraph.replace(/[ \t]+\n/g, "\n").replace(/[ \t]{2,}/g, " ").trim()))
@@ -131,7 +190,59 @@ export function cleanArticleText(raw: string): string {
     seen.add(key);
     unique.push(paragraph);
   }
-  return unique.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
+  return {
+    text: unique.join("\n\n").replace(/\n{3,}/g, "\n\n").trim(),
+    ignoredLines,
+  };
+}
+
+function isRelatedHeading(line: string): boolean {
+  if (REFERENCE_HEADING.test(line.trim())) return true;
+  const stripped = line
+    .replace(/^#{1,6}\s*/, "")
+    .replace(/^[\s>*•\-–—]+/, "")
+    .trim();
+  if (!stripped || stripped.length > 90 || /[.!?…]/.test(stripped)) return false;
+  const value = stripped.replace(/[:：]\s*$/, "").replace(/\s+/g, " ").trim().toLowerCase();
+  const words = value.split(" ");
+  if (words.length > 8) return false;
+  return RELATED_MARKERS.some((marker) => value === marker || value.startsWith(`${marker} `));
+}
+
+function tailIsRelated(rest: string[]): boolean {
+  const upcoming = rest.map((line) => line.trim()).filter(Boolean).slice(0, 8);
+  if (upcoming.length === 0) return true;
+  const longProse = upcoming.filter((line) => line.split(/\s+/).length >= 22 && /[.!?…]/.test(line));
+  return longProse.length === 0;
+}
+
+function dropTrailingHeadlineRun(lines: string[]): { lines: string[]; dropped: number } {
+  let index = lines.length - 1;
+  while (index >= 0 && !lines[index].trim()) index -= 1;
+  let run = 0;
+  let cursor = index;
+  while (cursor >= 0) {
+    const trimmed = lines[cursor].trim();
+    if (!trimmed) {
+      cursor -= 1;
+      continue;
+    }
+    if (!isTrailingCard(trimmed)) break;
+    run += 1;
+    cursor -= 1;
+  }
+  const proseBefore = lines.slice(0, cursor + 1).some((line) => proseWeight(line) >= 12 || /[.!?…]$/.test(line.trim()));
+  if (run < 3 || !proseBefore) return { lines, dropped: 0 };
+  return { lines: lines.slice(0, cursor + 1), dropped: run };
+}
+
+/** A short end-of-page line with no closing punctuation: a headline, a tag, or a link title. */
+function isTrailingCard(line: string): boolean {
+  const value = line.trim();
+  if (!value || value.length > 160 || /[.!?…]$/.test(value)) return false;
+  if (/^[\p{Ll}]/u.test(value)) return false;
+  const words = value.split(/\s+/);
+  return words.length >= 1 && words.length <= 18;
 }
 
 export function proseScore(text: string): number {
@@ -191,6 +302,84 @@ function looksLikeBoilerplate(line: string): boolean {
     return true;
   }
   return false;
+}
+
+const STOP_WORDS = new Set([
+  "that", "this", "with", "from", "have", "were", "been", "their", "about", "after", "which", "would",
+  "could", "there", "these", "those", "into", "over", "under", "than", "then", "also", "said", "says",
+  "will", "just", "more", "some", "such", "only", "other", "when", "what", "your", "they", "them",
+  "και", "που", "για", "από", "στο", "στη", "στην", "τον", "την", "της", "του", "των",
+]);
+
+export function isMarkdownLinkLine(text: string): boolean {
+  const value = text.replace(/\s+/g, " ").trim();
+  if (!value) return false;
+  if (/^\[[^\]]+\]\([^)]+\)$/.test(value)) return true;
+  const stripped = value.replace(/\[[^\]]+\]\([^)]+\)/g, "").replace(/https?:\/\/\S+/g, "").trim();
+  return value.includes("](") && stripped.length < 12;
+}
+
+/** A heading or link line, not a sentence. Sentences keep their closing punctuation. */
+export function isHeadlineOnlyLine(text: string): boolean {
+  const value = text.replace(/^#{1,6}\s*/, "").replace(/\s+/g, " ").trim();
+  if (!value || value.length > 140 || /[.!?…]/.test(value)) return false;
+  if (isMarkdownLinkLine(value) || /^https?:\/\//i.test(value)) return true;
+  const words = value.split(/\s+/);
+  if (words.length < 2 || words.length > 16) return false;
+  const significant = words.filter((word) => word.length > 3);
+  if (significant.length < 2) return false;
+  const titled = significant.filter((word) => /^[\p{Lu}]/u.test(word)).length;
+  return titled / significant.length >= 0.6;
+}
+
+function isLooseHeadline(text: string): boolean {
+  const value = text.replace(/\s+/g, " ").trim();
+  if (!value || value.length > 140 || /[.!?…]/.test(value) || /,/.test(value)) return false;
+  const words = value.split(/\s+/);
+  if (words.length < 2 || words.length > 14) return false;
+  return !/\b(was|were|is|are|said|says|will|have|has|had|είπε|δήλωσε|ανακοίνωσε|είναι|ήταν)\b/iu.test(value);
+}
+
+function keywordsOf(text: string): Set<string> {
+  const words = text.toLowerCase().match(/[\p{L}\p{N}]{4,}/gu) ?? [];
+  return new Set(words.filter((word) => !STOP_WORDS.has(word)));
+}
+
+function keywordOverlap(text: string, context: Set<string>): number {
+  const words = keywordsOf(text);
+  if (words.size === 0 || context.size === 0) return 0;
+  let shared = 0;
+  for (const word of words) if (context.has(word)) shared += 1;
+  return shared / words.size;
+}
+
+/**
+ * Drop markdown links, headline-only lines, and short off-topic lines near the
+ * end of the article. Sentences in the lede stay even when their wording is new.
+ */
+export function filterClaimSpans<T extends { text: string; start: number; end: number }>(
+  spans: T[],
+  title: string | null,
+  article: string,
+): { spans: T[]; ignored: number } {
+  const context = keywordsOf(`${title ?? ""}\n${article.slice(0, 700)}`);
+  const cutoff = article.length * 0.72;
+  const kept: T[] = [];
+  let ignored = 0;
+  spans.forEach((span, index) => {
+    const text = span.text.replace(/\s+/g, " ").trim();
+    if (isMarkdownLinkLine(text) || isHeadlineOnlyLine(text)) {
+      ignored += 1;
+      return;
+    }
+    const nearEnd = span.start >= cutoff && index >= 2;
+    if (nearEnd && isLooseHeadline(text) && keywordOverlap(text, context) < 0.2) {
+      ignored += 1;
+      return;
+    }
+    kept.push(span);
+  });
+  return { spans: kept, ignored };
 }
 
 function proseWeight(paragraph: string): number {

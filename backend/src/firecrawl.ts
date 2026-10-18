@@ -1,4 +1,4 @@
-import { cleanArticleText } from "../../shared/articleText";
+import { cleanupArticle } from "../../shared/articleText";
 import type { EvidenceItem } from "../../shared/citations";
 import { BudgetExhausted, isBudgetExhausted } from "./budget";
 import { combineSignals, deadlineReached, isDeadline, raceAbort } from "./deadline";
@@ -271,6 +271,7 @@ export interface ScrapedPage {
   siteName: string | null;
   finalUrl: string;
   rawHtml: string | null;
+  ignoredLines: number;
 }
 
 export async function scrapeArticle(options: {
@@ -289,7 +290,12 @@ export async function scrapeArticle(options: {
   if (memo && Date.now() - memo.at < 10 * 60_000) return memo.page;
   const persisted = await readPersisted<ScrapedPage>(`scrape:${cacheKey}`, options.charge);
   if (persisted && persisted.text) {
-    const page = { ...persisted, byline: persisted.byline ?? null, siteName: persisted.siteName ?? null };
+    const page = {
+      ...persisted,
+      byline: persisted.byline ?? null,
+      siteName: persisted.siteName ?? null,
+      ignoredLines: persisted.ignoredLines ?? 0,
+    };
     scrapeCache.set(cacheKey, { at: Date.now(), page });
     return page;
   }
@@ -303,7 +309,26 @@ export async function scrapeArticle(options: {
         url: pageUrl.toString(),
         formats: ["markdown", "html"],
         onlyMainContent: true,
-        excludeTags: ["nav", "header", "footer", "aside", "form", "script", "style", "noscript"],
+        excludeTags: [
+          "nav",
+          "header",
+          "footer",
+          "aside",
+          "form",
+          "script",
+          "style",
+          "noscript",
+          ".related",
+          ".related-stories",
+          ".related-content",
+          ".most-read",
+          ".most-popular",
+          ".top-stories",
+          ".recommendations",
+          ".recirc",
+          ".newsletter",
+          ".app-promo",
+        ],
         timeout: timeoutMs,
       },
       options.apiKey,
@@ -339,7 +364,8 @@ export async function scrapeArticle(options: {
   const markdown = typeof data.markdown === "string" ? data.markdown : "";
   const metadata = isRecord(data.metadata) ? data.metadata : {};
   const html = typeof data.html === "string" ? data.html : null;
-  const article = cleanArticleText(markdownToText(markdown));
+  const cleaned = cleanupArticle(markdownToText(markdown));
+  const article = cleaned.text;
   if (article.length < LIMITS.minArticleChars && !html) {
     throw new HttpError(
       422,
@@ -371,6 +397,7 @@ export async function scrapeArticle(options: {
     siteName: metaString(metadata, ["og:site_name", "ogSiteName", "siteName", "site_name"]),
     finalUrl,
     rawHtml: html,
+    ignoredLines: cleaned.ignoredLines,
   };
   scrapeCache.set(cacheKey, { at: Date.now(), page });
   await writePersisted(`scrape:${cacheKey}`, page, options.charge);
@@ -406,8 +433,8 @@ async function readPersisted<T>(key: string, charge?: CacheCharge): Promise<T | 
   }
 }
 
-/** Bump when verification rules change so a cached verdict is not reused. */
-export const PIPELINE_VERSION = "9";
+/** Bump when verification or the claim set changes so a cached verdict is not reused. */
+export const PIPELINE_VERSION = "10";
 
 export function verificationCacheKey(claim: string, urls: string[], language: string): string {
   const list = [...urls]

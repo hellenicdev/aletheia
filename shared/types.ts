@@ -123,6 +123,8 @@ export interface AnalysisResult {
     warnings: string[];
     outlet: OutletKind;
     subrequests: SubrequestCounts;
+    /** Lines removed as page navigation or related headlines. Absent on older payloads. */
+    ignoredLines?: number;
   };
 }
 

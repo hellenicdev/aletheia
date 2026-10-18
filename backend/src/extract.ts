@@ -1,4 +1,4 @@
-import { cleanArticleText, proseScore } from "../../shared/articleText";
+import { cleanupArticle, proseScore } from "../../shared/articleText";
 import { looksLikeOpinionSection, opinionCueFromHtml } from "../../shared/classify";
 import type { UiLanguage } from "../../shared/labels";
 import { pageUnreadMessage } from "../../shared/messages";
@@ -26,6 +26,7 @@ export interface ExtractedArticle {
   via: "firecrawl" | "local" | "direct" | "tavily";
   fromPreferred?: boolean;
   opinionSection?: boolean;
+  ignoredLines: number;
 }
 
 const SKIP_TAGS = new Set([
@@ -85,7 +86,7 @@ const ARTICLE_CLASS =
   /article|story-body|post-content|entry-content|article-body|post-body|RichTextStoryBody|text-block/i;
 
 const JUNK_REGION =
-  /(?:^|[\s_-])(?:cookie|consent|newsletter|subscribe|paywall|modal|sharebar|share-bar|promo|related(?:-stories|-articles|-content|-posts)?|read-more|k-read-more|also-read|more-items|more-stories|sidebar|nx-sidebar|nx-popular|popular|nav|menu|banner)(?:$|[\s_-])/i;
+  /(?:^|[\s_-])(?:cookie|consent|newsletter|subscribe|paywall|modal|sharebar|share-bar|promo|related(?:-stories|-articles|-content|-posts|-links|-coverage)?|read-more|read-next|k-read-more|also-read|more-items|more-stories|more-on-this|most-read|most-popular|top-stories|recommended|recirc|onward|story-package|app-promo|sidebar|nx-sidebar|nx-popular|popular|nav|menu|banner)(?:$|[\s_-])/i;
 
 export function extractArticle(
   html: string,
@@ -111,19 +112,20 @@ export function extractArticle(
     normalizeDate(walked.time) ||
     null;
 
-  const preferredText = cleanArticleText(cleanupText(walked.preferred));
-  const articleText = cleanArticleText(cleanupText(walked.article));
-  const clusterText = cleanArticleText(cleanupText(walked.cluster));
-  const bodyText = cleanArticleText(cleanupText(walked.body));
+  const preferred = cleanupArticle(cleanupText(walked.preferred));
+  const article = cleanupArticle(cleanupText(walked.article));
+  const cluster = cleanupArticle(cleanupText(walked.cluster));
+  const body = cleanupArticle(cleanupText(walked.body));
   const usable = (value: string) => value.length >= LIMITS.minArticleChars && proseScore(value) >= 12;
-  const fromPreferred = usable(preferredText);
-  const text = fromPreferred
-    ? preferredText
-    : usable(articleText)
-      ? articleText
-      : usable(clusterText)
-        ? clusterText
-        : bodyText;
+  const fromPreferred = usable(preferred.text);
+  const chosen = fromPreferred
+    ? preferred
+    : usable(article.text)
+      ? article
+      : usable(cluster.text)
+        ? cluster
+        : body;
+  const text = chosen.text;
 
   if (isInterstitial(html)) {
     throw new HttpError(422, "The page returned a browser check instead of the article. Paste the text instead.");
@@ -143,6 +145,7 @@ export function extractArticle(
     siteName,
     fromPreferred,
     opinionSection: looksLikeOpinionSection(pageUrl, title, text) || opinionCueFromHtml(html),
+    ignoredLines: chosen.ignoredLines + walked.skippedLines,
   };
 }
 
@@ -198,6 +201,7 @@ export async function fetchArticle(
           finalUrl: scraped.finalUrl,
           via: "firecrawl",
           fromPreferred: fromHtml?.fromPreferred,
+          ignoredLines: fromHtml && text === fromHtml.text ? fromHtml.ignoredLines : scraped.ignoredLines,
           opinionSection:
             looksLikeOpinionSection(scraped.finalUrl, scraped.title, text) ||
             opinionCueFromHtml(scraped.rawHtml ?? ""),
@@ -233,16 +237,25 @@ export async function fetchArticle(
         timeoutMs: 20_000,
         gate: tavilyGate,
       });
-      if (extracted.text.length >= LIMITS.minArticleChars) {
+      const fromHtml = /<(?:article|p|div|main)\b/i.test(extracted.raw)
+        ? htmlBody(
+            /<html[\s>]/i.test(extracted.raw) ? extracted.raw : `<html><body>${extracted.raw}</body></html>`,
+            extracted.finalUrl,
+          )
+        : null;
+      const text = fromHtml && fromHtml.text.length >= LIMITS.minArticleChars ? fromHtml.text : extracted.text;
+      const ignoredLines = fromHtml && text === fromHtml.text ? fromHtml.ignoredLines : extracted.ignoredLines;
+      if (text.length >= LIMITS.minArticleChars) {
         return {
           title: extracted.title,
-          text: extracted.text.slice(0, LIMITS.maxArticleChars),
+          text: text.slice(0, LIMITS.maxArticleChars),
           publishedAt: null,
           byline: null,
           siteName: null,
           finalUrl: extracted.finalUrl,
           via: "tavily",
-          opinionSection: looksLikeOpinionSection(extracted.finalUrl, extracted.title, extracted.text),
+          ignoredLines,
+          opinionSection: looksLikeOpinionSection(extracted.finalUrl, extracted.title, text),
         };
       }
       console.error("tavily extract returned no article text");
@@ -280,11 +293,15 @@ function directFailureReason(error: unknown, scrapeNote: string): string {
 function htmlBody(
   html: string | null,
   pageUrl: string,
-): { text: string; fromPreferred: boolean } | null {
+): { text: string; fromPreferred: boolean; ignoredLines: number } | null {
   if (!html) return null;
   try {
     const extracted = extractArticle(html, pageUrl);
-    return { text: extracted.text, fromPreferred: extracted.fromPreferred === true };
+    return {
+      text: extracted.text,
+      fromPreferred: extracted.fromPreferred === true,
+      ignoredLines: extracted.ignoredLines,
+    };
   } catch {
     return null;
   }
@@ -370,6 +387,7 @@ interface Walked {
   article: string;
   body: string;
   preferred: string;
+  skippedLines: number;
   cluster: string;
   title: string;
   h1: string;
@@ -395,6 +413,7 @@ function walkHtml(html: string, pageUrl: string): Walked {
   let article = "";
   let body = "";
   let preferred = "";
+  let skippedLines = 0;
   let paragraphBuf = "";
   let currentCluster: string[] = [];
   const clusters: string[] = [];
@@ -474,7 +493,13 @@ function walkHtml(html: string, pageUrl: string): Walked {
       continue;
     }
 
-    if (inSkip(stack)) continue;
+    if (inSkip(stack)) {
+      const countable = stack.some(
+        (frame) => frame.skip && !["script", "style", "noscript", "svg", "iframe", "canvas", "template"].includes(frame.tag),
+      );
+      if (countable && decodeEntities(raw).trim()) skippedLines += 1;
+      continue;
+    }
     const text = decodeEntities(raw);
     if (!text.trim()) continue;
     if (stack.some((frame) => frame.paragraph)) paragraphBuf += text;
@@ -488,7 +513,7 @@ function walkHtml(html: string, pageUrl: string): Walked {
 
   closeCluster();
   const cluster = clusters.reduce((best, item) => (item.length > best.length ? item : best), "");
-  return { article, body, preferred, cluster, title, h1, time };
+  return { article, body, preferred, cluster, title, h1, time, skippedLines };
 }
 
 function isInterstitial(html: string): boolean {
