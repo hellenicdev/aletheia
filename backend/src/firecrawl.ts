@@ -406,12 +406,15 @@ async function readPersisted<T>(key: string, charge?: CacheCharge): Promise<T | 
   }
 }
 
+/** Bump when verification rules change so a cached verdict is not reused. */
+export const PIPELINE_VERSION = "8";
+
 export function verificationCacheKey(claim: string, urls: string[], language: string): string {
   const list = [...urls]
     .map((url) => url.trim())
     .filter(Boolean)
     .sort();
-  return `verify:${language}:${claim.replace(/\s+/g, " ").trim()}\n${list.join("\n")}`;
+  return `verify:v${PIPELINE_VERSION}:${language}:${claim.replace(/\s+/g, " ").trim()}\n${list.join("\n")}`;
 }
 
 export async function readVerification(key: string, charge?: CacheCharge): Promise<CachedVerdict | null> {

@@ -1,5 +1,11 @@
 import { isSkippableFragment, stripCredits, stripPromoItems } from "../../shared/articleText";
-import { evaluativeDensity, inferClaimType, looksLikeOpinionSection, reconcileClaimType } from "../../shared/classify";
+import {
+  evaluativeDensity,
+  inferClaimType,
+  isPersonalAccount,
+  looksLikeOpinionSection,
+  reconcileClaimType,
+} from "../../shared/classify";
 import { acceptContradiction } from "../../shared/consistency";
 import {
   applyEvidence,
@@ -12,13 +18,14 @@ import { detectLanguage, languageMatches } from "../../shared/language";
 import type { ClaimType, DetectedLanguage, Label, UiLanguage } from "../../shared/labels";
 import { CLAIM_TYPES, LABELS, isUiLanguage } from "../../shared/labels";
 import {
+  anecdoteExplanation,
   opinionExplanation,
   rhetoricalExplanation,
   unverifiableExplanation,
 } from "../../shared/messages";
 import { claimImportance, compareClaims, tokenOverlap } from "../../shared/rank";
-import { resolveOutlet } from "../../shared/reputation";
-import { aggregateScore, isProvisionalScore } from "../../shared/score";
+import { outletFromDomain, resolveOutlet } from "../../shared/reputation";
+import { aggregateScore, coverageOf, isProvisionalScore } from "../../shared/score";
 import { splitPastedTitle, splitSentences } from "../../shared/sentences";
 import { blendTone, combineTone, type Rhetoric } from "../../shared/tone";
 import type {
@@ -300,9 +307,10 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
           articleText: ingested.text,
           articleTitle: ingested.title,
           claimText: segment.text,
-        }).filter((item) => isRelevantEvidence(segment.text, item));
+        });
+        const relevant = independent.filter((item) => isRelevantEvidence(segment.text, item));
         if (hits.length > 0 && independent.length === 0) echoOnly.add(segment.id);
-        evidence.set(segment.id, independent);
+        evidence.set(segment.id, relevant);
       } catch (error) {
         remember(warnings, error, "search");
         searchDegraded = true;
@@ -435,6 +443,19 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
 
   for (const segment of segmented.segments) {
     if (verified.has(segment.id)) continue;
+    if (isPersonalAccount(segment.text)) {
+      verified.set(
+        segment.id,
+        finishSegment(segment, {
+          label: "Opinion",
+          confidence: 0.7,
+          explanation: anecdoteExplanation(uiLanguage),
+          sources: [],
+          evidenceMode: "not-applicable",
+        }),
+      );
+      continue;
+    }
     if (searchFailed.has(segment.id)) {
       verified.set(segment.id, unverifiedSegment(segment, uiLanguage, searchEnabled, "search-failed"));
       continue;
@@ -541,11 +562,18 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       if (segment.sources.length === 0 && segment.confidence > 0.4) segment.confidence = 0.4;
     }
   }
-  const claimsVerified = budgeted.filter((segment) => {
-    const checked = verified.get(segment.id);
-    return Boolean(checked && checked.sources.length > 0);
-  }).length;
-  const claimsTotal = budgeted.length;
+  const scoredSegments = ordered.map((segment) => ({
+    label: segment.label,
+    confidence: segment.confidence,
+    hasValidSource: segment.sources.length > 0,
+    tone: blendTone(segment.text, rhetoricOf(segment.label, draftById.get(segment.id)?.claimType)),
+    inCoverage: !overBudget.has(segment.id) && !echoOnly.has(segment.id),
+    countsAsGap: overBudget.has(segment.id),
+    countsTowardScore: !cutShort.has(segment.id),
+  }));
+  const coverage = coverageOf(scoredSegments);
+  const claimsVerified = coverage.verified;
+  const claimsTotal = coverage.total;
   const provisional = isProvisionalScore({
     searchEnabled,
     searchState: searchStatus.state,
@@ -557,27 +585,18 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     genre: segmented.genre,
     tone: combineTone(ordered.map((segment) => segment.text)),
   });
-  const score = aggregateScore(
-    ordered.map((segment) => ({
-      label: segment.label,
-      confidence: segment.confidence,
-      hasValidSource: segment.sources.length > 0,
-      tone: blendTone(segment.text, rhetoricOf(segment.label, draftById.get(segment.id)?.claimType)),
-      inCoverage: !overBudget.has(segment.id),
-      countsTowardScore: !cutShort.has(segment.id),
-    })),
-    {
-      contradictionCount: contradictions.length,
-      searchEnabled,
-      searchDegraded,
-      uiLanguage,
-      outlet,
-      degraded: cutShort.size > 0,
-      claimsVerified,
-      claimsTotal,
-      provisional,
-    },
-  );
+  const score = aggregateScore(scoredSegments, {
+    contradictionCount: contradictions.length,
+    searchEnabled,
+    searchDegraded,
+    uiLanguage,
+    outlet,
+    degraded: cutShort.size > 0,
+    claimsVerified,
+    claimsTotal,
+    provisional,
+    confidentSatire: outletFromDomain(ingested.sourceDomain) === "satire",
+  });
   stage("score", "done");
 
   return {

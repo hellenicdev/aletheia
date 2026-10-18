@@ -281,31 +281,58 @@ function contentTokens(text: string): Set<string> {
   );
 }
 
+const STATISTIC =
+  /(?:%|€|\$|£|\b(?:million|billion|thousand|percent|per cent|εκατομμ\p{L}*|δισ\p{L}*|χιλιάδ\p{L}*)\b)/iu;
+
+/** A count, rate, or percentage. "4.9 million adults smoke" is one of these. */
+export function isStatisticalClaim(text: string): boolean {
+  return /\d/.test(text) && STATISTIC.test(text);
+}
+
+function statisticTokens(text: string): Set<string> {
+  const found = new Set<string>();
+  for (const match of text.matchAll(/\d+(?:[.,]\d+)?/g)) found.add(match[0].replace(",", "."));
+  return found;
+}
+
 /**
  * A page is relevant when it shares a distinctive word or a named entity with
- * the claim. A shared year, or the word "calendar", is not enough.
+ * the claim. A shared year, or the word "calendar", is not enough. A statistical
+ * claim also matches a page that states a rate for the same subject.
  */
 export function isRelevantEvidence(
   claim: string,
   item: { title?: string; snippet?: string },
 ): boolean {
+  const surface = `${item.title ?? ""} ${item.snippet ?? ""}`;
   const claimTokens = contentTokens(claim);
-  const evidenceTokens = contentTokens(`${item.title ?? ""} ${item.snippet ?? ""}`);
+  const evidenceTokens = contentTokens(surface);
   if (claimTokens.size === 0) return false;
   const shared = [...claimTokens].filter((token) => tokenOverlaps(token, evidenceTokens));
   const entities = namedEntities(claim);
   if (entities.length > 0) {
-    const haystack = `${item.title ?? ""} ${item.snippet ?? ""}`.toLowerCase();
+    const haystack = surface.toLowerCase();
     const entityHit = entities.some((entity) =>
       entity.split(" ").some((token) => token.length >= 4 && haystack.includes(token)),
     );
     if (entityHit && shared.length > 0) return true;
-    if (!entityHit && shared.length === 0) return false;
+    if (!entityHit && shared.length === 0 && !statisticalOverlap(claim, surface, shared)) return false;
   }
   const strong = shared.filter((token) => token.length >= 5);
   if (strong.length >= 2) return true;
   if (strong.length === 1 && (claimTokens.size <= 6 || shared.length / claimTokens.size >= 0.2)) return true;
+  if (statisticalOverlap(claim, surface, shared)) return true;
   return false;
+}
+
+function statisticalOverlap(claim: string, surface: string, shared: string[]): boolean {
+  if (!isStatisticalClaim(claim)) return false;
+  const strong = shared.filter((token) => token.length >= 5);
+  if (strong.length === 0) return false;
+  const claimFigures = statisticTokens(claim);
+  const evidenceFigures = statisticTokens(surface);
+  if ([...claimFigures].some((figure) => evidenceFigures.has(figure))) return true;
+  return STATISTIC.test(surface);
 }
 
 function normalizeSpan(text: string): string {
@@ -445,7 +472,13 @@ export function applyEvidence(input: {
     const key = canonicalUrl(url);
     const item = byUrl.get(key);
     if (!item || seen.has(key)) continue;
-    if (input.relevance && input.relevance[key] === false) continue;
+    if (
+      input.relevance &&
+      input.relevance[key] === false &&
+      !(isStatisticalClaim(input.claimText) && isRelevantEvidence(input.claimText, item))
+    ) {
+      continue;
+    }
     seen.add(key);
     sources.push({
       url: item.url,

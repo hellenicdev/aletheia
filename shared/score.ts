@@ -26,6 +26,8 @@ const LOW_COVERAGE_CAP = 70;
 const LOW_COVERAGE_THRESHOLD = 0.25;
 const OPINION_CAP = 65;
 const SATIRE_CAP = 42;
+/** A listed satire outlet, not a model guess, is capped lower. */
+const CONFIDENT_SATIRE_CAP = 25;
 const LOW_CREDIBILITY_CAP = 44;
 const SOURCING_CAP_NO_SEARCH = 30;
 const CONTRADICTION_PENALTY = 15;
@@ -45,8 +47,14 @@ export interface ScoreSegment {
   /**
    * Unverifiable claims left outside the search budget are still shown, but they
    * are not part of the coverage ratio. Omitted means the claim was selected.
+   * A claim whose only evidence is the article or a copy of it is also omitted.
    */
   inCoverage?: boolean;
+  /**
+   * An omitted claim that was never selected. False when it was omitted because
+   * the only pages were the article itself. Omitted means it does count as a gap.
+   */
+  countsAsGap?: boolean;
   /**
    * A claim the run could not finish (budget, deadline, or an error) is shown
    * as Unverifiable and left out of the score.
@@ -68,12 +76,15 @@ export interface ScoreOptions {
    * Set from isProvisionalScore so the flag and the search status stay one rule.
    */
   provisional?: boolean;
+  /** The article's domain is a known satire outlet, so the lower satire cap applies. */
+  confidentSatire?: boolean;
 }
 
 /**
  * One rule for the provisional flag. Search that is off stays a normal model-only
  * score. A configured search is provisional when it is not ok, or when fewer than
- * half of the selected claims have a relevant cited source.
+ * half of the selected claims are verified. A verified claim is True, False, or
+ * Misleading and has a relevant cited source. The verdict sentence uses the same count.
  */
 export function isProvisionalScore(input: {
   searchEnabled: boolean;
@@ -85,6 +96,37 @@ export function isProvisionalScore(input: {
   if (input.searchState !== "ok") return true;
   if (input.claimsTotal <= 0) return false;
   return input.claimsVerified / input.claimsTotal < PROVISIONAL_COVERAGE;
+}
+
+/**
+ * One coverage count for claimsVerified and the verdict sentence.
+ * Verified means True, False, or Misleading with a relevant source.
+ * The total is every selected checkable claim still in coverage, including
+ * ones the run did not finish. Echo-only claims are left out via inCoverage.
+ */
+export function coverageOf(segments: ScoreSegment[]): { verified: number; total: number } {
+  let verified = 0;
+  let total = 0;
+  for (const segment of segments) {
+    if (segment.inCoverage === false) continue;
+    if (
+      segment.label !== "True" &&
+      segment.label !== "False" &&
+      segment.label !== "Misleading" &&
+      segment.label !== "Unverifiable"
+    ) {
+      continue;
+    }
+    total += 1;
+    if (segment.countsTowardScore === false) continue;
+    if (
+      (segment.label === "True" || segment.label === "False" || segment.label === "Misleading") &&
+      segment.hasValidSource
+    ) {
+      verified += 1;
+    }
+  }
+  return { verified, total };
 }
 
 export function emptyCounts(): Record<Label, number> {
@@ -131,7 +173,9 @@ export function aggregateScore(
     ["True", "False", "Misleading", "Unverifiable"].includes(segment.label),
   );
   const coveragePool = checkable.filter((segment) => inPool(segment));
-  const outsideSearch = checkable.filter((segment) => segment.inCoverage === false).length;
+  const outsideSearch = checkable.filter(
+    (segment) => segment.inCoverage === false && segment.countsAsGap !== false,
+  ).length;
   const cutShort = checkable.some((segment) => segment.countsTowardScore === false);
   const nothingScored = coveragePool.length === 0 && cutShort;
 
@@ -177,6 +221,7 @@ export function aggregateScore(
         );
 
   const outlet = options.outlet ?? "news";
+  const satireCap = options.confidentSatire ? CONFIDENT_SATIRE_CAP : SATIRE_CAP;
   const opinionPiece =
     !nothingScored && (options.outlet === "opinion" || isMostlyOpinion(counts, segments.length));
   const factualBasis: ScoreResult["factualBasis"] = nothingScored
@@ -218,14 +263,14 @@ export function aggregateScore(
   if (!options.degraded && coveragePool.length >= 4 && coverage < LOW_COVERAGE_THRESHOLD) {
     overall = Math.min(overall, LOW_COVERAGE_CAP);
   }
-  if (outlet === "satire") overall = Math.min(overall, SATIRE_CAP);
+  if (outlet === "satire") overall = Math.min(overall, satireCap);
   if (outlet === "low-credibility") overall = Math.min(overall, LOW_CREDIBILITY_CAP);
   if (options.provisional) {
     const verified = options.claimsVerified ?? 0;
     const total = options.claimsTotal ?? 0;
     const weight = total > 0 ? clamp(verified / total, 0, 1) : 0;
     overall = round(SCORE_PRIOR + (overall - SCORE_PRIOR) * weight);
-    if (outlet === "satire") overall = Math.min(overall, SATIRE_CAP);
+    if (outlet === "satire") overall = Math.min(overall, satireCap);
     if (outlet === "low-credibility") overall = Math.min(overall, LOW_CREDIBILITY_CAP);
     if (opinionPiece && factualBasis !== "commentary" && outlet !== "satire" && outlet !== "low-credibility") {
       overall = Math.min(overall, OPINION_CAP);
@@ -235,6 +280,7 @@ export function aggregateScore(
 
   const poolCounts = emptyCounts();
   for (const segment of coveragePool) poolCounts[segment.label] += 1;
+  const tally = coverageOf(segments);
 
   const verdict = buildVerdict(
     {
@@ -249,8 +295,8 @@ export function aggregateScore(
       opinionPiece,
       thin: segments.length <= 1,
       degraded: options.degraded === true,
-      claimsVerified: options.claimsVerified ?? 0,
-      claimsTotal: options.claimsTotal ?? 0,
+      claimsVerified: options.claimsTotal !== undefined ? (options.claimsVerified ?? 0) : tally.verified,
+      claimsTotal: options.claimsTotal !== undefined ? options.claimsTotal : tally.total,
     },
     options.uiLanguage,
   );
@@ -354,13 +400,13 @@ function buildVerdict(
         ? "Η σελίδα είχε πολύ λίγο κείμενο άρθρου για να ελεγχθεί ένας πραγματολογικός ισχυρισμός."
         : "The page had too little article text to check a factual claim.",
     );
-  } else if (checkable > 0) {
+  } else if (claimsTotal > 0) {
     parts.push(
       lang === "el"
-        ? `Ελέγχθηκαν ${checked} από ${checkable} πραγματολογικούς ισχυρισμούς: ${elAdj(poolCounts.True, "αληθής", "αληθείς")}, ${elAdj(poolCounts.False, "ψευδής", "ψευδείς")} και ${elAdj(poolCounts.Unverifiable, "μη επαληθεύσιμος", "μη επαληθεύσιμοι")}.`
-        : checkable === 1
-          ? `${checked} of 1 factual claim was checked (${poolCounts.True} true, ${poolCounts.False} false, ${poolCounts.Misleading} misleading, ${poolCounts.Unverifiable} unverifiable).`
-          : `${checked} of ${checkable} factual claims were checked (${poolCounts.True} true, ${poolCounts.False} false, ${poolCounts.Misleading} misleading, ${poolCounts.Unverifiable} unverifiable).`,
+        ? `Ελέγχθηκαν ${claimsVerified} από ${claimsTotal} πραγματολογικούς ισχυρισμούς: ${elAdj(poolCounts.True, "αληθής", "αληθείς")}, ${elAdj(poolCounts.False, "ψευδής", "ψευδείς")} και ${elAdj(poolCounts.Unverifiable, "μη επαληθεύσιμος", "μη επαληθεύσιμοι")}.`
+        : claimsTotal === 1
+          ? `${claimsVerified} of 1 factual claim was checked (${poolCounts.True} true, ${poolCounts.False} false, ${poolCounts.Misleading} misleading, ${poolCounts.Unverifiable} unverifiable).`
+          : `${claimsVerified} of ${claimsTotal} factual claims were checked (${poolCounts.True} true, ${poolCounts.False} false, ${poolCounts.Misleading} misleading, ${poolCounts.Unverifiable} unverifiable).`,
     );
   }
   if (outlet === "unknown") {

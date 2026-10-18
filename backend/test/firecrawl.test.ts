@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { clearSearchCache, markdownToText, scrapeArticle, searchWeb } from "../src/firecrawl";
+import {
+  clearSearchCache,
+  markdownToText,
+  PIPELINE_VERSION,
+  scrapeArticle,
+  searchWeb,
+  verificationCacheKey,
+} from "../src/firecrawl";
 import { fetchArticle } from "../src/extract";
 import { HttpError } from "../src/errors";
 
@@ -336,6 +343,15 @@ describe("deadline abort", () => {
       );
     const hits = await searchWeb({ apiKey: "k", query: "coast guard markdown credit", language: "en", fetchImpl });
     expect(hits[0]?.snippet).toMatch(/\(AP\)|Associated Press/i);
+  });
+});
+
+describe("verification cache key", () => {
+  it("includes the pipeline version so an old verdict is not reused", () => {
+    const key = verificationCacheKey("The council voted 7 to 2.", ["https://example.com/a"], "en");
+    expect(key).toContain(`v${PIPELINE_VERSION}`);
+    expect(key.startsWith("verify:v")).toBe(true);
+    expect(key).not.toBe("verify:en:The council voted 7 to 2.\nhttps://example.com/a");
   });
 });
 

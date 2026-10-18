@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { aggregateScore, isProvisionalScore, type ScoreSegment } from "./score";
+import { aggregateScore, coverageOf, isProvisionalScore, type ScoreSegment } from "./score";
 
 function segment(
   label: ScoreSegment["label"],
@@ -231,6 +231,17 @@ describe("aggregateScore", () => {
     });
     expect(satire.overall).toBeLessThanOrEqual(42);
     expect(low.overall).toBeLessThanOrEqual(44);
+    const listed = aggregateScore(
+      Array.from({ length: 6 }, () => segment("True")),
+      {
+        contradictionCount: 0,
+        searchEnabled: true,
+        uiLanguage: "en",
+        outlet: "satire",
+        confidentSatire: true,
+      },
+    );
+    expect(listed.overall).toBe(25);
   });
 
   it("uses one rule for provisional coverage and a search that is not ok", () => {
@@ -330,6 +341,22 @@ describe("aggregateScore", () => {
     expect(checked.verdict).toContain("outside this search");
     expect(checked.verdict).toContain("do not count");
     expect(checked.counts.Unverifiable).toBe(12);
+  });
+
+  it("uses one coverage count and leaves an echo-only claim out of it", () => {
+    const segments = [
+      segment("True"),
+      segment("Unverifiable", 0.4, true),
+      { ...segment("Unverifiable", 0.3, false), inCoverage: false, countsAsGap: false },
+    ];
+    expect(coverageOf(segments)).toEqual({ verified: 1, total: 2 });
+    const score = aggregateScore(segments, {
+      contradictionCount: 0,
+      searchEnabled: true,
+      uiLanguage: "en",
+    });
+    expect(score.verdict).toContain("1 of 2");
+    expect(score.verdict).not.toContain("outside this search");
   });
 
   it("uses singular grammar when one claim was outside the search", () => {

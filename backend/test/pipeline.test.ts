@@ -2039,6 +2039,136 @@ describe("handleRequest", () => {
     expect(result.article.text.length).toBeLessThanOrEqual(12_000);
     expect(events.some((event) => event.event === "preview")).toBe(true);
   });
+
+  it("does not search a personal anecdote and leaves an echo-only claim out of coverage", async () => {
+    const anecdote = "\"I've been vaping for two years,\" said Maria, a teacher from Leeds.";
+    const vote = "The council voted 7 to 2 on Monday and published the minutes for residents.";
+    const echo = "Twelve boats remain on the waiting list until the spring season opens for residents.";
+    const queries: string[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        const body = JSON.parse(String(init?.body)) as { query?: string };
+        const query = body.query ?? "";
+        queries.push(query);
+        const web = query.includes("council")
+          ? [{ url: minutes.url, title: minutes.title, description: "The council voted 7 to 2 on Monday." }]
+          : [
+              {
+                url: "https://news.yahoo.com/boats",
+                title: echo,
+                description: echo,
+              },
+            ];
+        return new Response(JSON.stringify({ success: true, data: { web } }), { status: 200 });
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(classifyPayload(user, () => ({ claimType: "checkable_factual", note: "A recorded claim." })));
+      }
+      if (system.startsWith("TASK:queries")) {
+        const payload = JSON.parse(user) as { claims: { id: string; text: string }[] };
+        expect(payload.claims.some((claim) => claim.text.includes("Maria"))).toBe(false);
+        return llmPayload({
+          queries: payload.claims.map((claim) => ({
+            id: claim.id,
+            query: claim.text.includes("council") ? "council voted 7 to 2" : "boats waiting list",
+          })),
+        });
+      }
+      if (system.startsWith("TASK:verify")) {
+        const payload = JSON.parse(user) as { claims: { id: string; evidence: { url: string }[] }[] };
+        return llmPayload({
+          results: payload.claims.map((claim) => ({
+            id: claim.id,
+            label: "True",
+            confidence: 0.9,
+            explanation: "The minutes record a seven to two vote.",
+            sourceUrls: claim.evidence.map((item) => item.url),
+          })),
+        });
+      }
+      if (system.startsWith("TASK:consistency")) return llmPayload({ contradictions: [] });
+      throw new Error(system.slice(0, 24));
+    };
+    const result = await analyze(
+      { text: `${anecdote} ${vote} ${echo}`, uiLanguage: "en" },
+      { env, fetchImpl },
+    );
+    const personal = result.segments.find((segment) => segment.text.includes("Maria"));
+    expect(personal?.label).toBe("Opinion");
+    expect(personal?.explanation.toLowerCase()).toContain("not selected");
+    expect(personal?.sources).toEqual([]);
+    expect(queries.some((query) => /maria|vaping/i.test(query))).toBe(false);
+    expect(result.claimsVerified).toBe(1);
+    expect(result.claimsTotal).toBe(1);
+    expect(result.score.verdict).toContain("1 of 1");
+    expect(result.provisional).toBe(false);
+  });
+
+  it("says an unselected claim was not selected for checking", async () => {
+    const topics = [
+      "bridge", "harbour", "marina", "ferry", "dock", "pier", "lighthouse", "breakwater",
+      "channel", "buoy", "anchor", "keel", "rudder",
+    ];
+    const claims = topics.map(
+      (topic, index) =>
+        `The ${topic} committee counted ${index + 20} vessels and published the tally for residents.`,
+    );
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        return new Response(JSON.stringify({ success: true, data: { web: [] } }), { status: 200 });
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(classifyPayload(user, () => ({ claimType: "checkable_factual", note: "A recorded claim." })));
+      }
+      if (system.startsWith("TASK:queries")) {
+        const payload = JSON.parse(user) as { claims: { id: string }[] };
+        return llmPayload({ queries: payload.claims.map((claim) => ({ id: claim.id, query: "committee vessels" })) });
+      }
+      if (system.startsWith("TASK:verify") || system.startsWith("TASK:consistency")) {
+        return llmPayload({ contradictions: [], results: [] });
+      }
+      throw new Error(system.slice(0, 24));
+    };
+    const result = await analyze({ text: claims.join(" "), uiLanguage: "en" }, { env, fetchImpl });
+    const skipped = result.segments.find((segment) => segment.text.includes("rudder"));
+    expect(skipped?.explanation).toBe("This claim was not selected for checking.");
+    expect(skipped?.explanation).not.toContain("budget");
+    expect(result.meta.warnings.join(" ")).not.toContain("subrequest limit");
+  });
+
+  it("sends an error event when the request is aborted", async () => {
+    const controller = new AbortController();
+    const fetchImpl: typeof fetch = () => new Promise(() => {});
+    const response = await handleRequest(
+      new Request("https://worker.test/api/analyze", {
+        method: "POST",
+        signal: controller.signal,
+        headers: { "Content-Type": "application/json", Origin: "http://127.0.0.1:5173" },
+        body: JSON.stringify({ text: article, uiLanguage: "en" }),
+      }),
+      env,
+      {
+        fetchImpl,
+        rate: { buckets: new Map(), inFlight: { count: 0 } },
+        now: () => 40_000,
+        deadlineMs: 30_000,
+      },
+    );
+    controller.abort();
+    const events = parseSse(await response.text());
+    const terminal = events.filter((event) => event.event === "result" || event.event === "error");
+    expect(terminal).toHaveLength(1);
+    expect(terminal[0]?.event).toBe("error");
+    expect(JSON.stringify(terminal[0]?.data)).toContain("interrupted");
+  });
 });
 
 function post(text: string): Request {

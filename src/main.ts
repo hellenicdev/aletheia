@@ -8,7 +8,7 @@ import { renderHighlighted } from "../shared/highlight";
 import { LABELS, type UiLanguage } from "../shared/labels";
 import { partialClaimsNotice } from "../shared/messages";
 import type { AnalysisResult, SearchOutageReason, SegmentResult, StageName } from "../shared/types";
-import { analyzeArticle, fetchHealth } from "./api";
+import { analyzeArticle, fetchHealth, STALL_MESSAGE } from "./api";
 import { detectedName, labelHelp, labelName, t, type MessageKey } from "./i18n";
 import { CLAIM_LIMIT, joinNotice, parseFilter, presentLabels, visibleClaims, type ClaimFilter } from "./resultsView";
 import { buildSample } from "./sample";
@@ -104,6 +104,7 @@ app.innerHTML = `
             </div>
           </div>
           <p class="error" id="form-error" role="alert" hidden></p>
+          <button class="ghost" type="button" id="retry-button" data-i18n="retry" hidden></button>
         </form>
       </section>
       <section id="stages" hidden>
@@ -185,6 +186,7 @@ const textInput = $<HTMLTextAreaElement>("#article-text");
 const urlInput = $<HTMLInputElement>("#article-url");
 const form = $<HTMLFormElement>("#analyze-form");
 const errorBox = $<HTMLParagraphElement>("#form-error");
+const retryButton = $<HTMLButtonElement>("#retry-button");
 const analyzeButton = $<HTMLButtonElement>("#analyze-button");
 const charCount = $<HTMLElement>("#char-count");
 const composer = $<HTMLElement>("#composer");
@@ -255,16 +257,25 @@ function setMode(mode: "paste" | "url") {
   $<HTMLElement>("#panel-url").hidden = mode !== "url";
 }
 
-function showError(message: string | null) {
+function showError(message: string | null, retryable = false) {
   errorBox.hidden = !message;
   errorBox.textContent = message ? presentError(message) : "";
+  retryButton.hidden = !message || !retryable;
 }
 
 function presentError(message: string): string {
   if (/firecrawl scrape failed|could not be read|επικολλήστε το κείμενο του άρθρου/i.test(message)) {
     return t(state.lang, "scrapeFailed");
   }
+  if (message === STALL_MESSAGE) return t(state.lang, "errorStall");
   return message;
+}
+
+function canRetry(message: string): boolean {
+  return (
+    message === STALL_MESSAGE ||
+    /ended without a result|interrupted before a verdict|timed out before a verdict/i.test(message)
+  );
 }
 
 function currentStages(): Record<StageName, StageState> {
@@ -816,7 +827,8 @@ async function runAnalysis() {
     analyzeButton.disabled = false;
     analyzeButton.textContent = t(state.lang, "analyze");
     setPhase("idle");
-    showError(error instanceof Error ? error.message : t(state.lang, "errorEmpty"));
+    const message = error instanceof Error ? error.message : t(state.lang, "errorEmpty");
+    showError(message, canRetry(message));
   }
 }
 
@@ -832,6 +844,9 @@ newAnalysis.addEventListener("click", () => {
 });
 form.addEventListener("submit", (event) => {
   event.preventDefault();
+  void runAnalysis();
+});
+retryButton.addEventListener("click", () => {
   void runAnalysis();
 });
 textInput.addEventListener("input", () => {

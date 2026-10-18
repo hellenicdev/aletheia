@@ -4,6 +4,7 @@ import {
   canonicalUrl,
   hasContradictingSpan,
   isRelevantEvidence,
+  isStatisticalClaim,
   isSyndicatedCopy,
   isWireCopy,
 } from "./citations";
@@ -577,6 +578,30 @@ describe("relevance and contradiction", () => {
       uiLanguage: "en",
     });
     expect(applied.sources.map((source) => source.url)).toEqual([minutes]);
+  });
+
+  it("keeps a rate for the same population even when the verifier marked it irrelevant", () => {
+    const claim = "4.9 million adults in the UK smoke.";
+    const page = {
+      url: "https://www.ons.gov.uk/peoplepopulationandcommunity/healthandsocialcare/drugusealcoholandsmoking",
+      title: "Adult smoking habits in the UK",
+      snippet: "ONS figures show 9.8% of adults in the UK smoke.",
+    };
+    expect(isStatisticalClaim(claim)).toBe(true);
+    expect(isRelevantEvidence(claim, page)).toBe(true);
+    const applied = applyEvidence({
+      label: "True",
+      confidence: 0.8,
+      explanation: "The survey reports the same adult smoking rate.",
+      claimText: claim,
+      sourceUrls: [page.url],
+      evidence: [page],
+      relevance: { [canonicalUrl(page.url)]: false },
+      searchEnabled: true,
+      uiLanguage: "en",
+    });
+    expect(applied.label).toBe("True");
+    expect(applied.sources.map((source) => source.url)).toEqual([page.url]);
   });
 });
 
