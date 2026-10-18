@@ -5,6 +5,11 @@ import {
   applyRevert,
   chargeCredits,
   emptyBook,
+  emptyGlobal,
+  releaseGlobal,
+  reserveGlobal,
+  revertGlobal,
+  type GlobalLedger,
   type RateBook,
   type RateDecision,
   type RateGate,
@@ -109,14 +114,41 @@ function saveLedger(io: SyncIo, ledger: IpLedger | undefined): void {
   io.put("ledger", ledger);
 }
 
-/** One global object. Counts Tavily credits for the UTC day and the calendar month. */
+/**
+ * One global object. Counts Tavily credits for the UTC day and the calendar
+ * month, and the site-wide fresh-analysis cap (6 per minute, 2 in flight).
+ * The cap lives here so it does not need a new migration: `wrangler versions
+ * upload` cannot apply a pending migration, and this class already shipped.
+ */
 export class TavilyCredits {
   constructor(private readonly ctx: { storage: Store }) {}
 
   async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
     if (request.method === "GET") {
       await this.ctx.storage.get("book");
       return Response.json({ ok: true });
+    }
+    if (url.pathname.includes("/global/")) {
+      const body = (await request.json()) as { now?: number; reservedAt?: number };
+      const now = body.now ?? Date.now();
+      const reservedAt = body.reservedAt ?? now;
+      const decision = runSync(this.ctx.storage, (io) => {
+        const stored = io.get<GlobalLedger>("traffic") ?? emptyGlobal();
+        if (url.pathname.endsWith("/global/release")) {
+          io.put("traffic", releaseGlobal(stored, reservedAt, now));
+          return { ok: true, code: "ok" as const, retryAfter: 0 };
+        }
+        if (url.pathname.endsWith("/global/revert")) {
+          io.put("traffic", revertGlobal(stored, reservedAt));
+          return { ok: true, code: "ok" as const, retryAfter: 0 };
+        }
+        const applied = reserveGlobal(stored, now);
+        io.put("traffic", applied.ledger);
+        return applied.decision;
+      });
+      if (!decision) throw new Error("The global limiter is missing SQLite storage.");
+      return Response.json(decision);
     }
     const body = (await request.json()) as ReserveInput;
     const decision = runSync(this.ctx.storage, (io) => {
@@ -206,6 +238,8 @@ export async function probeDurableObjects(env: {
 }
 
 export class DurableRateGate implements RateGate {
+  private reservedAt: number | null = null;
+
   constructor(
     private readonly ips: DurableObjectNamespace,
     private readonly credits: DurableObjectNamespace,
@@ -218,31 +252,56 @@ export class DurableRateGate implements RateGate {
     });
     if (!ipResponse.ok) throw new Error("The per-IP limiter is unavailable.");
     const ipDecision = (await ipResponse.json()) as RateDecision;
-    if (!ipDecision.ok || input.credits <= 0) return ipDecision;
+    if (!ipDecision.ok) return ipDecision;
+
+    let globalHeld = false;
     try {
-      const creditResponse = await this.creditStub().fetch("https://credits.internal/reserve", {
+      const globalResponse = await this.creditStub().fetch("https://credits.internal/global/reserve", {
         method: "POST",
-        body: JSON.stringify(input),
+        body: JSON.stringify({ now: input.now }),
       });
-      if (!creditResponse.ok) throw new Error("The Tavily credit ledger is unavailable.");
-      const creditDecision = (await creditResponse.json()) as RateDecision;
-      if (!creditDecision.ok) {
+      if (!globalResponse.ok) throw new Error("The global limiter is unavailable.");
+      const globalDecision = (await globalResponse.json()) as RateDecision;
+      if (!globalDecision.ok) {
         await this.revert(input.ip, input.now);
-        return creditDecision;
+        return globalDecision;
       }
+      globalHeld = true;
+      if (input.credits > 0) {
+        const creditResponse = await this.creditStub().fetch("https://credits.internal/reserve", {
+          method: "POST",
+          body: JSON.stringify(input),
+        });
+        if (!creditResponse.ok) throw new Error("The Tavily credit ledger is unavailable.");
+        const creditDecision = (await creditResponse.json()) as RateDecision;
+        if (!creditDecision.ok) {
+          await this.revert(input.ip, input.now);
+          await this.revertGlobal(input.now);
+          return creditDecision;
+        }
+      }
+      this.reservedAt = input.now;
       return { ok: true, code: "ok", retryAfter: 0 };
     } catch (error) {
       await this.revert(input.ip, input.now).catch(() => undefined);
+      if (globalHeld) await this.revertGlobal(input.now).catch(() => undefined);
       throw error;
     }
   }
 
   async release(ip: string, now: number): Promise<void> {
-    const response = await this.ipStub(ip).fetch("https://limiter.internal/release", {
-      method: "POST",
-      body: JSON.stringify({ now }),
-    });
-    if (!response.ok) throw new Error("The per-IP limiter could not be released.");
+    const reservedAt = this.reservedAt ?? now;
+    const [ipResponse, globalResponse] = await Promise.all([
+      this.ipStub(ip).fetch("https://limiter.internal/release", {
+        method: "POST",
+        body: JSON.stringify({ now }),
+      }),
+      this.creditStub().fetch("https://credits.internal/global/release", {
+        method: "POST",
+        body: JSON.stringify({ now, reservedAt }),
+      }),
+    ]);
+    if (!ipResponse.ok || !globalResponse.ok) throw new Error("The limiter could not be released.");
   }
 
   private async revert(ip: string, now: number): Promise<void> {
@@ -251,6 +310,14 @@ export class DurableRateGate implements RateGate {
       body: JSON.stringify({ now }),
     });
     if (!response.ok) throw new Error("The per-IP limiter could not be reverted.");
+  }
+
+  private async revertGlobal(reservedAt: number): Promise<void> {
+    const response = await this.creditStub().fetch("https://credits.internal/global/revert", {
+      method: "POST",
+      body: JSON.stringify({ now: reservedAt, reservedAt }),
+    });
+    if (!response.ok) throw new Error("The global limiter could not be reverted.");
   }
 
   private ipStub(ip: string): DurableObjectStub {

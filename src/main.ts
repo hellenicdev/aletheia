@@ -14,6 +14,7 @@ import { partialClaimsNotice } from "../shared/messages";
 import type { AnalysisResult, SearchOutageReason, SegmentResult, StageName } from "../shared/types";
 import { CONSENT_STORAGE_KEY, grantAnalytics, injectGtag, readConsent, scheduleGtag, trackAnalyzeStarted, trackPageView } from "./analytics";
 import { AnalysisError, analyzeArticle, fetchHealth, STALL_MESSAGE } from "./api";
+import { presentLimit } from "./limitCopy";
 import { detectedName, labelHelp, labelName, t, type MessageKey } from "./i18n";
 import { scheduleKofi } from "./kofi";
 import { appBaseFromPath, documentMeta, languageUrl, pageLangFromSearch, siteBase } from "./seo";
@@ -384,37 +385,11 @@ function showError(message: string | null, retryable = false) {
 }
 
 function presentCaught(error: unknown): string {
-  if (error instanceof AnalysisError && error.code && error.retryAfterSeconds) {
-    const time = formatWait(error.retryAfterSeconds, state.lang);
-    const key =
-      error.code === "tavily_monthly"
-        ? "rateLimitCreditsMonth"
-        : error.code === "tavily_daily"
-          ? "rateLimitCredits"
-          : error.code === "ip_daily"
-            ? "rateLimitDaily"
-            : error.code === "ip_concurrent"
-              ? "rateLimitConcurrent"
-              : "rateLimitBurst";
-    return t(state.lang, key).replace("{time}", time);
+  if (error instanceof AnalysisError) {
+    const limited = presentLimit(error, state.lang);
+    if (limited) return limited;
   }
   return error instanceof Error ? presentError(error.message) : t(state.lang, "errorEmpty");
-}
-
-function formatWait(seconds: number, lang: "en" | "el"): string {
-  const minutes = Math.max(1, Math.ceil(Math.max(1, seconds) / 60));
-  if (minutes < 60) {
-    if (lang === "el") return minutes === 1 ? "1 λεπτό" : `${minutes} λεπτά`;
-    return minutes === 1 ? "1 minute" : `${minutes} minutes`;
-  }
-  const hours = Math.ceil(minutes / 60);
-  if (hours < 48) {
-    if (lang === "el") return hours === 1 ? "1 ώρα" : `${hours} ώρες`;
-    return hours === 1 ? "1 hour" : `${hours} hours`;
-  }
-  const days = Math.ceil(hours / 24);
-  if (lang === "el") return days === 1 ? "1 ημέρα" : `${days} ημέρες`;
-  return days === 1 ? "1 day" : `${days} days`;
 }
 
 function presentError(message: string): string {
