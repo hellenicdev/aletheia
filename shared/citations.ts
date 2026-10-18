@@ -243,6 +243,124 @@ export function namedEntities(text: string): string[] {
   return found;
 }
 
+const RELEVANCE_STOP = new Set([
+  "this", "that", "with", "from", "have", "been", "were", "they", "their", "about", "after",
+  "before", "which", "would", "could", "should", "there", "these", "those", "into", "over",
+  "under", "than", "then", "also", "just", "only", "more", "most", "some", "such", "when",
+  "where", "what", "while", "check", "calendar", "today", "year", "date", "time", "says",
+  "said", "will", "been", "αλλά", "είναι", "έτος", "σήμερα", "ημερολόγιο",
+]);
+
+const WORD_NUMBER: Record<string, string> = {
+  zero: "0", one: "1", two: "2", three: "3", four: "4", five: "5", six: "6", seven: "7",
+  eight: "8", nine: "9", ten: "10", eleven: "11", twelve: "12",
+  μηδέν: "0", ένα: "1", μία: "1", δυο: "2", δύο: "2", τρία: "3", τέσσερα: "4", πέντε: "5",
+};
+
+const NEGATION =
+  /\b(?:not|no|never|denied|denies|incorrect|wrong|false|instead|rather|wasn't|isn't|aren't|didn't|don't|cannot|can't|without|unlike)\b|δεν|όχι|αντί|ούτε/iu;
+
+function tokenOverlaps(token: string, others: Set<string>): boolean {
+  if (others.has(token)) return true;
+  if (token.length < 5) return false;
+  for (const other of others) {
+    if (other.length < 5) continue;
+    if (other.startsWith(token) || token.startsWith(other)) return true;
+  }
+  return false;
+}
+
+function contentTokens(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .replace(/\b(?:19|20)\d{2}\b/g, " ")
+      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      .split(/\s+/)
+      .filter((token) => token.length > 3 && !RELEVANCE_STOP.has(token)),
+  );
+}
+
+/**
+ * A page is relevant when it shares a distinctive word or a named entity with
+ * the claim. A shared year, or the word "calendar", is not enough.
+ */
+export function isRelevantEvidence(
+  claim: string,
+  item: { title?: string; snippet?: string },
+): boolean {
+  const claimTokens = contentTokens(claim);
+  const evidenceTokens = contentTokens(`${item.title ?? ""} ${item.snippet ?? ""}`);
+  if (claimTokens.size === 0) return false;
+  const shared = [...claimTokens].filter((token) => tokenOverlaps(token, evidenceTokens));
+  const entities = namedEntities(claim);
+  if (entities.length > 0) {
+    const haystack = `${item.title ?? ""} ${item.snippet ?? ""}`.toLowerCase();
+    const entityHit = entities.some((entity) =>
+      entity.split(" ").some((token) => token.length >= 4 && haystack.includes(token)),
+    );
+    if (entityHit && shared.length > 0) return true;
+    if (!entityHit && shared.length === 0) return false;
+  }
+  const strong = shared.filter((token) => token.length >= 5);
+  if (strong.length >= 2) return true;
+  if (strong.length === 1 && (claimTokens.size <= 6 || shared.length / claimTokens.size >= 0.2)) return true;
+  return false;
+}
+
+function normalizeSpan(text: string): string {
+  return text.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function quotedSpans(explanation: string): string[] {
+  const spans: string[] = [];
+  for (const match of explanation.matchAll(/["“«]([^"”»]{12,})["”»]/g)) {
+    spans.push(match[1]);
+  }
+  return spans;
+}
+
+function quantityTokens(text: string): Set<string> {
+  const found = new Set<string>();
+  for (const match of text.matchAll(/\d+(?:[.,]\d+)?/g)) found.add(match[0].replace(",", "."));
+  const words = text.toLowerCase().split(/[^\p{L}\p{N}]+/u);
+  for (const word of words) {
+    const mapped = WORD_NUMBER[word];
+    if (mapped) found.add(mapped);
+  }
+  return found;
+}
+
+function spanContradicts(claim: string, span: string): boolean {
+  if (NEGATION.test(span)) return true;
+  const claimQuantities = quantityTokens(claim);
+  if (claimQuantities.size === 0) return false;
+  for (const quantity of quantityTokens(span)) {
+    if (!claimQuantities.has(quantity)) return true;
+  }
+  return false;
+}
+
+/**
+ * False requires a quote, copied from a cited page, that cannot be true
+ * together with the claim. A different detail with no denial and no
+ * conflicting figure does not count.
+ */
+export function hasContradictingSpan(
+  claim: string,
+  explanation: string,
+  sources: { title?: string; snippet?: string }[],
+): boolean {
+  const surfaces = sources.map((source) => normalizeSpan(`${source.title ?? ""} ${source.snippet ?? ""}`));
+  for (const span of quotedSpans(explanation)) {
+    const normalized = normalizeSpan(span);
+    if (normalized.length < 12) continue;
+    if (!surfaces.some((surface) => surface.includes(normalized))) continue;
+    if (spanContradicts(claim, span)) return true;
+  }
+  return false;
+}
+
 /** False is only allowed when the evidence is about the same named entity, or the claim names nobody. */
 export function sharesEntity(claim: string, evidence: { title?: string; snippet?: string }[]): boolean {
   const entities = namedEntities(claim);
@@ -277,6 +395,11 @@ export function applyEvidence(input: {
   articleTitle?: string | null;
   /** When search ran and returned nothing, stable facts may keep a low-confidence model label. */
   allowModelKnowledge?: boolean;
+  /**
+   * The verifier's relevance flag, keyed by canonical URL. Absent means the
+   * model did not say. A false flag drops the citation even when words overlap.
+   */
+  relevance?: Record<string, boolean> | null;
 }): AppliedEvidence {
   const confidence = clampConfidence(input.confidence);
   const local = inferClaimType(input.claimText);
@@ -308,12 +431,13 @@ export function applyEvidence(input: {
     };
   }
 
-  const usable = independentEvidence(input.evidence, {
+  const independent = independentEvidence(input.evidence, {
     articleDomain: input.articleDomain,
     articleText: input.articleText,
     articleTitle: input.articleTitle,
     claimText: input.claimText,
   });
+  const usable = independent.filter((item) => isRelevantEvidence(input.claimText, item));
   const byUrl = new Map(usable.map((item) => [canonicalUrl(item.url), item]));
   const sources: SourceCitation[] = [];
   const seen = new Set<string>();
@@ -321,6 +445,7 @@ export function applyEvidence(input: {
     const key = canonicalUrl(url);
     const item = byUrl.get(key);
     if (!item || seen.has(key)) continue;
+    if (input.relevance && input.relevance[key] === false) continue;
     seen.add(key);
     sources.push({
       url: item.url,
@@ -334,6 +459,16 @@ export function applyEvidence(input: {
       label: "Unverifiable",
       confidence: Math.min(confidence, 0.45),
       explanation: unverifiableExplanation(input.uiLanguage, "entity-mismatch"),
+      sources: [],
+      evidenceMode: "web-search",
+    };
+  }
+
+  if (label === "False" && sources.length > 0 && !hasContradictingSpan(input.claimText, input.explanation, sources)) {
+    return {
+      label: "Unverifiable",
+      confidence: Math.min(confidence, 0.45),
+      explanation: unverifiableExplanation(input.uiLanguage, "not-contradiction"),
       sources: [],
       evidenceMode: "web-search",
     };
@@ -354,7 +489,13 @@ export function applyEvidence(input: {
       };
     }
     const reason =
-      input.evidence.length === 0 ? "no-evidence" : usable.length > 0 ? "uncited" : "not-independent";
+      input.evidence.length === 0
+        ? "no-evidence"
+        : usable.length > 0
+          ? "uncited"
+          : independent.length > 0
+            ? "no-evidence"
+            : "not-independent";
     return {
       label: "Unverifiable",
       confidence: Math.min(confidence, 0.45),

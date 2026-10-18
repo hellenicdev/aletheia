@@ -3,6 +3,8 @@ import type { ClaimType } from "./labels";
 const FACTUAL =
   /\b(?:located|completed|voted|according|percent|million|billion|capital|rescued|killed|issued|announced)\b|\b(?:ψήφισ|ανακοίνωσ|σκοτώ|διασώ)\p{L}*/iu;
 const FACTUAL_FIGURE = /\b(?:1[89]|20)\d{2}\b|\d+(?:[.,]\d+)?\s*(?:%|€|\$|£)/;
+const DATE_FILLER =
+  /\b(?:check|look at|mark) the calendar\b|\bit is (?:now |already )?(?:19|20)\d{2}\b|\bthe year is (?:19|20)\d{2}\b|\bas of (?:19|20)\d{2}\b|ημερολόγι\p{L}*|είναι(?:\s+\p{L}+){0,2}\s+(?:το\s+)?(?:19|20)\d{2}/iu;
 const RHETORICAL =
   /\bwithout (?:a )?doubt\b|\bundoubtedly\b|\bbreathtaking\b|\bmost\b.{0,80}\bever\b|\b(?:fuck(?:ing)?|shit(?:ty)?|bastards?|pricks?|snivel(?:ing|ling)?|assholes?)\b|\bχωρίς αμφιβολία\b|\bαναμφίβολα\b|\bσυγκλονιστικ|\b(?:γαμ\p{L}*|σκατ\p{L}*|μαλακ\p{L}*)/iu;
 const OPINION =
@@ -23,8 +25,28 @@ export function isAttributedClaim(text: string): boolean {
   return Boolean(quoted && quoted[1].length >= value.length * 0.45);
 }
 
+/**
+ * A calendar aside or a sentence whose only fact is the year. "But check the
+ * calendar and it is 2026" is not a news claim.
+ */
+export function isDateFiller(text: string): boolean {
+  const value = text.replace(/\s+/g, " ").trim();
+  if (!DATE_FILLER.test(value) && !/^\W*(?:it is|it's|today is|the year is)\b/i.test(value)) return false;
+  const stripped = value
+    .replace(DATE_FILLER, " ")
+    .replace(/\b(?:19|20)\d{2}\b/g, " ")
+    .replace(/\b(?:it|is|the|and|but|now|already|year|today|check|calendar|look|at|date|time|είναι|το|και|αλλά|ήδη|έτος|σήμερα|ημερολόγιο)\b/giu, " ");
+  const words = stripped
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .split(/\s+/)
+    .filter((token) => token.length > 3);
+  return words.length <= 2;
+}
+
 export function inferClaimType(text: string): ClaimType {
   const value = text.replace(/\s+/g, " ").trim();
+  if (isDateFiller(value)) return "rhetorical";
   const factual = FACTUAL.test(value) || FACTUAL_FIGURE.test(value);
   const rhetorical = RHETORICAL.test(value);
   const opinion = OPINION.test(value) && !isAttributedClaim(value);
@@ -40,6 +62,7 @@ export function inferClaimType(text: string): ClaimType {
 
 /** Keep a local opinion or insult label when the model treated it as a fact. */
 export function reconcileClaimType(text: string, model: ClaimType): ClaimType {
+  if (isDateFiller(text)) return "rhetorical";
   if (isAttributedClaim(text) && model === "opinion") return "checkable_factual";
   const local = inferClaimType(text);
   if (local === "rhetorical" || local === "opinion") return local;

@@ -73,7 +73,7 @@ export interface ScoreOptions {
 /**
  * One rule for the provisional flag. Search that is off stays a normal model-only
  * score. A configured search is provisional when it is not ok, or when fewer than
- * half of the selected claims were actually checked.
+ * half of the selected claims have a relevant cited source.
  */
 export function isProvisionalScore(input: {
   searchEnabled: boolean;

@@ -8,6 +8,9 @@ describe("verify prompt", () => {
     expect(system).toContain("core assertion");
     expect(system).toContain("Misleading");
     expect(system).toContain("same plant, person, or event");
+    expect(system).toContain("incompatible fact");
+    expect(system).toContain("double quotes");
+    expect(system).toContain("relevant");
     expect(system).toContain("widely established facts");
     const user = verifyUser(
       [{ id: "s1", claim: "The loan was approved.", context: "Earlier context. The loan was approved.", evidence: [] }],

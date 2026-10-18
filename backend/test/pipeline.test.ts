@@ -327,7 +327,9 @@ describe("analyze", () => {
     expect(result.segments[0].confidence).toBeLessThanOrEqual(0.55);
     expect(result.segments[1].label).toBe("Unverifiable");
     expect(result.meta.searchStatus).toEqual({ state: "ok", reason: null, provider: "firecrawl" });
-    expect(result.provisional).toBe(false);
+    expect(result.claimsVerified).toBe(0);
+    expect(result.claimsTotal).toBe(2);
+    expect(result.provisional).toBe(true);
   });
 
   it("extracts a fetched article before auditing it", async () => {
@@ -440,7 +442,7 @@ describe("analyze", () => {
     expect(counts.total).toBeLessThanOrEqual(32);
     expect(counts).toEqual({ ingest: 0, segment: 1, evidence: 3, verify: 1, score: 1, total: 6 });
     expect(result.degraded).toBe(false);
-    expect(result.claimsVerified).toBe(2);
+    expect(result.claimsVerified).toBe(1);
     expect(result.claimsTotal).toBe(2);
     expect(result.score.verdict).not.toContain("Only ");
   });
@@ -1186,8 +1188,8 @@ describe("analyze", () => {
     expect(tavilySearches).toBe(2);
     expect(result.meta.searchStatus).toEqual({ state: "ok", reason: null, provider: "tavily" });
     expect(result.meta.searchDegraded).toBe(false);
-    expect(result.claimsTotal).toBeGreaterThan(0);
-    expect(result.claimsVerified).toBe(result.claimsTotal);
+    expect(result.claimsTotal).toBe(2);
+    expect(result.claimsVerified).toBe(1);
     expect(result.provisional).toBe(false);
     expect(result.segments[0]?.sources.map((source) => source.url)).toEqual([minutes.url]);
     expect(result.segments[0]?.sources[0]?.snippet).toContain("voted 7 to 2");
@@ -1310,6 +1312,189 @@ describe("analyze", () => {
     expect(result.meta.extraction).toBe("tavily");
     expect(result.article.text).toContain("voted 7 to 2");
     expect(result.article.title).toContain("Harbour vote");
+  });
+
+  it("does not search a calendar aside and does not cite an off-topic page", async () => {
+    const searches: string[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        const body = JSON.parse(String(init?.body)) as { query?: string };
+        searches.push(body.query ?? "");
+        const aboutVote = (body.query ?? "").includes("council");
+        return new Response(
+          JSON.stringify({
+            success: true,
+            data: {
+              web: aboutVote
+                ? [
+                    { url: minutes.url, title: minutes.title, description: minutes.description },
+                    {
+                      url: "https://grayson.edu/cosmetology",
+                      title: "Cosmetology catalogue",
+                      description: "Grayson College lists courses in colour and salon management.",
+                    },
+                  ]
+                : [
+                    {
+                      url: "https://shopping.example/advent",
+                      title: "Best advent calendars",
+                      description: "Shop the 2026 advent calendar before the holidays.",
+                    },
+                  ],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(
+          classifyPayload(user, () => ({ claimType: "checkable_factual", note: "A recorded claim." })),
+        );
+      }
+      if (system.startsWith("TASK:queries")) {
+        const payload = JSON.parse(user) as { claims: { id: string; text: string }[] };
+        return llmPayload({
+          queries: payload.claims.map((claim) => ({ id: claim.id, query: claim.text })),
+        });
+      }
+      if (system.startsWith("TASK:verify")) {
+        const payload = JSON.parse(user) as { claims: { id: string; evidence: { url: string }[] }[] };
+        return llmPayload({
+          results: payload.claims.map((claim) => ({
+            id: claim.id,
+            label: "True",
+            confidence: 0.9,
+            explanation: "The minutes record the vote.",
+            sourceUrls: claim.evidence.map((item) => item.url),
+            sources: claim.evidence.map((item) => ({ url: item.url, relevant: true })),
+          })),
+        });
+      }
+      if (system.startsWith("TASK:consistency")) return llmPayload({ contradictions: [] });
+      throw new Error(system.slice(0, 24));
+    };
+    const result = await analyze(
+      {
+        text: "The council voted 7 to 2 on Monday and published the minutes. But check the calendar and it is 2026.",
+        uiLanguage: "en",
+      },
+      { env, fetchImpl },
+    );
+    expect(searches).toEqual([expect.stringContaining("council")]);
+    const calendar = result.segments.find((segment) => segment.text.includes("calendar"));
+    expect(calendar?.label).toBe("Rhetorical");
+    expect(calendar?.sources).toEqual([]);
+    const voteSegment = result.segments.find((segment) => segment.text.includes("voted"));
+    expect(voteSegment?.sources.map((source) => source.url)).toEqual([minutes.url]);
+  });
+
+  it("searches all 12 selected claims with Tavily inside the subrequest cap", async () => {
+    const claims = [
+      "The harbour council voted to dredge the north basin before winter.",
+      "Marina fees doubled after the harbour master signed the notice.",
+      "Twelve fishing boats remain on the waiting list until spring.",
+      "The lighthouse keeper reported a broken lamp on Tuesday night.",
+      "Coastal inspectors closed the west pier after finding rotten pilings.",
+      "Ferry passengers waited three hours when the morning sailing was cancelled.",
+      "The town clerk published the full minutes on the council website.",
+      "Divers recovered an anchor from the channel beside the old quay.",
+      "Storm winds tore the roof from the boathouse during the night.",
+      "Harbour police fined a skipper for speeding inside the breakwater.",
+      "Engineers surveyed the silt under the commercial dock last month.",
+      "Residents petitioned for a new lifeboat station near the marina.",
+    ];
+    let firecrawlSearches = 0;
+    let tavilySearches = 0;
+    const caches = {
+      default: {
+        async match() {
+          return undefined;
+        },
+        async put() {},
+      },
+    };
+    const previous = (globalThis as { caches?: unknown }).caches;
+    (globalThis as { caches?: unknown }).caches = caches;
+    try {
+      const fetchImpl: typeof fetch = async (input, init) => {
+        const url = String(input);
+        if (url.includes("api.firecrawl.dev")) {
+          firecrawlSearches += 1;
+          return new Response(JSON.stringify({ error: "Insufficient credits" }), { status: 402 });
+        }
+        if (url.includes("api.tavily.com/search")) {
+          tavilySearches += 1;
+          const body = JSON.parse(String(init?.body)) as { query?: string; include_raw_content?: boolean };
+          expect(body.include_raw_content).toBe(true);
+          const words = (body.query ?? "")
+            .split(" ")
+            .filter((word) => word.length > 4)
+            .slice(0, 4)
+            .join(" ");
+          return new Response(
+            JSON.stringify({
+              results: [
+                {
+                  title: "Harbour minutes",
+                  url: `https://example.com/minutes/${tavilySearches}`,
+                  content: `A separate report confirmed ${words} after reviewing the local records.`,
+                },
+              ],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+        const system = body.messages[0]?.content ?? "";
+        const user = body.messages[1]?.content ?? "";
+        if (system.startsWith("TASK:segment")) {
+          return llmPayload(
+            classifyPayload(user, () => ({ claimType: "checkable_factual", note: "A recorded claim." })),
+          );
+        }
+        if (system.startsWith("TASK:queries")) {
+          const payload = JSON.parse(user) as { claims: { id: string; text: string }[] };
+          expect(payload.claims).toHaveLength(12);
+          return llmPayload({
+            queries: payload.claims.map((claim) => ({ id: claim.id, query: claim.text })),
+          });
+        }
+        if (system.startsWith("TASK:verify")) {
+          const payload = JSON.parse(user) as { claims: { id: string; evidence: { url: string }[] }[] };
+          return llmPayload({
+            results: payload.claims.map((claim) => ({
+              id: claim.id,
+              label: "True",
+              confidence: 0.9,
+              explanation: "The minutes record the harbour council marina vote.",
+              sourceUrls: claim.evidence.map((item) => item.url),
+              sources: claim.evidence.map((item) => ({ url: item.url, relevant: true })),
+            })),
+          });
+        }
+        if (system.startsWith("TASK:consistency")) return llmPayload({ contradictions: [] });
+        throw new Error(system.slice(0, 24));
+      };
+      const result = await analyze(
+        { text: claims.join(" "), uiLanguage: "en" },
+        { env: { ...env, TAVILY_API_KEY: "tavily-test-key" }, fetchImpl },
+      );
+      expect(firecrawlSearches).toBe(1);
+      expect(tavilySearches).toBe(12);
+      expect(result.claimsTotal).toBe(12);
+      expect(result.claimsVerified).toBe(12);
+      expect(result.degraded).toBe(false);
+      expect(result.provisional).toBe(false);
+      expect(result.meta.subrequests.total).toBeLessThanOrEqual(32);
+      expect(result.meta.warnings.join(" ")).not.toContain("subrequest limit");
+    } finally {
+      if (previous === undefined) delete (globalThis as { caches?: unknown }).caches;
+      else (globalThis as { caches?: unknown }).caches = previous;
+    }
   });
 });
 

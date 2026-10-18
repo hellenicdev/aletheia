@@ -62,5 +62,7 @@ describe("subrequest budget", () => {
     expect(planEvidence(2, 8)).toBe(0);
     expect(planEvidence(8, 3, { search: 2, verify: 1 })).toBe(2);
     expect(planEvidence(32, 0)).toBe(0);
+    expect(planEvidence(30, 12, { search: 2, verify: 2 })).toBe(11);
+    expect(planEvidence(30, 12, { search: 1, verify: 2 })).toBe(12);
   });
 });

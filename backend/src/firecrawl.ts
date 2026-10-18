@@ -43,6 +43,8 @@ export interface CachedVerdict {
   confidence: number;
   explanation: string;
   sourceUrls: string[];
+  /** Verifier relevance flags from the run that stored this verdict. */
+  relevance?: Record<string, boolean>;
 }
 
 export function clearSearchCache(): void {

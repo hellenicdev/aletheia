@@ -8,7 +8,7 @@ Do not repeat, translate, or correct the sentences. Return only ids that were gi
 claimType is one of:
 - checkable_factual: a proposition that could be compared with public evidence
 - opinion: a value judgement, preference, or first-person view
-- rhetorical: a slogan, insult, profanity, emotional appeal, or rhetorical question with no discrete factual proposition
+- rhetorical: a slogan, insult, profanity, emotional appeal, or rhetorical question with no discrete factual proposition. A calendar aside or a sentence whose only fact is the year ("check the calendar", "it is 2026") is rhetorical, not checkable_factual
 - mixed: a factual proposition wrapped in loaded language
 A value judgement (willingness, ought, deserves, debilitating) or an insult is not checkable_factual.
 Quoted testimony and attributed statements (said, told, according to, είπε, δήλωσε, σύμφωνα με) are the speaker's claim, not the author's opinion. Classify those as checkable_factual or mixed. Opinion is only the author's own evaluation.
@@ -46,9 +46,12 @@ export function verifySystem(lang: UiLanguage, searchEnabled: boolean): string {
     ? `Judge the core assertion of each claim. The context field is the surrounding paragraph; ignore photo credits, datelines, and bylines inside it.
 Use the evidence items. Never invent sources, quotations, numbers, or URLs.
 Every sourceUrls entry must be copied exactly from that claim's evidence list.
+Also return sources as {"url","relevant"} for each evidence item you considered. relevant is true only when the page is about the same people, event, and figures as the claim. A shared year, the word calendar, or another generic word is not enough. sourceUrls lists only the urls you marked relevant.
 True when credible evidence supports the main assertion, even if a secondary detail is missing.
 Misleading when the main assertion is only partly true, or accurate words create a false impression, such as a partial ban described as a total lift.
-False only when the evidence is about the same plant, person, or event and contradicts that core assertion. A different loan, plant, or person is not a contradiction; use Unverifiable.
+False only when evidence about the same thing states an incompatible fact: a different number, a denial, or a condition that cannot be true together with the claim. A missing detail, a later event, or a different detail that can both be true is not False. Use Unverifiable, or True when the core assertion is still consistent with the evidence.
+A different loan, plant, or person is not a contradiction; use Unverifiable. The evidence has to be about the same plant, person, or event.
+When the label is False, the explanation must quote the contradicting span in double quotes, copied from that claim's evidence.
 If a claim's evidence list is empty, you may use True or False only for stable, widely established facts, with confidence at most 0.55 and sourceUrls []. Recent, numeric, or news claims with no evidence stay Unverifiable.`
     : `No web evidence is available. sourceUrls must be [].
 Label specific, recent, numeric, or news claims as Unverifiable.
@@ -63,7 +66,7 @@ If the claim is a joke and the evidence is a satire site, do not label it True.
 A value judgement or interpretation with no discrete fact is Opinion, not True.
 Labels:
 - True: credible evidence supports the core factual assertion
-- False: credible evidence about the same entity contradicts the core assertion
+- False: credible evidence about the same entity states an incompatible fact, and the explanation quotes that span
 - Misleading: a partial truth, or wording that omits context so the impression is false
 - Unverifiable: the evidence is missing, about a different entity, only a copy of the claim, or too weak to judge the core assertion
 - Opinion: there is no factual proposition
@@ -72,7 +75,7 @@ Do not mark a claim False only because something happened after the article's pu
 confidence is a number from 0 to 1.
 explanation is one or two sentences in ${languageName(lang)}. Do not add facts that are not in the evidence, except a stable fact you are allowed to judge from knowledge when evidence is empty.
 Return JSON only:
-{"results":[{"id":"s1","label":"Unverifiable","confidence":0.4,"explanation":"...","sourceUrls":[]}]}`;
+{"results":[{"id":"s1","label":"Unverifiable","confidence":0.4,"explanation":"...","sourceUrls":[],"sources":[{"url":"https://example.com/a","relevant":false}]}]}`;
 }
 
 export function verifyUser(
