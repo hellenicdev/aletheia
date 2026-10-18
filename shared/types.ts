@@ -100,7 +100,7 @@ export interface AnalysisResult {
     model: string;
     uiLanguage: UiLanguage;
     requestId: string;
-    extraction: "pasted" | "firecrawl" | "local";
+    extraction: "pasted" | "firecrawl" | "local" | "direct";
     warnings: string[];
     outlet: OutletKind;
     subrequests: SubrequestCounts;

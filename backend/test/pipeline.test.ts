@@ -573,6 +573,106 @@ describe("analyze", () => {
     expect(result.score.verdict).not.toContain("factual claims were checked");
   });
 
+  it("finishes a search outage without waiting on a hung body or consistency call", async () => {
+    let searches = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        searches += 1;
+        if (searches > 1) return new Promise(() => {});
+        return new Response(new ReadableStream({ start() {} }), { status: 402 });
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(classifyPayload(user, () => ({ claimType: "checkable_factual", note: "A recorded claim." })));
+      }
+      if (system.startsWith("TASK:queries")) {
+        return llmPayload({
+          queries: [
+            { id: "s1", query: "council vote Monday" },
+            { id: "s2", query: "marina fee doubled" },
+            { id: "s3", query: "boats waiting list" },
+          ],
+        });
+      }
+      if (system.startsWith("TASK:verify") || system.startsWith("TASK:consistency")) {
+        return new Promise(() => {});
+      }
+      throw new Error(system.slice(0, 24));
+    };
+    const facts = [
+      "The council voted 7 to 2 on Monday and published the minutes for residents.",
+      "The marina fee doubled overnight after the harbour master signed the notice.",
+      "Twelve boats remain on the waiting list until the spring season opens.",
+    ].join(" ");
+    const started = Date.now();
+    const result = await Promise.race([
+      analyze({ text: facts, uiLanguage: "en" }, { env, fetchImpl }),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("search outage waited too long")), 2500);
+      }),
+    ]);
+    expect(Date.now() - started).toBeLessThan(2500);
+    expect(searches).toBe(1);
+    expect(result.meta.searchStatus).toEqual({ state: "unavailable", reason: "out_of_credits" });
+    expect(result.provisional).toBe(true);
+    expect(result.score.factualAccuracy).toBeNull();
+    expect(result.score.sourcing).toBeNull();
+  });
+
+  it("falls back to a direct fetch and skips search after a scrape 402", async () => {
+    const systems: string[] = [];
+    let searches = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev/v2/scrape")) {
+        return new Response(JSON.stringify({ error: "Insufficient credits" }), { status: 402 });
+      }
+      if (url.includes("api.firecrawl.dev/v2/search")) {
+        searches += 1;
+        return new Promise(() => {});
+      }
+      if (url.includes("news.example")) {
+        return new Response(
+          `<html><head><title>Harbour vote</title></head><body><article><p>${vote}</p><p>${fee}</p><p>${rhetoric}</p></article></body></html>`,
+          { status: 200, headers: { "content-type": "text/html" } },
+        );
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      systems.push(system.slice(0, 20));
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(classifyPayload(user, (text) => {
+          if (text.includes("betrayal")) return { claimType: "rhetorical", note: "Loaded language without a fact." };
+          return { claimType: "checkable_factual", note: "A recorded claim." };
+        }));
+      }
+      if (system.startsWith("TASK:queries") || system.startsWith("TASK:verify") || system.startsWith("TASK:consistency")) {
+        return new Promise(() => {});
+      }
+      throw new Error(system.slice(0, 24));
+    };
+    const started = Date.now();
+    const result = await Promise.race([
+      analyze({ url: "https://news.example/harbour", uiLanguage: "en" }, { env, fetchImpl }),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("scrape fallback waited too long")), 2500);
+      }),
+    ]);
+    expect(Date.now() - started).toBeLessThan(2500);
+    expect(result.meta.extraction).toBe("direct");
+    expect(result.article.text).toContain("voted 7 to 2");
+    expect(searches).toBe(0);
+    expect(systems.some((system) => system.startsWith("TASK:queries"))).toBe(false);
+    expect(result.meta.searchStatus).toEqual({ state: "unavailable", reason: "out_of_credits" });
+    expect(result.provisional).toBe(true);
+    expect(result.score.verdict).toContain("Only 0 of");
+    expect(result.meta.subrequests.ingest).toBeGreaterThanOrEqual(2);
+  });
+
   it("does not cite an AP reprint that lacks a byline", async () => {
     const title = "Coast Guard rescues sailors after a storm warning delayed the Baja crossing";
     const lede =

@@ -14,6 +14,29 @@ const scrapeCache = new Map<string, { at: number; page: ScrapedPage }>();
 const verifyCache = new Map<string, { at: number; verdict: CachedVerdict }>();
 let queue: Promise<void> = Promise.resolve();
 
+/** Request-scoped note that Firecrawl rejected the call, so later searches do not wait. */
+export interface ProviderGate {
+  block: { status: number; detail: string } | null;
+}
+
+export function createProviderGate(): ProviderGate {
+  return { block: null };
+}
+
+export function rememberProviderFailure(
+  gate: ProviderGate | undefined,
+  status: number,
+  detail: string,
+): void {
+  if (!gate || gate.block) return;
+  if (!(status === 402 || status === 401 || status === 403 || status === 429 || status >= 500)) return;
+  const clean = detail.replace(/\s+/g, " ").trim().slice(0, 180);
+  gate.block = {
+    status,
+    detail: status === 402 ? clean || "Insufficient credits" : clean,
+  };
+}
+
 export interface CachedVerdict {
   label: string;
   confidence: number;
@@ -106,6 +129,7 @@ export async function searchWeb(options: {
   canSpend?: () => boolean;
   signal?: AbortSignal;
   charge?: CacheCharge;
+  gate?: ProviderGate;
 }): Promise<EvidenceItem[]> {
   const query = options.query.trim().slice(0, 240);
   if (!query) return [];
@@ -116,6 +140,10 @@ export async function searchWeb(options: {
   if (persisted) {
     searchCache.set(cacheKey, { at: Date.now(), hits: persisted });
     return persisted;
+  }
+  if (options.gate?.block) {
+    const block = options.gate.block;
+    throw new UpstreamError("search", block.status, block.detail);
   }
 
   const payload: Record<string, unknown> = {
@@ -145,9 +173,13 @@ export async function searchWeb(options: {
       signal,
     );
   }, signal);
-  const text = await raceAbort(response.text(), signal);
+  const text = response.ok
+    ? await raceAbort(response.text(), signal)
+    : await readFailureBody(response, signal);
   if (!response.ok) {
-    const failure = new UpstreamError("search", response.status, redactSecret(text, options.apiKey));
+    rememberProviderFailure(options.gate, response.status, text);
+    const detail = options.gate?.block?.detail || text;
+    const failure = new UpstreamError("search", response.status, redactSecret(detail, options.apiKey));
     console.error(failure.message);
     throw failure;
   }
@@ -225,6 +257,8 @@ export interface ScrapedPage {
   title: string | null;
   text: string;
   publishedAt: string | null;
+  byline: string | null;
+  siteName: string | null;
   finalUrl: string;
   rawHtml: string | null;
 }
@@ -237,6 +271,7 @@ export async function scrapeArticle(options: {
   timeoutMs?: number;
   canSpend?: () => boolean;
   charge?: CacheCharge;
+  gate?: ProviderGate;
 }): Promise<ScrapedPage> {
   const pageUrl = assertPublicHttpUrl(options.url);
   const cacheKey = pageUrl.toString();
@@ -244,8 +279,9 @@ export async function scrapeArticle(options: {
   if (memo && Date.now() - memo.at < 10 * 60_000) return memo.page;
   const persisted = await readPersisted<ScrapedPage>(`scrape:${cacheKey}`, options.charge);
   if (persisted && persisted.text) {
-    scrapeCache.set(cacheKey, { at: Date.now(), page: persisted });
-    return persisted;
+    const page = { ...persisted, byline: persisted.byline ?? null, siteName: persisted.siteName ?? null };
+    scrapeCache.set(cacheKey, { at: Date.now(), page });
+    return page;
   }
   const timeoutMs = options.timeoutMs ?? 20_000;
   const signal = operationSignal(timeoutMs, options.signal);
@@ -268,8 +304,11 @@ export async function scrapeArticle(options: {
       signal,
     );
   }, signal);
-  const text = await raceAbort(response.text(), signal);
+  const text = response.ok
+    ? await raceAbort(response.text(), signal)
+    : await readFailureBody(response, signal);
   if (!response.ok) {
+    rememberProviderFailure(options.gate, response.status, text);
     if (response.status === 401 || response.status === 403) {
       throw new HttpError(502, "The Firecrawl API key was rejected.");
     }
@@ -318,6 +357,8 @@ export async function scrapeArticle(options: {
     title,
     text: article.slice(0, LIMITS.maxArticleChars),
     publishedAt,
+    byline: metaString(metadata, ["author", "article:author", "og:author"]),
+    siteName: metaString(metadata, ["og:site_name", "ogSiteName", "siteName", "site_name"]),
     finalUrl,
     rawHtml: html,
   };
@@ -422,6 +463,22 @@ function firecrawlHeaders(apiKey: string): HeadersInit {
     "Content-Type": "application/json",
     Accept: "application/json",
   };
+}
+
+/** A rejected response body must not hold the request. Status is already known. */
+async function readFailureBody(response: Response, signal?: AbortSignal): Promise<string> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const capped = new Promise<string>((resolve) => {
+    timer = setTimeout(() => {
+      void response.body?.cancel().catch(() => undefined);
+      resolve("");
+    }, 300);
+  });
+  try {
+    return await raceAbort(Promise.race([response.text().catch(() => ""), capped]), signal);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function failureMessage(action: string, status: number, body: string, apiKey: string): string {
