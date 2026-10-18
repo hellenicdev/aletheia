@@ -12,7 +12,7 @@ import { renderHighlighted } from "../shared/highlight";
 import { LABELS, type UiLanguage } from "../shared/labels";
 import { partialClaimsNotice } from "../shared/messages";
 import type { AnalysisResult, SearchOutageReason, SegmentResult, StageName } from "../shared/types";
-import { denyAnalytics, grantAnalytics, scheduleGtag, trackAnalyzeStarted } from "./analytics";
+import { CONSENT_STORAGE_KEY, grantAnalytics, injectGtag, readConsent, scheduleGtag, trackAnalyzeStarted, trackPageView } from "./analytics";
 import { analyzeArticle, fetchHealth, STALL_MESSAGE } from "./api";
 import { detectedName, labelHelp, labelName, t, type MessageKey } from "./i18n";
 import { scheduleKofi } from "./kofi";
@@ -79,7 +79,7 @@ app.innerHTML = `
       </svg>
       <div>
         <p class="kicker" data-i18n="kicker"></p>
-        <h1 data-i18n="title"></h1>
+        <h1 id="page-title" tabindex="-1" data-i18n="title"></h1>
         <p class="tagline" data-i18n="tagline"></p>
       </div>
     </div>
@@ -362,7 +362,7 @@ function setLanguage(lang: UiLanguage) {
   state.lang = lang;
   if (state.sample && state.result) state.result = buildSample(lang);
   applyI18n();
-  scheduleKofi(window, lang);
+  if (storedConsent()) scheduleKofi(window, lang);
 }
 
 function setMode(mode: "paste" | "url") {
@@ -1030,19 +1030,14 @@ const aligned = languageUrl(location.pathname, location.search, state.lang);
 if ((params.get("lang") === "el" || params.get("lang") === "en") && aligned !== `${location.pathname}${location.search}`) {
   location.replace(`${aligned}${location.hash}`);
 } else {
-  const consentChoice = (() => {
-    try {
-      return localStorage.getItem("aletheia-consent");
-    } catch {
-      return null;
-    }
-  })();
-  if (consentChoice !== "accepted" && consentChoice !== "declined") {
+  const consentChoice = storedConsent();
+  if (!consentChoice) {
     $<HTMLElement>("#consent").hidden = false;
+  } else {
+    scheduleKofi(window, state.lang);
   }
   applyI18n();
-  scheduleKofi(window, state.lang);
-  scheduleGtag();
+  if (consentChoice === "accepted") scheduleGtag();
   void fetchHealth().then((health) => {
     healthKind = !health ? "down" : health.searchConfigured ? "search" : "nosearch";
     renderHealth();
@@ -1050,15 +1045,40 @@ if ((params.get("lang") === "el" || params.get("lang") === "en") && aligned !== 
   if (demo) void runSample(params.get("instant") === "1");
 }
 
+function storedConsent(): "accepted" | "declined" | null {
+  try {
+    return readConsent(localStorage);
+  } catch {
+    return null;
+  }
+}
+
+function focusAfterConsent(): void {
+  const composer = $<HTMLElement>("#composer");
+  const paste = $<HTMLElement>("#panel-paste");
+  const field = $<HTMLTextAreaElement>("#article-text");
+  const composerOpen = Boolean(composer && !composer.hidden);
+  if (composerOpen && paste && !paste.hidden && field) {
+    field.focus();
+    return;
+  }
+  $<HTMLElement>("#page-title").focus();
+}
+
 function rememberConsent(choice: "accepted" | "declined") {
   try {
-    localStorage.setItem("aletheia-consent", choice);
+    localStorage.setItem(CONSENT_STORAGE_KEY, choice);
   } catch {
     /* Storage can be blocked. The choice still applies to this visit. */
   }
-  if (choice === "accepted") grantAnalytics(window.gtag);
-  else denyAnalytics(window.gtag);
+  if (choice === "accepted") {
+    grantAnalytics(window.gtag);
+    trackPageView(window.gtag);
+    injectGtag(document);
+  }
   $<HTMLElement>("#consent").hidden = true;
+  scheduleKofi(window, state.lang);
+  focusAfterConsent();
 }
 
 $<HTMLButtonElement>("#consent-accept").addEventListener("click", () => rememberConsent("accepted"));

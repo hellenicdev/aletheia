@@ -50,7 +50,7 @@
         "offers": { "@type": "Offer", "price": "0", "priceCurrency": "EUR" }
       }
     </script>
-    <!-- Google tag (gtag.js). The library itself loads on idle. Consent defaults come first. -->
+    <!-- Google tag stub. gtag.js itself loads only after Accept. Consent defaults come first. -->
     <script>
       window.dataLayer = window.dataLayer || [];
       function gtag(){dataLayer.push(arguments);}
@@ -60,21 +60,23 @@
         ad_user_data: 'denied',
         ad_personalization: 'denied'
       });
-      try {
-        if (localStorage.getItem('aletheia-consent') === 'accepted') {
-          gtag('consent', 'update', {
-            analytics_storage: 'granted',
-            ad_storage: 'denied',
-            ad_user_data: 'denied',
-            ad_personalization: 'denied'
-          });
-        }
-      } catch (e) {}
+      var aletheiaConsent = null;
+      try { aletheiaConsent = localStorage.getItem('aletheia-consent'); } catch (e) {}
+      if (aletheiaConsent === 'accepted') {
+        gtag('consent', 'update', {
+          analytics_storage: 'granted',
+          ad_storage: 'denied',
+          ad_user_data: 'denied',
+          ad_personalization: 'denied'
+        });
+      }
       gtag('js', new Date());
       gtag('config', 'G-9FWQFZME3Z', {
+        send_page_view: false,
         allow_google_signals: false,
         allow_ad_personalization_signals: false
       });
+      if (aletheiaConsent === 'accepted') gtag('event', 'page_view');
     </script>
   </head>
   <body>

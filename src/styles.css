@@ -760,6 +760,14 @@ input::placeholder {
   .article-title { font-size: 22px; }
 }
 
+/* The widget iframe is wider than this fixed wrap. Clip the wrap only:
+   a single-axis clip would compute the other axis to auto and add a scrollbar.
+   The open chat panel is a sibling, so it is not clipped. */
+.floatingchat-container-wrap,
+.floatingchat-container-wrap-mobi {
+  overflow: clip;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation: none !important;

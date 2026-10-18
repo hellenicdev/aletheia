@@ -3,10 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
   CONSENT_ANALYTICS,
   CONSENT_DENIED,
-  GTAG_DELAY_MS,
+  GTAG_IDLE_TIMEOUT_MS,
   denyAnalytics,
   grantAnalytics,
+  readConsent,
   trackAnalyzeStarted,
+  trackPageView,
 } from "./analytics";
 
 describe("analytics", () => {
@@ -26,9 +28,15 @@ describe("analytics", () => {
       calls.push(args);
     };
     grantAnalytics(gtag);
+    trackPageView(gtag);
     denyAnalytics(gtag);
     expect(calls[0]).toEqual(["consent", "update", CONSENT_ANALYTICS]);
-    expect(calls[1]).toEqual(["consent", "update", CONSENT_DENIED]);
+    expect(calls[1]).toEqual(["event", "page_view"]);
+    expect(calls[2]).toEqual(["consent", "update", CONSENT_DENIED]);
+    expect(readConsent({ getItem: () => "accepted" })).toBe("accepted");
+    expect(readConsent({ getItem: () => "declined" })).toBe("declined");
+    expect(readConsent({ getItem: () => null })).toBeNull();
+    expect(readConsent(null)).toBeNull();
     expect(CONSENT_ANALYTICS.analytics_storage).toBe("granted");
     for (const state of [CONSENT_DENIED, CONSENT_ANALYTICS]) {
       expect(state.ad_storage).toBe("denied");
@@ -49,8 +57,13 @@ describe("analytics", () => {
     expect(html).toContain("ad_personalization: 'denied'");
     expect(html).toContain("allow_google_signals: false");
     expect(html).toContain("allow_ad_personalization_signals: false");
+    expect(html).toContain("send_page_view: false");
     expect(html).not.toContain("googletagmanager.com/gtag/js");
     expect(html.indexOf("gtag('consent', 'update'")).toBeLessThan(config);
-    expect(GTAG_DELAY_MS).toBeGreaterThanOrEqual(6_000);
+    const pageView = html.indexOf("gtag('event', 'page_view')");
+    expect(pageView).toBeGreaterThan(config);
+    expect(html.indexOf("aletheiaConsent === 'accepted'")).toBeLessThan(pageView);
+    expect(GTAG_IDLE_TIMEOUT_MS).toBeGreaterThan(0);
+    expect(GTAG_IDLE_TIMEOUT_MS).toBeLessThanOrEqual(1_500);
   });
 });
