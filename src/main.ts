@@ -9,7 +9,7 @@ import "./styles.css";
 import { renderHighlighted } from "../shared/highlight";
 import { LABELS, type UiLanguage } from "../shared/labels";
 import { partialClaimsNotice } from "../shared/messages";
-import type { AnalysisResult, StageName } from "../shared/types";
+import type { AnalysisResult, SearchOutageReason, StageName } from "../shared/types";
 import { analyzeArticle, fetchHealth } from "./api";
 import { detectedName, labelHelp, labelName, t, type MessageKey } from "./i18n";
 import { buildSample } from "./sample";
@@ -140,6 +140,7 @@ app.innerHTML = `
             <div class="gauge-readout">
               <span class="gauge-number" id="gauge-number">—</span>
               <span class="gauge-of">/100</span>
+              <span class="gauge-status" id="gauge-status" hidden></span>
             </div>
           </div>
           <div>
@@ -195,6 +196,7 @@ const verdictEl = $<HTMLElement>("#verdict");
 const gauge = $<HTMLElement>("#gauge");
 const gaugeValue = $<SVGCircleElement>("#gauge-value");
 const gaugeNumber = $<HTMLElement>("#gauge-number");
+const gaugeStatus = $<HTMLElement>("#gauge-status");
 let healthKind: "unknown" | "down" | "search" | "nosearch" = "unknown";
 
 function renderHealth() {
@@ -360,9 +362,11 @@ function renderScore() {
   notes.replaceChildren();
   if (!result) {
     gauge.classList.toggle("is-running", state.running);
+    gauge.classList.remove("is-provisional");
     gauge.dataset.band = "mid";
     gaugeValue.style.strokeDashoffset = state.running ? "230" : String(ARC);
     gaugeNumber.textContent = "—";
+    gaugeStatus.hidden = true;
     verdictEl.textContent = t(state.lang, state.running ? "runningVerdict" : "idleVerdict");
     notes.hidden = true;
     $<HTMLElement>("#warnings").hidden = true;
@@ -372,7 +376,11 @@ function renderScore() {
   }
   gauge.classList.remove("is-running");
   const overall = result.score.overall;
+  const provisional = result.provisional === true;
+  gauge.classList.toggle("is-provisional", provisional);
   gauge.dataset.band = overall < 45 ? "low" : overall < 75 ? "mid" : "high";
+  gaugeStatus.hidden = !provisional;
+  gaugeStatus.textContent = provisional ? t(state.lang, "provisional") : "";
   animateGauge(overall);
   verdictEl.textContent = result.score.verdict;
   const extra: string[] = [];
@@ -473,6 +481,19 @@ function animateGauge(target: number) {
   requestAnimationFrame(step);
 }
 
+function outageMessage(result: AnalysisResult): string | null {
+  const status = result.meta.searchStatus;
+  if (!status || status.state === "ok") return null;
+  const key: Record<SearchOutageReason, MessageKey> = {
+    out_of_credits: "searchOutageCredits",
+    unauthorized: "searchOutageUnauthorized",
+    rate_limited: "searchOutageRate",
+    upstream_error: "searchOutageUpstream",
+    failed: "searchOutageFailed",
+  };
+  return t(state.lang, status.reason ? key[status.reason] : "searchOutageFailed");
+}
+
 function renderArticle() {
   const result = state.result;
   if (!result) {
@@ -526,7 +547,11 @@ function renderArticle() {
   $<HTMLElement>("#sample-banner").hidden = result.meta.model !== "sample";
   $<HTMLElement>("#truncated-banner").hidden = !result.truncated;
   const searchBanner = $<HTMLElement>("#search-banner");
-  if (result.degraded) {
+  const outage = outageMessage(result);
+  if (outage) {
+    searchBanner.hidden = false;
+    searchBanner.textContent = outage;
+  } else if (result.degraded) {
     searchBanner.hidden = false;
     searchBanner.textContent = partialClaimsNotice(state.lang, result.claimsVerified, result.claimsTotal);
   } else {

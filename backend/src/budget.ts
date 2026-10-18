@@ -1,9 +1,12 @@
 /**
  * Cloudflare's free plan allows 50 subrequests in one worker invocation.
- * Cache reads and writes count as well, so the hard budget stays at 40.
- * The counter never throws out of the analysis: callers stop and finish.
+ * Cache reads and writes are counted when the Cache API is present. The article
+ * scrape, searches, and model calls are fetches on this counter. Keepalive
+ * comments are not fetches. `response.redirected` hides the extra hops, so a
+ * redirected call spends one more. The cap stays at 32 so those hops still fit
+ * under 50. The counter never throws out of the analysis: callers stop and finish.
  */
-export const SUBREQUEST_LIMIT = 40;
+export const SUBREQUEST_LIMIT = 32;
 
 export class BudgetExhausted extends Error {
   readonly name = "BudgetExhausted";
@@ -121,6 +124,10 @@ export function planEvidence(
 export function trackFetch(fetchImpl: typeof fetch, budget: SubrequestBudget): typeof fetch {
   return async (input, init) => {
     budget.note();
-    return fetchImpl(input, init);
+    const response = await fetchImpl(input, init);
+    // Each redirect hop is a subrequest. The platform only exposes a boolean,
+    // so count one extra and keep the response even if the budget is already spent.
+    if (response.redirected) budget.trySpend(1);
+    return response;
   };
 }

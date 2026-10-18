@@ -111,13 +111,17 @@ export function isSyndicatedCopy(
   const ours = (articleTitle ?? "").replace(/\s+/g, " ").trim();
   const lead = articleText.replace(/\s+/g, " ").trim().slice(0, 500);
   if (nearlyIdenticalTitle(ours, title)) return true;
+  if (looseReprint(ours, title)) return true;
   if (nearCopy(ours, snippet, 24, 40)) return true;
+  if (looseReprint(ours, snippet)) return true;
   if (nearCopy(lead, title, 40, 24)) return true;
+  if (looseReprint(lead, title)) return true;
   if (snippet.length >= 48 && lead.length >= 48) {
     const window = snippet.slice(0, 64).toLowerCase();
     if (lead.toLowerCase().includes(window.slice(0, 48))) return true;
   }
   if (nearCopy(lead, snippet, 40, 40)) return true;
+  if (looseReprint(lead, snippet)) return true;
   return false;
 }
 
@@ -149,6 +153,34 @@ function nearCopy(articlePart: string, resultPart: string, minArticle: number, m
   if (articlePart.length < minArticle || resultPart.length < minResult) return false;
   const overlap = Math.min(tokenOverlap(articlePart, resultPart), tokenOverlap(resultPart, articlePart));
   return overlap >= 0.6;
+}
+
+/**
+ * A reprint headline or snippet is often shorter than the original and has no byline.
+ * High overlap in either direction, on a different domain, is the same story.
+ */
+function looseReprint(articlePart: string, resultPart: string): boolean {
+  const article = articlePart.replace(/\s+/g, " ").trim();
+  const result = resultPart.replace(/\s+/g, " ").trim();
+  if (article.length < 24 || result.length < 24) return false;
+  // A two- or three-word confirmation is a source, not a reprint of the article.
+  if (contentTokenCount(result) < 5) return false;
+  const forward = tokenOverlap(article, result);
+  const backward = tokenOverlap(result, article);
+  const min = Math.min(forward, backward);
+  const max = Math.max(forward, backward);
+  if (min >= 0.45) return true;
+  return max >= 0.75 && min >= 0.28;
+}
+
+function contentTokenCount(text: string): number {
+  return new Set(
+    text
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      .split(/\s+/)
+      .filter((token) => token.length > 3),
+  ).size;
 }
 
 const SYNDICATORS = ["yahoo.com", "inkl.com", "msn.com", "apple.news", "flipboard.com", "smartnews.com", "news.google.com"];

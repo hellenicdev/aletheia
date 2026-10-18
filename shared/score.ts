@@ -1,6 +1,6 @@
 import type { Label, UiLanguage } from "./labels";
 import { LABELS } from "./labels";
-import { partialClaimsNotice } from "./messages";
+import { degradedClaimsSentence } from "./messages";
 import type { OutletKind } from "./reputation";
 import type { ScoreResult } from "./types";
 
@@ -59,6 +59,8 @@ export interface ScoreOptions {
   degraded?: boolean;
   claimsVerified?: number;
   claimsTotal?: number;
+  /** Hide factual and sourcing figures when no claim was checked against evidence. */
+  provisional?: boolean;
 }
 
 export function emptyCounts(): Record<Label, number> {
@@ -218,9 +220,9 @@ export function aggregateScore(
   );
 
   return {
-    factualAccuracy,
+    factualAccuracy: options.provisional ? null : factualAccuracy,
     factualBasis,
-    sourcing,
+    sourcing: options.provisional ? null : sourcing,
     toneNeutrality,
     logicalConsistency,
     overall,
@@ -309,9 +311,8 @@ function buildVerdict(
   }
 
   if (degraded && claimsTotal > 0) {
-    parts.push(partialClaimsNotice(lang, claimsVerified, claimsTotal));
-  }
-  if (thin && checked === 0 && checkable > 0) {
+    parts.push(degradedClaimsSentence(lang, claimsVerified, claimsTotal, poolCounts));
+  } else if (thin && checked === 0 && checkable > 0) {
     parts.push(
       lang === "el"
         ? "Η σελίδα είχε πολύ λίγο κείμενο άρθρου για να ελεγχθεί ένας πραγματολογικός ισχυρισμός."

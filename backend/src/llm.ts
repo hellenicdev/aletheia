@@ -1,7 +1,7 @@
 import { parseModelJson } from "../../shared/json";
 import { isBudgetExhausted } from "./budget";
 import type { AppConfig } from "./config";
-import { combineSignals, isDeadline } from "./deadline";
+import { isDeadline, raceAbort } from "./deadline";
 import { HttpError, UpstreamError, redactSecret } from "./errors";
 
 export interface ChatMessage {
@@ -146,20 +146,23 @@ export async function requestChat(
     body.reasoning_effort = options.reasoningEffort;
   }
 
-  const signal = options.signal
-    ? combineSignals([options.signal, AbortSignal.timeout(options.timeoutMs ?? 22_000)])
-    : AbortSignal.timeout(options.timeoutMs ?? 22_000);
+  // Pass AbortSignal.timeout itself. A combined signal only aborts after a
+  // JavaScript listener runs, which does not cancel a hung worker fetch.
+  const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? 22_000);
   let response: Response;
   try {
-    response = await options.fetchImpl(`${options.config.llmBaseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${options.apiKey.trim()}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-      signal,
-    });
+    response = await raceAbort(
+      options.fetchImpl(`${options.config.llmBaseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${options.apiKey.trim()}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: timeoutSignal,
+      }),
+      options.signal,
+    );
   } catch (error) {
     if (isBudgetExhausted(error) || isDeadline(error) || options.signal?.aborted) throw error;
     throw loggedUpstream("llm", null, errorText(error), options.apiKey);

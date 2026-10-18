@@ -15,4 +15,13 @@ describe("i18n", () => {
     expect(t("el", "analyze")).toBe("Ανάλυση");
     expect(t("el", "misleading")).toMatch(/[\u0370-\u03FF]/);
   });
+
+  it("states a provider outage in both languages", () => {
+    expect(t("en", "searchOutageCredits")).toBe(
+      "Live web search is unavailable (provider credits exhausted); results are based on model knowledge only",
+    );
+    expect(t("el", "searchOutageCredits")).toContain("εξαντλήθηκαν οι μονάδες του παρόχου");
+    expect(t("en", "provisional")).toBe("provisional");
+    expect(t("el", "provisional")).toBe("προσωρινό");
+  });
 });

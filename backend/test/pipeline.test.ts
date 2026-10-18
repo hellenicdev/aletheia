@@ -257,6 +257,8 @@ describe("analyze", () => {
     expect(result.segments[1].label).toBe("Unverifiable");
     expect(result.segments[1].sources).toEqual([]);
     expect(result.score.verdict).toContain("model-knowledge-only");
+    expect(result.meta.searchStatus).toEqual({ state: "ok", reason: null });
+    expect(result.provisional).toBe(false);
   });
 
   it("asks the model when search returns nothing and keeps only a stable fact", async () => {
@@ -321,6 +323,8 @@ describe("analyze", () => {
     expect(result.segments[0].evidenceMode).toBe("model-knowledge-only");
     expect(result.segments[0].confidence).toBeLessThanOrEqual(0.55);
     expect(result.segments[1].label).toBe("Unverifiable");
+    expect(result.meta.searchStatus).toEqual({ state: "ok", reason: null });
+    expect(result.provisional).toBe(false);
   });
 
   it("extracts a fetched article before auditing it", async () => {
@@ -430,7 +434,7 @@ describe("analyze", () => {
     const result = await analyze({ text: article, uiLanguage: "en" }, { env, fetchImpl });
     const counts = result.meta.subrequests;
     expect(counts.ingest + counts.segment + counts.evidence + counts.verify + counts.score).toBe(counts.total);
-    expect(counts.total).toBeLessThanOrEqual(40);
+    expect(counts.total).toBeLessThanOrEqual(32);
     expect(counts).toEqual({ ingest: 0, segment: 1, evidence: 3, verify: 1, score: 1, total: 6 });
     expect(result.degraded).toBe(false);
     expect(result.claimsVerified).toBe(2);
@@ -475,7 +479,8 @@ describe("analyze", () => {
     expect(result.score.factualAccuracy).toBeNull();
     expect(result.score.sourcing).toBeNull();
     expect(result.score.overall).toBeGreaterThanOrEqual(55);
-    expect(result.score.verdict).toContain("Only 0 of 3 claims could be verified.");
+    expect(result.score.verdict).toContain("Only 0 of 3 claims could be verified (");
+    expect(result.score.verdict).not.toContain("factual claims were checked");
     expect(result.meta.subrequests.total).toBeLessThanOrEqual(3);
   });
 
@@ -516,7 +521,119 @@ describe("analyze", () => {
     expect(result.degraded).toBe(true);
     expect(result.claimsVerified).toBe(0);
     expect(result.claimsTotal).toBe(3);
-    expect(result.score.verdict).toContain("Only 0 of 3 claims could be verified.");
+    expect(result.score.verdict).toContain("Only 0 of 3 claims could be verified (");
+    expect(result.score.verdict).not.toContain("factual claims were checked");
+  });
+
+  it("stops calling Firecrawl after the provider runs out of credits", async () => {
+    let searches = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        searches += 1;
+        return new Response(
+          JSON.stringify({ success: false, error: "Insufficient credits to perform this request." }),
+          { status: 402 },
+        );
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(classifyPayload(user, () => ({ claimType: "checkable_factual", note: "A recorded claim." })));
+      }
+      if (system.startsWith("TASK:queries")) {
+        return llmPayload({
+          queries: [
+            { id: "s1", query: "council vote Monday" },
+            { id: "s2", query: "marina fee doubled" },
+            { id: "s3", query: "boats waiting list" },
+          ],
+        });
+      }
+      if (system.startsWith("TASK:verify")) throw new Error("verify should not run");
+      if (system.startsWith("TASK:consistency")) return llmPayload({ contradictions: [] });
+      throw new Error(system.slice(0, 24));
+    };
+    const facts = [
+      "The council voted 7 to 2 on Monday and published the minutes for residents.",
+      "The marina fee doubled overnight after the harbour master signed the notice.",
+      "Twelve boats remain on the waiting list until the spring season opens.",
+    ].join(" ");
+    const result = await analyze({ text: facts, uiLanguage: "en" }, { env, fetchImpl });
+    expect(searches).toBe(1);
+    expect(result.meta.searchStatus).toEqual({ state: "unavailable", reason: "out_of_credits" });
+    expect(result.provisional).toBe(true);
+    expect(result.meta.searchDegraded).toBe(true);
+    expect(result.score.factualAccuracy).toBeNull();
+    expect(result.score.sourcing).toBeNull();
+    expect(result.segments.every((segment) => segment.label === "Unverifiable")).toBe(true);
+    expect(result.segments.every((segment) => segment.confidence <= 0.4)).toBe(true);
+    expect(result.score.verdict).toContain("Only 0 of 3 claims could be verified");
+    expect(result.score.verdict).not.toContain("factual claims were checked");
+  });
+
+  it("does not cite an AP reprint that lacks a byline", async () => {
+    const title = "Coast Guard rescues sailors after a storm warning delayed the Baja crossing";
+    const lede =
+      "The Coast Guard rescued sixteen sailors off Baja California on Monday after a storm warning delayed their crossing and the crew stayed out overnight.";
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            data: {
+              web: [
+                {
+                  url: "https://www.opb.org/article/coast-guard-baja",
+                  title: "Coast Guard rescues sailors after Baja storm warning",
+                  description:
+                    "The Coast Guard rescued sixteen sailors off Baja California on Monday after a storm warning delayed their crossing.",
+                },
+                {
+                  url: "https://www.arabnews.com/node/coast-guard-baja",
+                  title: "Sailors rescued off Baja",
+                  description: lede,
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(classifyPayload(user, () => ({ claimType: "checkable_factual", note: "A recorded claim." })));
+      }
+      if (system.startsWith("TASK:queries")) {
+        return llmPayload({ queries: [{ id: "s1", query: "coast guard baja sailors" }] });
+      }
+      if (system.startsWith("TASK:verify")) {
+        return llmPayload({
+          results: [
+            {
+              id: "s1",
+              label: "True",
+              confidence: 0.9,
+              explanation: "Other sites reported the same rescue.",
+              sourceUrls: [
+                "https://www.opb.org/article/coast-guard-baja",
+                "https://www.arabnews.com/node/coast-guard-baja",
+              ],
+            },
+          ],
+        });
+      }
+      if (system.startsWith("TASK:consistency")) return llmPayload({ contradictions: [] });
+      throw new Error(system.slice(0, 24));
+    };
+    const result = await analyze({ text: `${title}\n\n${lede}`, uiLanguage: "en" }, { env, fetchImpl });
+    expect(result.segments[0]?.label).toBe("Unverifiable");
+    expect(result.segments[0]?.sources).toEqual([]);
+    expect(result.segments[0]?.explanation.toLowerCase()).toContain("not independently verified");
   });
 
   it("returns a partial result when search hangs past the deadline", async () => {
@@ -1070,6 +1187,43 @@ describe("handleRequest", () => {
     const events = parseSse(await response.text());
     expect(scraped).toBe(true);
     expect(Date.now() - started).toBeLessThan(5_000);
+    const terminal = events.filter((event) => event.event === "result" || event.event === "error");
+    expect(terminal).toHaveLength(1);
+  }, 8_000);
+
+  it("finishes when the segment call never resolves", async () => {
+    let segmentCalls = 0;
+    const fetchImpl: typeof fetch = (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        return Promise.resolve(new Response(JSON.stringify({ success: true, data: { web: [] } }), { status: 200 }));
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        segmentCalls += 1;
+        return new Promise(() => {});
+      }
+      if (system.startsWith("TASK:queries")) {
+        return Promise.resolve(llmPayload({ queries: [{ id: "s1", query: "council vote Monday" }] }));
+      }
+      if (system.startsWith("TASK:verify") || system.startsWith("TASK:consistency")) {
+        return Promise.resolve(llmPayload({ contradictions: [], results: [] }));
+      }
+      return Promise.reject(new Error(`${system.slice(0, 24)} ${user.slice(0, 12)}`));
+    };
+    const started = Date.now();
+    const response = await handleRequest(post(article), env, {
+      fetchImpl,
+      rate: { buckets: new Map(), inFlight: { count: 0 } },
+      now: () => 120_000,
+      deadlineMs: 8_000,
+      segmentTimeoutMs: 400,
+    });
+    const events = parseSse(await response.text());
+    expect(segmentCalls).toBeGreaterThan(0);
+    expect(Date.now() - started).toBeLessThan(4_000);
     const terminal = events.filter((event) => event.event === "result" || event.event === "error");
     expect(terminal).toHaveLength(1);
   }, 8_000);

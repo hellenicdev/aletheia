@@ -20,7 +20,7 @@ const PHOTO_CREDIT =
   /^(?:photograph|photo|image|caption|credit|φωτογραφία|εικόνα|πηγή)\s*[:：]|^\(?\s*(?:AP|Reuters|AFP|Getty)\s+Photo\b|^Getty Images\b/i;
 
 const GLUED_PROMO =
-  /^.{0,60}?\b(?:decentralize|brighteon)\.tv\b.{0,40}?\bepisode\s*\d+\b(?:\s*[–—|-][^\s.]{0,40})?\s*/i;
+  /^.{0,60}?\b(?:decentralize|brighteon)\.tv\b.{0,40}?\bepisode\s*\d+\b(?:\s*[|–—:-]\s*[^\s.]{0,40})?\s*/i;
 
 /** Remove episode, promo, and show-title lines before sentences are split. */
 export function stripPromoItems(raw: string): string {
@@ -29,8 +29,12 @@ export function stripPromoItems(raw: string): string {
     .map((line) => {
       const trimmed = line.trim();
       if (!trimmed) return line;
-      const glued = trimmed.match(GLUED_PROMO);
-      if (glued && glued[0].length < trimmed.length) return trimmed.slice(glued[0].length);
+      const stripped = stripLeadingShow(trimmed);
+      if (stripped !== trimmed) {
+        const rest = stripped.trim();
+        if (!rest || isPromoLine(rest)) return "";
+        return rest;
+      }
       if (isPromoLine(trimmed)) return "";
       return line;
     })
@@ -39,12 +43,27 @@ export function stripPromoItems(raw: string): string {
     .replace(/\n{3,}/g, "\n\n");
 }
 
+function stripLeadingShow(line: string): string {
+  const glued = line.match(GLUED_PROMO);
+  if (glued && glued[0].length < line.length) return line.slice(glued[0].length);
+  const brand = line.match(/^(?:decentralize|brighteon)\.tv\b\s*(?:[|–—:-]\s*)?/i);
+  if (!brand || brand[0].length >= line.length) return line;
+  const rest = line.slice(brand[0].length).trim();
+  if (
+    rest.split(/\s+/).length >= 8 &&
+    /\b(received|according|said|voted|announced|reported|published|signed|released)\b/i.test(rest)
+  ) {
+    return rest;
+  }
+  return line;
+}
+
 function isPromoLine(text: string): boolean {
   const value = text.replace(/\s+/g, " ").trim();
   if (!value) return false;
   const words = value.split(/\s+/);
-  if (words.length > 24) return false;
-  if (/\b(?:decentralize|brighteon)\.tv\b/i.test(value)) return true;
+  if (/\b(?:decentralize|brighteon)\.tv\b/i.test(value) && words.length <= 40) return true;
+  if (words.length > 40) return false;
   if (!/\bepisode\s*\d+\b/i.test(value)) return false;
   const early = words.slice(0, 4).join(" ");
   if (/\bepisode\s*\d+\b/i.test(early)) return true;
@@ -144,7 +163,7 @@ function isLinkTitle(text: string): boolean {
   if (!value) return false;
   if (isPromoLine(value)) return true;
   if (value.length > 120 || value.length < 12) return false;
-  if (!/[–—]/.test(value)) return false;
+  if (!/[–—|:]/.test(value)) return false;
   if (/,/.test(value)) return false;
   if (/[.!?]/.test(value.slice(0, -1))) return false;
   if (/\b(was|were|is|are|said|says|voted|will|have|has|had|ανακοίνωσε|είπε|δήλωσε)\b/iu.test(value)) {

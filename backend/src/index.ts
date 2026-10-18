@@ -13,6 +13,8 @@ export interface HandlerDeps {
   rate?: RateState;
   /** Test hook. Production uses the analysis deadline. */
   deadlineMs?: number;
+  /** Test hook. Production caps the segmentation call at 45 seconds. */
+  segmentTimeoutMs?: number;
 }
 
 const isolateRate: RateState = {
@@ -129,6 +131,7 @@ export async function handleRequest(
         if (heartbeat) clearInterval(heartbeat);
         if (hardStop) clearTimeout(hardStop);
         if (grace) clearTimeout(grace);
+        deadlineSignal.removeEventListener("abort", onDeadline);
         abort.abort();
         rate.inFlight.count = Math.max(0, rate.inFlight.count - 1);
         try {
@@ -144,18 +147,25 @@ export async function handleRequest(
           if (heartbeat) clearInterval(heartbeat);
         }
       };
-      // Keepalive is scheduled on the stream, not inside the analysis promise.
+      // Keepalive and the deadline are armed before ingest, scrape, or the segment call.
       ping();
       heartbeat = setInterval(ping, 10_000);
 
+      const deadlineSignal = AbortSignal.timeout(deadlineMs);
+      let resolveDeadline: (value: "timeout") => void = () => {};
       const deadline = new Promise<"timeout">((resolve) => {
-        hardStop = setTimeout(() => resolve("timeout"), deadlineMs);
+        resolveDeadline = resolve;
       });
+      const onDeadline = () => resolveDeadline("timeout");
+      if (deadlineSignal.aborted) onDeadline();
+      else deadlineSignal.addEventListener("abort", onDeadline, { once: true });
+      hardStop = setTimeout(onDeadline, deadlineMs);
       const work: Promise<AnalysisResult> = analyze(input, {
         env,
         fetchImpl: deps.fetchImpl,
         signal: abort.signal,
         budgetMs: deadlineMs,
+        segmentTimeoutMs: deps.segmentTimeoutMs,
         onStage: (stage: StageName, status, done, total) => send("stage", { stage, status, done, total }),
         onPreview: (article: ArticlePreview) => send("preview", article),
         onTick: ping,
