@@ -2,7 +2,7 @@ import type { Label, UiLanguage } from "./labels";
 import { LABELS } from "./labels";
 import { degradedClaimsSentence } from "./messages";
 import type { OutletKind } from "./reputation";
-import type { ScoreResult } from "./types";
+import type { ScoreResult, SearchState } from "./types";
 
 export const WEIGHTS = {
   factual: 0.58,
@@ -32,6 +32,10 @@ const CONTRADICTION_PENALTY = 15;
 const CONTRADICTION_CAP = 30;
 const NEUTRAL_FACTUAL = 50;
 const COMMENTARY_FACTUAL = 60;
+/** A thin or failed search is blended toward this prior so one cached hit cannot read as a confident score. */
+const SCORE_PRIOR = NEUTRAL_FACTUAL;
+/** Selected claims checked below this share, or a search that is not ok, make the score provisional. */
+export const PROVISIONAL_COVERAGE = 0.5;
 
 export interface ScoreSegment {
   label: Label;
@@ -59,8 +63,28 @@ export interface ScoreOptions {
   degraded?: boolean;
   claimsVerified?: number;
   claimsTotal?: number;
-  /** Hide factual and sourcing figures when no claim was checked against evidence. */
+  /**
+   * Hide factual and sourcing figures and pull the overall toward a neutral prior.
+   * Set from isProvisionalScore so the flag and the search status stay one rule.
+   */
   provisional?: boolean;
+}
+
+/**
+ * One rule for the provisional flag. Search that is off stays a normal model-only
+ * score. A configured search is provisional when it is not ok, or when fewer than
+ * half of the selected claims were actually checked.
+ */
+export function isProvisionalScore(input: {
+  searchEnabled: boolean;
+  searchState: SearchState;
+  claimsVerified: number;
+  claimsTotal: number;
+}): boolean {
+  if (!input.searchEnabled) return false;
+  if (input.searchState !== "ok") return true;
+  if (input.claimsTotal <= 0) return false;
+  return input.claimsVerified / input.claimsTotal < PROVISIONAL_COVERAGE;
 }
 
 export function emptyCounts(): Record<Label, number> {
@@ -196,6 +220,18 @@ export function aggregateScore(
   }
   if (outlet === "satire") overall = Math.min(overall, SATIRE_CAP);
   if (outlet === "low-credibility") overall = Math.min(overall, LOW_CREDIBILITY_CAP);
+  if (options.provisional) {
+    const verified = options.claimsVerified ?? 0;
+    const total = options.claimsTotal ?? 0;
+    const weight = total > 0 ? clamp(verified / total, 0, 1) : 0;
+    overall = round(SCORE_PRIOR + (overall - SCORE_PRIOR) * weight);
+    if (outlet === "satire") overall = Math.min(overall, SATIRE_CAP);
+    if (outlet === "low-credibility") overall = Math.min(overall, LOW_CREDIBILITY_CAP);
+    if (opinionPiece && factualBasis !== "commentary" && outlet !== "satire" && outlet !== "low-credibility") {
+      overall = Math.min(overall, OPINION_CAP);
+    }
+    if (factualBasis === "commentary") overall = Math.min(overall, COMMENTARY_CAP);
+  }
 
   const poolCounts = emptyCounts();
   for (const segment of coveragePool) poolCounts[segment.label] += 1;

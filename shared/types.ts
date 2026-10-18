@@ -89,8 +89,9 @@ export interface AnalysisResult {
   /** Selected claims that were meant to be checked, up to the search cap. */
   claimsTotal: number;
   /**
-   * True when live search did not check any claim against evidence.
-   * The gauge is provisional and the factual and sourcing sub-scores are empty.
+   * True when live search is not ok, or fewer than half of the selected claims
+   * were checked. The gauge is provisional, the factual and sourcing sub-scores
+   * are empty, and the overall is pulled toward a neutral prior by coverage.
    */
   provisional: boolean;
   meta: {

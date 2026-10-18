@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { aggregateScore, type ScoreSegment } from "./score";
+import { aggregateScore, isProvisionalScore, type ScoreSegment } from "./score";
 
 function segment(
   label: ScoreSegment["label"],
@@ -165,19 +165,99 @@ describe("aggregateScore", () => {
     expect(score.verdict).not.toContain("opinion or commentary");
   });
 
-  it("hides factual and sourcing figures on a provisional score without changing the overall", () => {
+  it("pulls a thin provisional score toward a neutral prior and hides factual figures", () => {
     const shown = aggregateScore(
       [segment("True"), segment("True")],
       { contradictionCount: 0, searchEnabled: true, uiLanguage: "en" },
     );
-    const provisional = aggregateScore(
+    const covered = aggregateScore(
       [segment("True"), segment("True")],
-      { contradictionCount: 0, searchEnabled: true, uiLanguage: "en", provisional: true },
+      {
+        contradictionCount: 0,
+        searchEnabled: true,
+        uiLanguage: "en",
+        provisional: true,
+        claimsVerified: 2,
+        claimsTotal: 2,
+      },
     );
     expect(shown.factualAccuracy).toBe(100);
-    expect(provisional.overall).toBe(shown.overall);
-    expect(provisional.factualAccuracy).toBeNull();
-    expect(provisional.sourcing).toBeNull();
+    expect(shown.overall).toBe(100);
+    expect(covered.overall).toBe(shown.overall);
+    expect(covered.factualAccuracy).toBeNull();
+    expect(covered.sourcing).toBeNull();
+
+    const thin = aggregateScore(
+      [
+        segment("True"),
+        ...Array.from({ length: 11 }, () => ({
+          ...segment("Unverifiable", 0.3, false),
+          countsTowardScore: false,
+        })),
+      ],
+      {
+        contradictionCount: 0,
+        searchEnabled: true,
+        uiLanguage: "en",
+        provisional: true,
+        claimsVerified: 1,
+        claimsTotal: 12,
+      },
+    );
+    expect(thin.factualAccuracy).toBeNull();
+    expect(thin.sourcing).toBeNull();
+    expect(thin.overall).toBe(54);
+    expect(thin.verdict).toContain("54/100");
+  });
+
+  it("does not let a provisional blend lift a satire or low-credibility cap", () => {
+    const satire = aggregateScore([segment("True")], {
+      contradictionCount: 0,
+      searchEnabled: true,
+      uiLanguage: "en",
+      outlet: "satire",
+      provisional: true,
+      claimsVerified: 0,
+      claimsTotal: 9,
+    });
+    const low = aggregateScore([segment("True")], {
+      contradictionCount: 0,
+      searchEnabled: true,
+      uiLanguage: "en",
+      outlet: "low-credibility",
+      provisional: true,
+      claimsVerified: 0,
+      claimsTotal: 9,
+    });
+    expect(satire.overall).toBeLessThanOrEqual(42);
+    expect(low.overall).toBeLessThanOrEqual(44);
+  });
+
+  it("uses one rule for provisional coverage and a search that is not ok", () => {
+    expect(
+      isProvisionalScore({ searchEnabled: false, searchState: "ok", claimsVerified: 0, claimsTotal: 2 }),
+    ).toBe(false);
+    expect(
+      isProvisionalScore({ searchEnabled: true, searchState: "ok", claimsVerified: 12, claimsTotal: 12 }),
+    ).toBe(false);
+    expect(
+      isProvisionalScore({ searchEnabled: true, searchState: "ok", claimsVerified: 6, claimsTotal: 12 }),
+    ).toBe(false);
+    expect(
+      isProvisionalScore({ searchEnabled: true, searchState: "ok", claimsVerified: 1, claimsTotal: 12 }),
+    ).toBe(true);
+    expect(
+      isProvisionalScore({ searchEnabled: true, searchState: "partial", claimsVerified: 1, claimsTotal: 12 }),
+    ).toBe(true);
+    expect(
+      isProvisionalScore({ searchEnabled: true, searchState: "partial", claimsVerified: 1, claimsTotal: 9 }),
+    ).toBe(true);
+    expect(
+      isProvisionalScore({ searchEnabled: true, searchState: "unavailable", claimsVerified: 0, claimsTotal: 12 }),
+    ).toBe(true);
+    expect(
+      isProvisionalScore({ searchEnabled: true, searchState: "ok", claimsVerified: 0, claimsTotal: 0 }),
+    ).toBe(false);
   });
 
   it("returns a zero score for an empty article", () => {

@@ -12,7 +12,7 @@ import {
 } from "../../shared/messages";
 import { claimImportance, compareClaims, tokenOverlap } from "../../shared/rank";
 import { resolveOutlet } from "../../shared/reputation";
-import { aggregateScore } from "../../shared/score";
+import { aggregateScore, isProvisionalScore } from "../../shared/score";
 import { splitPastedTitle, splitSentences } from "../../shared/sentences";
 import { blendTone, combineTone, type Rhetoric } from "../../shared/tone";
 import type {
@@ -516,8 +516,14 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       if (segment.sources.length === 0 && segment.confidence > 0.4) segment.confidence = 0.4;
     }
   }
-  const provisional =
-    searchEnabled && searchStatus.state !== "ok" && ordered.every((segment) => segment.sources.length === 0);
+  const claimsVerified = budgeted.filter((segment) => !cutShort.has(segment.id)).length;
+  const claimsTotal = budgeted.length;
+  const provisional = isProvisionalScore({
+    searchEnabled,
+    searchState: searchStatus.state,
+    claimsVerified,
+    claimsTotal,
+  });
   const outlet = resolveOutlet({
     domain: ingested.sourceDomain,
     genre: segmented.genre,
@@ -539,8 +545,8 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       uiLanguage,
       outlet,
       degraded: cutShort.size > 0,
-      claimsVerified: budgeted.filter((segment) => !cutShort.has(segment.id)).length,
-      claimsTotal: budgeted.length,
+      claimsVerified,
+      claimsTotal,
       provisional,
     },
   );
@@ -560,8 +566,8 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     contradictions,
     truncated: segmented.truncated || ingested.truncated,
     degraded: cutShort.size > 0,
-    claimsVerified: budgeted.filter((segment) => !cutShort.has(segment.id)).length,
-    claimsTotal: budgeted.length,
+    claimsVerified,
+    claimsTotal,
     provisional,
     meta: {
       searchEnabled,

@@ -360,11 +360,51 @@ describe("fetchArticle", () => {
     await expect(
       fetchArticle("https://news.example/story", fetchImpl, "fc-key", undefined, undefined, undefined, "el"),
     ).rejects.toThrow(pageUnreadMessage("el"));
+    const calls: string[] = [];
+    const recording: typeof fetch = async (input, init) => {
+      calls.push(String(input));
+      return fetchImpl(input, init);
+    };
     try {
-      await fetchArticle("https://news.example/story", fetchImpl, "fc-key");
+      await fetchArticle("https://news.example/story", recording, "fc-key");
+      expect.unreachable("both reads should fail");
     } catch (error) {
       expect(error).toBeInstanceOf(HttpError);
-      expect((error as Error).message).not.toMatch(/Firecrawl scrape failed/);
+      const http = error as HttpError;
+      expect(http.message).toBe(pageUnreadMessage("en"));
+      expect(http.message).not.toMatch(/Firecrawl scrape failed/);
+      expect(http.extraction).toBe("direct");
+      expect(http.reason).toMatch(/direct fetch failed: HTTP 503/);
+      expect(http.reason).toMatch(/scrape HTTP 402/);
+      expect(calls.some((url) => url.includes("news.example"))).toBe(true);
     }
+  });
+
+  it("tries the page itself after a scrape 402 and records a browser check", async () => {
+    clearSearchCache();
+    const calls: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.includes("api.firecrawl.dev")) {
+        return new Response(JSON.stringify({ error: "Insufficient credits" }), { status: 402 });
+      }
+      return new Response(
+        `<html><head><title>Just a moment...</title></head><body><p>Just a moment...</p><p>Enable JavaScript and cookies to continue.</p></body></html>`,
+        { status: 200, headers: { "content-type": "text/html" } },
+      );
+    };
+    try {
+      await fetchArticle("https://apnews.com/article/coast-guard", fetchImpl, "fc-key");
+      expect.unreachable("a browser check should fail");
+    } catch (error) {
+      const http = error as HttpError;
+      expect(http.message).toBe(pageUnreadMessage("en"));
+      expect(http.message).not.toMatch(/Firecrawl scrape failed/);
+      expect(http.extraction).toBe("direct");
+      expect(http.reason).toBe("scrape HTTP 402; direct fetch failed: cloudflare challenge");
+    }
+    expect(calls.filter((url) => url.includes("api.firecrawl.dev"))).toHaveLength(1);
+    expect(calls.filter((url) => url.includes("apnews.com"))).toHaveLength(1);
   });
 });

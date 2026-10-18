@@ -61,7 +61,7 @@ export async function handleRequest(
     if (!allowRequest(rate, `${clientKey(request)}:probe`, now(), 10, config.rateWindowMs)) {
       return jsonResponse({ error: "Too many health probes from this network. Try again shortly." }, 429, cors);
     }
-    const probe = await probeUpstreams(env, resolveFetch(deps.fetchImpl));
+    const probe = await probeUpstreams(env, resolveFetch(deps.fetchImpl), deps.now?.());
     return jsonResponse({ ok: probe.llm.ok && probe.search.ok, ...base, probe }, 200, cors);
   }
 
@@ -199,7 +199,7 @@ export async function handleRequest(
           if (!(error instanceof HttpError) && !timedOut) console.error(error);
           const late = await work.catch(() => null);
           if (late) send("result", late);
-          else send("error", { message });
+          else send("error", errorEvent(error, message));
         } finally {
           finish();
         }
@@ -214,6 +214,17 @@ export async function handleRequest(
   headers.set("Content-Type", "text/event-stream; charset=utf-8");
   headers.set("Cache-Control", "no-cache, no-store");
   return new Response(stream, { status: 200, headers });
+}
+
+function errorEvent(
+  error: unknown,
+  message: string,
+): { message: string; extraction?: string; reason?: string } {
+  if (!(error instanceof HttpError)) return { message };
+  const event: { message: string; extraction?: string; reason?: string } = { message };
+  if (error.extraction) event.extraction = error.extraction;
+  if (error.reason) event.reason = error.reason;
+  return event;
 }
 
 function clientKey(request: Request): string {

@@ -1,11 +1,14 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { clearSearchCache } from "../src/firecrawl";
+import { clearProbeCache } from "../src/probe";
 import { handleRequest } from "../src/index";
 import type { RateState } from "../src/limits";
 import { analyze } from "../src/pipeline";
+import { isProvisionalScore } from "../../shared/score";
 
 beforeEach(() => {
   clearSearchCache();
+  clearProbeCache();
 });
 
 const vote = "The council voted 7 to 2 on Monday.";
@@ -478,7 +481,8 @@ describe("analyze", () => {
     expect(result.segments[0]?.explanation.toLowerCase()).toContain("failed");
     expect(result.score.factualAccuracy).toBeNull();
     expect(result.score.sourcing).toBeNull();
-    expect(result.score.overall).toBeGreaterThanOrEqual(55);
+    expect(result.provisional).toBe(true);
+    expect(result.score.overall).toBe(50);
     expect(result.score.verdict).toContain("Only 0 of 3 claims could be verified (");
     expect(result.score.verdict).not.toContain("factual claims were checked");
     expect(result.meta.subrequests.total).toBeLessThanOrEqual(3);
@@ -671,6 +675,80 @@ describe("analyze", () => {
     expect(result.provisional).toBe(true);
     expect(result.score.verdict).toContain("Only 0 of");
     expect(result.meta.subrequests.ingest).toBeGreaterThanOrEqual(2);
+  });
+
+  it("shrinks a partial run when one cached claim is checked and the rest are not", async () => {
+    let searches = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        searches += 1;
+        if (searches === 1) {
+          return new Response(
+            JSON.stringify({
+              success: true,
+              data: { web: [{ url: minutes.url, title: minutes.title, description: minutes.description }] },
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ error: "Insufficient credits" }), { status: 402 });
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(classifyPayload(user, () => ({ claimType: "checkable_factual", note: "A recorded claim." })));
+      }
+      if (system.startsWith("TASK:queries")) {
+        return llmPayload({
+          queries: [
+            { id: "s1", query: "council vote Monday" },
+            { id: "s2", query: "marina fee doubled" },
+            { id: "s3", query: "boats waiting list" },
+          ],
+        });
+      }
+      if (system.startsWith("TASK:verify")) {
+        return llmPayload({
+          results: [
+            {
+              id: "s1",
+              label: "True",
+              confidence: 0.95,
+              explanation: "The minutes record a seven to two vote.",
+              sourceUrls: [minutes.url],
+            },
+          ],
+        });
+      }
+      if (system.startsWith("TASK:consistency")) return llmPayload({ contradictions: [] });
+      throw new Error(system.slice(0, 24));
+    };
+    const facts = [
+      "The council voted 7 to 2 on Monday and published the minutes for residents.",
+      "The marina fee doubled overnight after the harbour master signed the notice.",
+      "Twelve boats remain on the waiting list until the spring season opens.",
+    ].join(" ");
+    const result = await analyze({ text: facts, uiLanguage: "en" }, { env, fetchImpl });
+    expect(searches).toBe(2);
+    expect(result.claimsVerified).toBe(1);
+    expect(result.claimsTotal).toBe(3);
+    expect(result.meta.searchStatus).toEqual({ state: "partial", reason: "out_of_credits" });
+    expect(result.segments.some((segment) => segment.sources.length > 0)).toBe(true);
+    expect(result.provisional).toBe(
+      isProvisionalScore({
+        searchEnabled: true,
+        searchState: result.meta.searchStatus.state,
+        claimsVerified: result.claimsVerified,
+        claimsTotal: result.claimsTotal,
+      }),
+    );
+    expect(result.provisional).toBe(true);
+    expect(result.score.factualAccuracy).toBeNull();
+    expect(result.score.sourcing).toBeNull();
+    expect(result.score.overall).toBe(67);
+    expect(result.score.verdict).toContain("67/100");
   });
 
   it("does not cite an AP reprint that lacks a byline", async () => {
@@ -1050,6 +1128,82 @@ describe("handleRequest", () => {
     expect(body.probe.search.error).toContain("search: HTTP 401");
     expect(JSON.stringify(body)).not.toContain("test-key");
     expect(JSON.stringify(body)).not.toContain("firecrawl-test-key");
+  });
+
+  it("reports a live search 402 as out_of_credits and reuses that probe", async () => {
+    let searches = 0;
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        searches += 1;
+        return new Response(JSON.stringify({ error: "Insufficient credits" }), { status: 402 });
+      }
+      return new Response(
+        JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: '{"ok":true}' } }] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    const rate = () => ({ buckets: new Map(), inFlight: { count: 0 } });
+    const probeAt = async (now: number) => {
+      const response = await handleRequest(new Request("https://worker.test/api/health?probe=1"), env, {
+        fetchImpl,
+        rate: rate(),
+        now: () => now,
+      });
+      expect(response.status).toBe(200);
+      return (await response.json()) as {
+        ok: boolean;
+        probe: { search: { ok: boolean; status: number; reason?: string; error?: string } };
+      };
+    };
+
+    const first = await probeAt(20_000);
+    expect(first.ok).toBe(false);
+    expect(first.probe.search).toMatchObject({ ok: false, status: 402, reason: "out_of_credits" });
+    expect(first.probe.search.error).toMatch(/402|insufficient credits/i);
+    expect(searches).toBe(1);
+
+    const cached = await probeAt(50_000);
+    expect(cached.probe.search.reason).toBe("out_of_credits");
+    expect(searches).toBe(1);
+
+    const again = await probeAt(20_000 + 61_000);
+    expect(again.probe.search.reason).toBe("out_of_credits");
+    expect(searches).toBe(2);
+  });
+
+  it("records a direct fetch on the error event when scrape and the page both fail", async () => {
+    const calls: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.includes("api.firecrawl.dev")) {
+        return new Response(JSON.stringify({ error: "Insufficient credits" }), { status: 402 });
+      }
+      return new Response("Just a moment", { status: 403, headers: { "content-type": "text/html" } });
+    };
+    const response = await handleRequest(
+      new Request("https://worker.test/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: "http://127.0.0.1:5173" },
+        body: JSON.stringify({ url: "https://apnews.com/article/coast-guard", uiLanguage: "en" }),
+      }),
+      env,
+      { fetchImpl, rate: { buckets: new Map(), inFlight: { count: 0 } }, now: () => 30_000 },
+    );
+    expect(response.status).toBe(200);
+    const events = parseSse(await response.text());
+    const error = events.find((event) => event.event === "error")?.data as {
+      message?: string;
+      extraction?: string;
+      reason?: string;
+    };
+    expect(error.message).toBe("This page could not be read. Paste the article text instead.");
+    expect(error.message).not.toMatch(/Firecrawl scrape failed/);
+    expect(error.extraction).toBe("direct");
+    expect(error.reason).toBe("scrape HTTP 402; direct fetch failed: HTTP 403");
+    expect(calls.some((url) => url.includes("apnews.com"))).toBe(true);
+    expect(events.some((event) => event.event === "result")).toBe(false);
   });
 
   it("reports the field, finish reason, and a short preview of Beam output", async () => {

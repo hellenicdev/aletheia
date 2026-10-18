@@ -9,16 +9,27 @@ export interface ProbeCheck {
   ok: boolean;
   status: number | null;
   error?: string;
+  /** Set when Firecrawl rejects the probe because credits are exhausted. */
+  reason?: "out_of_credits";
   finishReason?: string | null;
   field?: string | null;
   preview?: string;
 }
 
+/** Long enough to stop a health poll from billing a search on every hit. */
+const PROBE_TTL_MS = 60_000;
+let searchProbe: { at: number; check: ProbeCheck } | null = null;
+
+export function clearProbeCache(): void {
+  searchProbe = null;
+}
+
 export async function probeUpstreams(
   env: Env,
   fetchImpl: typeof fetch,
+  now = Date.now(),
 ): Promise<{ llm: ProbeCheck; search: ProbeCheck }> {
-  const [llm, search] = await Promise.all([probeLlm(env, fetchImpl), probeSearch(env, fetchImpl)]);
+  const [llm, search] = await Promise.all([probeLlm(env, fetchImpl), probeSearch(env, fetchImpl, now)]);
   return { llm, search };
 }
 
@@ -77,9 +88,11 @@ async function probeLlm(env: Env, fetchImpl: typeof fetch): Promise<ProbeCheck> 
   }
 }
 
-async function probeSearch(env: Env, fetchImpl: typeof fetch): Promise<ProbeCheck> {
+async function probeSearch(env: Env, fetchImpl: typeof fetch, now: number): Promise<ProbeCheck> {
   const apiKey = env.FIRECRAWL_API_KEY?.trim() ?? "";
   if (!apiKey) return { ok: false, status: null, error: "search: FIRECRAWL_API_KEY is not configured" };
+  if (searchProbe && now - searchProbe.at < PROBE_TTL_MS) return searchProbe.check;
+  let check: ProbeCheck;
   try {
     await searchWeb({
       apiKey,
@@ -87,11 +100,21 @@ async function probeSearch(env: Env, fetchImpl: typeof fetch): Promise<ProbeChec
       language: "en",
       fetchImpl,
       limit: 1,
+      bypassCache: true,
     });
-    return { ok: true, status: 200 };
+    check = { ok: true, status: 200 };
   } catch (error) {
-    return asCheck("search", error);
+    check = asCheck("search", error);
+    if (isOutOfCredits(error)) check = { ...check, reason: "out_of_credits" };
   }
+  searchProbe = { at: now, check };
+  return check;
+}
+
+function isOutOfCredits(error: unknown): boolean {
+  if (error instanceof UpstreamError && error.status === 402) return true;
+  const message = error instanceof Error ? error.message : "";
+  return /HTTP\s*402\b|insufficient credits/i.test(message);
 }
 
 function asCheck(source: "llm" | "search", error: unknown): ProbeCheck {

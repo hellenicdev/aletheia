@@ -124,7 +124,10 @@ export function extractArticle(
         ? clusterText
         : bodyText;
 
-  if (isInterstitial(html) || text.length < LIMITS.minArticleChars) {
+  if (isInterstitial(html)) {
+    throw new HttpError(422, "The page returned a browser check instead of the article. Paste the text instead.");
+  }
+  if (text.length < LIMITS.minArticleChars) {
     throw new HttpError(
       422,
       "Could not find enough article text on that page. Paste the text instead.",
@@ -159,6 +162,7 @@ export async function fetchArticle(
 ): Promise<ExtractedArticle> {
   assertPublicHttpUrl(rawUrl);
   const key = apiKey?.trim();
+  let scrapeNote = "";
   if (key) {
     try {
       const scraped = await scrapeArticle({
@@ -195,10 +199,12 @@ export async function fetchArticle(
             opinionCueFromHtml(scraped.rawHtml ?? ""),
         };
       }
-      console.error("scrape returned no article text");
+      scrapeNote = "scrape returned no article text";
+      console.error(scrapeNote);
     } catch (error) {
       if (isDeadline(error) || isBudgetExhausted(error)) throw error;
-      console.error(error instanceof Error ? error.message : "scrape failed");
+      scrapeNote = error instanceof Error ? error.message : "scrape failed";
+      console.error(scrapeNote);
     }
   }
 
@@ -209,9 +215,26 @@ export async function fetchArticle(
     if (isDeadline(error) || isBudgetExhausted(error)) throw error;
     if (!key) throw error;
     if (error instanceof HttpError && (error.status === 400 || error.status === 413)) throw error;
-    console.error(error instanceof Error ? error.message : "direct fetch failed");
-    throw new HttpError(422, pageUnreadMessage(uiLanguage));
+    const reason = directFailureReason(error, scrapeNote);
+    console.error(JSON.stringify({ extraction: "direct", directAttempted: true, reason }));
+    throw new HttpError(422, pageUnreadMessage(uiLanguage), { extraction: "direct", reason });
   }
+}
+
+function directFailureReason(error: unknown, scrapeNote: string): string {
+  const message = error instanceof Error ? error.message : "request failed";
+  let why = message.replace(/\s+/g, " ").trim().slice(0, 120) || "request failed";
+  if (/browser check|just a moment|cloudflare|enable javascript/i.test(message)) why = "cloudflare challenge";
+  else {
+    const status = message.match(/status (\d+)/i);
+    if (status) why = `HTTP ${status[1]}`;
+    else if (/not enough article text|could not find enough/i.test(message)) why = "not enough article text";
+    else if (/timed out|aborted/i.test(message)) why = "timed out";
+  }
+  const scrapeStatus = scrapeNote.match(/\((\d{3})\)/)?.[1];
+  const scrape = scrapeStatus ? `scrape HTTP ${scrapeStatus}` : "";
+  const direct = `direct fetch failed: ${why}`;
+  return scrape ? `${scrape}; ${direct}` : direct;
 }
 
 function htmlBody(
