@@ -1498,6 +1498,37 @@ describe("analyze", () => {
       else (globalThis as { caches?: unknown }).caches = previous;
     }
   });
+
+  it("searches a headline again without the outlet name", async () => {
+    const queries: string[] = [];
+    const headline =
+      "Associated Press sixteen people rescued 140 miles west of Ensenada after the boat capsized in the Pacific.";
+    const text = `Associated Press sixteen people rescued\n\n${headline} The crew stayed out until dawn and returned with the passengers.`;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        const body = JSON.parse(String(init?.body)) as { query?: string };
+        queries.push(body.query ?? "");
+        return new Response(JSON.stringify({ success: true, data: { web: [] } }), { status: 200 });
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(classifyPayload(user, () => ({ claimType: "checkable_factual", note: "A recorded claim." })));
+      }
+      if (system.startsWith("TASK:queries")) {
+        return llmPayload({ queries: [] });
+      }
+      if (system.startsWith("TASK:verify") || system.startsWith("TASK:consistency")) {
+        return llmPayload({ contradictions: [], results: [] });
+      }
+      throw new Error(system.slice(0, 24));
+    };
+    await analyze({ text, uiLanguage: "en" }, { env, fetchImpl });
+    expect(queries.some((query) => /associated press/i.test(query))).toBe(true);
+    expect(queries.some((query) => !/associated press/i.test(query) && /ensenada/i.test(query))).toBe(true);
+  });
 });
 
 describe("handleRequest", () => {
@@ -1799,6 +1830,40 @@ describe("handleRequest", () => {
     };
     expect(result.segments[0].label).toBe("True");
     expect(rate.inFlight.count).toBe(0);
+  });
+
+  it("keeps pinging during a slow fetch and finishes the stream with waitUntil", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { fetchImpl: scripted } = scriptedFetch();
+    const fetchImpl: typeof fetch = async (input, init) => {
+      if (String(input).includes("/chat/completions")) await gate;
+      return scripted(input, init);
+    };
+    let settled = false;
+    const waited: Promise<unknown>[] = [];
+    const response = await handleRequest(post(article), env, {
+      fetchImpl,
+      rate: { buckets: new Map(), inFlight: { count: 0 } },
+      now: () => 2_000,
+      pingMs: 25,
+      waitUntil: (promise) => {
+        waited.push(promise.then(() => {
+          settled = true;
+        }));
+      },
+    });
+    expect(waited).toHaveLength(1);
+    const bodyPromise = response.text();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    release();
+    const body = await bodyPromise;
+    expect(body.split(": ping").length - 1).toBeGreaterThanOrEqual(2);
+    expect(body).toContain("event: result");
+    await Promise.all(waited);
+    expect(settled).toBe(true);
   });
 
   it("rate limits repeated analyses", async () => {

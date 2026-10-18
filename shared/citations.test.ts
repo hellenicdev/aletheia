@@ -718,6 +718,120 @@ describe("relevance and contradiction", () => {
   });
 });
 
+describe("syndicated copies", () => {
+  const rescue =
+    "Sixteen people were rescued from a panga 140 miles west of Ensenada after the vessel began taking on water in heavy seas.";
+
+  it("treats a republished paragraph as a copy, including on a known syndicator", () => {
+    expect(
+      isSyndicatedCopy(
+        {
+          url: "https://www.mymotherlode.com/news/local/rescue",
+          title: "Coast Guard rescue",
+          snippet: rescue,
+        },
+        "Coast Guard rescue",
+        `${rescue} The search continued until dawn.`,
+        "apnews.com",
+      ),
+    ).toBe(true);
+    const cited = applyEvidence({
+      label: "True",
+      confidence: 0.9,
+      explanation: "A local site reported the rescue.",
+      claimText: "Sixteen people were rescued 140 miles west of Ensenada.",
+      sourceUrls: ["https://www.mymotherlode.com/news/local/rescue"],
+      evidence: [
+        {
+          url: "https://www.mymotherlode.com/news/local/rescue",
+          title: "Coast Guard rescue",
+          snippet: rescue,
+        },
+      ],
+      searchEnabled: true,
+      uiLanguage: "en",
+      articleDomain: "apnews.com",
+      articleTitle: "Coast Guard rescue",
+      articleText: `${rescue} The search continued until dawn.`,
+    });
+    expect(cited.label).toBe("Unverifiable");
+    expect(cited.sources).toEqual([]);
+  });
+
+  it("does not confirm a quote that a Greek rewrite repeats", () => {
+    const article =
+      "Η αρχαιολόγος είπε ότι είμαστε οι πρώτοι άνθρωποι που αγγίζουμε αυτά τα αντικείμενα μετά από χιλιάδες χρόνια στη θάλασσα.";
+    const quote =
+      "Είμαστε οι πρώτοι άνθρωποι που αγγίζουμε αυτά τα αντικείμενα μετά από χιλιάδες χρόνια στη θάλασσα.";
+    const copy = applyEvidence({
+      label: "True",
+      confidence: 0.9,
+      explanation: "Another site repeated the archaeologist.",
+      claimText: quote,
+      sourceUrls: ["https://www.alfavita.gr/koinonia/navagio"],
+      evidence: [
+        {
+          url: "https://www.alfavita.gr/koinonia/navagio",
+          title: "Ναυάγιο",
+          snippet: `${quote} αναφέρει η Καθημερινή.`,
+        },
+      ],
+      searchEnabled: true,
+      uiLanguage: "el",
+      articleDomain: "kathimerini.gr",
+      articleTitle: "Ναυάγιο στην Αττάλεια",
+      articleText: article,
+    });
+    expect(copy.label).toBe("Unverifiable");
+    expect(copy.sources).toEqual([]);
+    const liberal = applyEvidence({
+      label: "True",
+      confidence: 0.8,
+      explanation: "A rewrite carried the agency copy.",
+      claimText: quote,
+      sourceUrls: ["https://www.liberal.gr/news/navagio"],
+      evidence: [
+        {
+          url: "https://www.liberal.gr/news/navagio",
+          title: "Το ναυάγιο",
+          snippet: "Το δημοσίευμα της Καθημερινής μεταφέρει τη δήλωση χωρίς νέα στοιχεία από το πρακτορείο.",
+        },
+      ],
+      searchEnabled: true,
+      uiLanguage: "el",
+      articleDomain: "kathimerini.gr",
+      articleTitle: "Ναυάγιο στην Αττάλεια",
+      articleText: "Καθημερινή. Η ανασκαφή συνεχίστηκε την Τρίτη με την ομάδα στο πεδίο.",
+    });
+    expect(liberal.label).toBe("Unverifiable");
+  });
+
+  it("keeps an independent account that does not repeat the article", () => {
+    const applied = applyEvidence({
+      label: "True",
+      confidence: 0.9,
+      explanation: "The Los Angeles Times reported the rescue.",
+      claimText: "Sixteen people were rescued 140 miles west of Ensenada.",
+      sourceUrls: ["https://www.latimes.com/california/rescue"],
+      evidence: [
+        {
+          url: "https://www.latimes.com/california/rescue",
+          title: "Coast Guard reaches a boat off Ensenada",
+          snippet:
+            "Local officials said the crew brought sixteen people ashore about 140 miles from the Baja coast.",
+        },
+      ],
+      searchEnabled: true,
+      uiLanguage: "en",
+      articleDomain: "apnews.com",
+      articleTitle: "Sixteen people rescued off Ensenada",
+      articleText: `${rescue} The search continued until dawn.`,
+    });
+    expect(applied.label).toBe("True");
+    expect(applied.sources.map((source) => source.url)).toEqual(["https://www.latimes.com/california/rescue"]);
+  });
+});
+
 describe("canonicalUrl", () => {
   it("ignores a trailing slash and fragment", () => {
     expect(canonicalUrl("https://example.com/minutes/#vote")).toBe(

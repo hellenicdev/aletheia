@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { clearTavilyCache, createTavilyGate, extractTavily, searchTavily } from "../src/tavily";
+import { PIPELINE_VERSION } from "../src/version";
+import { clearTavilyCache, createTavilyGate, extractTavily, searchTavily, tavilyCacheKey } from "../src/tavily";
 
 describe("searchTavily", () => {
   it("maps a news result and trims raw content when the snippet is thin", async () => {
@@ -92,11 +93,59 @@ describe("searchTavily", () => {
       topic: "news",
       includeRawContent: true,
     });
-    expect(hits[0]?.snippet).not.toContain("5.4 million");
-    expect(hits[1]?.snippet).toContain("Official figures say 5.4 million");
-    expect(hits[1]?.snippet.length).toBeLessThanOrEqual(1500);
-    expect(hits[2]?.snippet).toContain("5.4 million");
-    expect(hits[3]?.snippet).not.toContain("5.4 million");
+    const byUrl = new Map(hits.map((hit) => [hit.url, hit.snippet]));
+    expect(hits.map((hit) => hit.url)).toEqual([
+      "https://example.com/copy",
+      "https://example.com/other",
+      "https://example.com/third",
+      "https://example.com/vaping",
+    ]);
+    expect(byUrl.get("https://example.com/copy")).toContain("5.4 million");
+    expect(byUrl.get("https://example.com/other")).not.toContain("5.4 million");
+    expect(byUrl.get("https://example.com/third")).toContain("5.4 million");
+    expect(byUrl.get("https://example.com/vaping")).not.toContain("5.4 million");
+    expect(hits.filter((hit) => hit.snippet.includes("5.4 million"))).toHaveLength(2);
+  });
+
+  it("sorts equal-score results by URL and reuses them for a day", async () => {
+    clearTavilyCache();
+    let calls = 0;
+    const fetchImpl: typeof fetch = async () => {
+      calls += 1;
+      return new Response(
+        JSON.stringify({
+          results: [
+            { title: "Zed", url: "https://example.com/z", content: "Zed reported the harbour fee after a review.", score: 0.2 },
+            { title: "Aye", url: "https://example.com/a", content: "Aye reported the harbour fee after a review.", score: 0.9 },
+            { title: "Mid", url: "https://example.com/m", content: "Mid reported the harbour fee after a review.", score: 0.9 },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    const first = await searchTavily({
+      apiKey: "tavily-test-key",
+      query: "harbour fee stable",
+      fetchImpl,
+      topic: "news",
+    });
+    const second = await searchTavily({
+      apiKey: "tavily-test-key",
+      query: "harbour fee stable",
+      fetchImpl,
+      topic: "news",
+    });
+    expect(calls).toBe(1);
+    expect(first.map((hit) => hit.url)).toEqual([
+      "https://example.com/a",
+      "https://example.com/m",
+      "https://example.com/z",
+    ]);
+    expect(second.map((hit) => hit.url)).toEqual(first.map((hit) => hit.url));
+    expect(tavilyCacheKey("news", "harbour fee stable")).toBe(
+      `tavily:v${PIPELINE_VERSION}:news:harbour fee stable`,
+    );
+    expect(tavilyCacheKey("news", "harbour fee stable", "11")).not.toBe(tavilyCacheKey("news", "harbour fee stable"));
   });
 
   it("stops further calls after HTTP 432 and does not echo the key", async () => {

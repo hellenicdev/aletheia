@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deterministicQuery, queryCacheKey, stabilizeQuery } from "./query";
+import { deterministicQuery, queryCacheKey, stabilizeQuery, withoutOutletName } from "./query";
 
 describe("stabilizeQuery", () => {
   it("keeps the named entity and the figure the model dropped", () => {
@@ -31,6 +31,17 @@ describe("stabilizeQuery", () => {
     const query = deterministicQuery(claim, "en");
     expect(query).toMatch(/[\u0370-\u03FF]/);
     expect(query).toMatch(/ναυάγιο|αρχαιότερο|Αττάλειας|Μεσόγειο/);
+  });
+
+  it("drops the outlet name from a headline query and keeps the event", () => {
+    const english = withoutOutletName("Associated Press sixteen people rescued 140 miles west Ensenada");
+    expect(english.toLowerCase()).not.toMatch(/associated press|\bap\b/);
+    expect(english).toMatch(/sixteen/i);
+    expect(english).toMatch(/Ensenada/);
+    const greek = withoutOutletName("Καθημερινή αρχαιότερο ναυάγιο Αττάλεια Μεσόγειο");
+    expect(greek).not.toMatch(/Καθημερινή/);
+    expect(greek).toMatch(/ναυάγιο/);
+    expect(withoutOutletName("council voted 7 to 2 Monday")).toBe("council voted 7 to 2 Monday");
   });
 
   it("leaves a query that already has the entity and the figures", () => {

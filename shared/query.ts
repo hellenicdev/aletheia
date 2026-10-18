@@ -41,6 +41,47 @@ export function queryCacheKey(claim: string, version: string): string {
   return `query:v${version}:${claim.replace(/\s+/g, " ").trim().toLowerCase()}`;
 }
 
+const OUTLET_PHRASES = [
+  "associated press",
+  "ap news",
+  "agence france-presse",
+  "bbc news",
+  "the guardian",
+  "kathimerini",
+  "καθημερινή",
+  "καθημερινη",
+  "alfavita",
+  "ανα-μπα",
+  "απε-μπε",
+  "απε μπε",
+  "ana-mpa",
+  "ana mpa",
+  "reuters",
+  "guardian",
+  "bbc",
+];
+
+/**
+ * Headline searches that name the outlet mostly return its syndications.
+ * The same query without that name can reach a different newsroom.
+ */
+export function withoutOutletName(query: string): string {
+  let text = ` ${query.replace(/\s+/g, " ").trim()} `;
+  const phrases = [...OUTLET_PHRASES].sort((a, b) => b.length - a.length);
+  for (const phrase of phrases) {
+    const pattern = new RegExp(`(?:^|\\s)${escapeRegExp(phrase)}(?=\\s|$)`, "giu");
+    text = text.replace(pattern, " ");
+  }
+  text = text.replace(/(^|\s)(?:AP|ΑΠΕ)(?=\s|$)/g, " ");
+  const next = boundQuery(text);
+  if (next.split(/\s+/).filter(Boolean).length < 3) return boundQuery(query);
+  return next;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /**
  * Retrieval is unstable when the model drops the number or switches a Greek
  * claim into English. Put the named entity and any figure first, and rebuild

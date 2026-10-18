@@ -1,3 +1,5 @@
+import { LIMITS } from "./limits";
+
 /** Raised when the analysis deadline aborts a wait that is independent of the in-flight fetch. */
 export function deadlineReached(): Error {
   const error = new Error("The analysis deadline was reached.");
@@ -7,6 +9,52 @@ export function deadlineReached(): Error {
 
 export function isDeadline(error: unknown): boolean {
   return error instanceof Error && error.message === "The analysis deadline was reached.";
+}
+
+/** Clamp a per-request timeout into the 12–15s band unless the caller asked for less. */
+export function capOutbound(ms?: number): number {
+  const cap = LIMITS.outboundTimeoutMs;
+  if (ms == null || !Number.isFinite(ms)) return cap;
+  return Math.min(cap, Math.max(250, ms));
+}
+
+/**
+ * A native timer. Pass this signal itself to fetch.
+ * A signal built in JavaScript does not cancel a hung worker fetch.
+ */
+export function fetchSignal(ms?: number): AbortSignal {
+  return AbortSignal.timeout(capOutbound(ms));
+}
+
+/** A hung response body must not outlive the fetch timeout. This is not the analysis deadline. */
+export function readBody(response: Response, parent?: AbortSignal, ms?: number): Promise<string> {
+  const signal = fetchSignal(ms);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (run: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onTimeout);
+      parent?.removeEventListener("abort", onParent);
+      run();
+    };
+    const onTimeout = () => finish(() => reject(new Error("The request timed out.")));
+    const onParent = () => finish(() => reject(deadlineReached()));
+    if (signal.aborted) {
+      onTimeout();
+      return;
+    }
+    if (parent?.aborted) {
+      onParent();
+      return;
+    }
+    signal.addEventListener("abort", onTimeout, { once: true });
+    parent?.addEventListener("abort", onParent, { once: true });
+    response.text().then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
 }
 
 /** Abort when any input aborts. The fetch call may ignore its signal; callers still race this one. */
