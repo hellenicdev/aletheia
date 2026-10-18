@@ -628,7 +628,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     confidence: segment.confidence,
     hasValidSource: segment.sources.length > 0,
     tone: blendTone(segment.text, rhetoricOf(segment.label, draftById.get(segment.id)?.claimType)),
-    inCoverage: !overBudget.has(segment.id) && !echoOnly.has(segment.id),
+    inCoverage: !overBudget.has(segment.id),
     countsAsGap: overBudget.has(segment.id),
     countsTowardScore: !cutShort.has(segment.id),
   }));

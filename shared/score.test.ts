@@ -349,20 +349,51 @@ describe("aggregateScore", () => {
     expect(checked.counts.Unverifiable).toBe(12);
   });
 
-  it("uses one coverage count and leaves an echo-only claim out of it", () => {
+  it("keeps an echo-only claim in the coverage denominator as uncovered", () => {
     const segments = [
       segment("True"),
       segment("Unverifiable", 0.4, true),
-      { ...segment("Unverifiable", 0.3, false), inCoverage: false, countsAsGap: false },
+      segment("Unverifiable", 0.3, false),
     ];
-    expect(coverageOf(segments)).toEqual({ verified: 1, covered: 2, total: 2 });
+    expect(coverageOf(segments)).toEqual({ verified: 1, covered: 2, total: 3 });
     const score = aggregateScore(segments, {
       contradictionCount: 0,
       searchEnabled: true,
       uiLanguage: "en",
     });
-    expect(score.verdict).toContain("1 of 2");
+    expect(score.verdict).toContain("1 of 3");
     expect(score.verdict).not.toContain("outside this search");
+    const dropped = aggregateScore(segments.slice(0, 2), {
+      contradictionCount: 0,
+      searchEnabled: true,
+      uiLanguage: "en",
+    });
+    expect(score.overall).toBeLessThan(dropped.overall);
+  });
+
+  it("marks a handful of sourced claims provisional when copies stay in the total", () => {
+    const sourced = [
+      segment("True"),
+      segment("True"),
+      segment("True"),
+      segment("Unverifiable", 0.8, true),
+    ];
+    const copies = Array.from({ length: 8 }, () => segment("Unverifiable", 0.35, false));
+    expect(coverageOf([...sourced, ...copies])).toEqual({ verified: 3, covered: 4, total: 12 });
+    expect(
+      isProvisionalScore({ searchEnabled: true, searchState: "ok", claimsCovered: 4, claimsTotal: 12 }),
+    ).toBe(true);
+    const score = aggregateScore([...sourced, ...copies], {
+      contradictionCount: 0,
+      searchEnabled: true,
+      uiLanguage: "en",
+      claimsCovered: 4,
+      claimsTotal: 12,
+      claimsVerified: 3,
+      provisional: true,
+    });
+    expect(score.overall).toBeGreaterThanOrEqual(60);
+    expect(score.overall).toBeLessThanOrEqual(85);
   });
 
   it("uses singular grammar when one claim was outside the search", () => {

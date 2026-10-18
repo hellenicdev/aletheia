@@ -95,12 +95,56 @@ export function applyReserve(book: RateBook, input: ReserveInput): { book: RateB
   return { book: next, decision: { ok: true, code: "ok", retryAfter: 0 } };
 }
 
+/** Credit cap only. The per-IP Durable Object does not charge credits. */
+export function chargeCredits(
+  book: RateBook,
+  input: { now: number; credits: number; dailyCreditCap: number; monthlyCreditCap?: number },
+): { book: RateBook; decision: RateDecision } {
+  const next = structuredClone(book);
+  rollCredits(next, input.now);
+  const monthlyCap = input.monthlyCreditCap ?? TAVILY_MONTHLY_CREDITS;
+  if (input.credits > 0 && next.creditsMonthUsed + input.credits > monthlyCap) {
+    return {
+      book: next,
+      decision: { ok: false, code: "tavily_monthly", retryAfter: secondsUntilUtcMonth(input.now) },
+    };
+  }
+  if (input.credits > 0 && next.creditsUsed + input.credits > input.dailyCreditCap) {
+    return {
+      book: next,
+      decision: { ok: false, code: "tavily_daily", retryAfter: secondsUntilUtcMidnight(input.now) },
+    };
+  }
+  if (input.credits > 0) {
+    next.creditsUsed += input.credits;
+    next.creditsMonthUsed += input.credits;
+  }
+  return { book: next, decision: { ok: true, code: "ok", retryAfter: 0 } };
+}
+
 export function applyRelease(book: RateBook, ip: string, now: number): RateBook {
   const next = prune(structuredClone(book), now);
   const ledger = next.ips[ip];
   if (!ledger) return next;
   ledger.inFlightUntil = 0;
   return next;
+}
+
+/** Drop the reservation taken before a credit charge was refused or failed. */
+export function applyRevert(book: RateBook, ip: string, now: number): RateBook {
+  const next = structuredClone(book);
+  const ledger = next.ips[ip];
+  if (!ledger) return next;
+  removeOnce(ledger.recent, now);
+  removeOnce(ledger.day, now);
+  ledger.inFlightUntil = 0;
+  if (ledger.recent.length === 0 && ledger.day.length === 0) delete next.ips[ip];
+  return next;
+}
+
+function removeOnce(values: number[], hit: number): void {
+  const index = values.lastIndexOf(hit);
+  if (index >= 0) values.splice(index, 1);
 }
 
 export interface RateGate {

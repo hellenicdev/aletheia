@@ -4,6 +4,7 @@ import { focusPassage, passageAddsFigure, passageMissesFigure } from "../../shar
 import { isRecord } from "../../shared/json";
 import { BudgetExhausted, isBudgetExhausted } from "./budget";
 import { capOutbound, deadlineReached, fetchSignal, isDeadline, raceAbort, readBody } from "./deadline";
+import { currentPipelineCache, type ResultCache } from "./persistentCache";
 import { PIPELINE_VERSION } from "./version";
 import { UpstreamError, redactSecret } from "./errors";
 
@@ -311,14 +312,8 @@ function isStoredHit(value: unknown): value is StoredHit {
   return typeof value.content === "string" && typeof value.raw === "string";
 }
 
-interface ResultCache {
-  match(request: Request): Promise<Response | undefined>;
-  put(request: Request, response: Response): Promise<void>;
-}
-
 function resultCache(): ResultCache | null {
-  const host = globalThis as unknown as { caches?: { default?: ResultCache } };
-  return host.caches?.default ?? null;
+  return currentPipelineCache();
 }
 
 async function cacheRequest(key: string): Promise<Request> {

@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { AnalysisResult } from "../../shared/types";
+import { analysisCacheUrl } from "../src/analysisCache";
 import { handleRequest } from "../src/index";
 import { LIMITS } from "../src/limits";
-import { CacheRateGate } from "../src/rateLimiter";
+import { bindPipelineCache, cacheStorageKey } from "../src/persistentCache";
+import { DurableRateGate, IpRateLimiter, PipelineCache, TavilyCredits } from "../src/rateLimiter";
 import {
+  IN_FLIGHT_MS,
   IP_BURST_LIMIT,
   IP_DAILY_LIMIT,
   MemoryRateGate,
@@ -139,33 +142,93 @@ describe("analysis rate gate", () => {
     expect(gate.book.creditsMonthUsed).toBe(TAVILY_CREDITS_PER_ANALYSIS);
   });
 
-  it("shares the credit book through the cache", async () => {
-    const cache = new Map<string, string>();
-    const bookCache = {
-      async match(request: Request) {
-        const body = cache.get(request.url);
-        return body ? new Response(body) : undefined;
-      },
-      async put(request: Request, response: Response) {
-        cache.set(request.url, await response.text());
-      },
-    };
+  it("shares one credit ledger and stops at the daily and monthly caps", async () => {
+    const credits = new TavilyCredits({ storage: sqliteStore() });
     const now = Date.UTC(2026, 9, 18, 12, 0, 0);
-    const first = new CacheRateGate(bookCache);
-    expect(
-      (
-        await first.reserve({
-          ip: "203.0.113.8",
-          now,
-          credits: TAVILY_CREDITS_PER_ANALYSIS,
-          dailyCreditCap: TAVILY_DAILY_CREDITS,
-        })
-      ).ok,
-    ).toBe(true);
-    const second = new CacheRateGate(bookCache);
-    await second.release("203.0.113.8", now);
-    const stored = JSON.parse(cache.values().next().value as string) as { creditsUsed: number };
-    expect(stored.creditsUsed).toBe(TAVILY_CREDITS_PER_ANALYSIS);
+    let used = 0;
+    while (used < TAVILY_DAILY_CREDITS) {
+      const response = await credits.fetch(creditRequest({ now, credits: TAVILY_CREDITS_PER_ANALYSIS }));
+      expect((await response.json()).ok).toBe(true);
+      used += TAVILY_CREDITS_PER_ANALYSIS;
+    }
+    const blocked = await credits.fetch(creditRequest({ now: now + 1_000, credits: TAVILY_CREDITS_PER_ANALYSIS }));
+    expect((await blocked.json()).code).toBe("tavily_daily");
+
+    const month = new TavilyCredits({ storage: sqliteStore() });
+    const start = Date.UTC(2026, 9, 1, 0, 0, 0);
+    let monthUsed = 0;
+    while (monthUsed + TAVILY_CREDITS_PER_ANALYSIS <= TAVILY_MONTHLY_CREDITS) {
+      const response = await month.fetch(
+        creditRequest({ now: start, credits: TAVILY_CREDITS_PER_ANALYSIS, dailyCreditCap: 10_000 }),
+      );
+      expect((await response.json()).ok).toBe(true);
+      monthUsed += TAVILY_CREDITS_PER_ANALYSIS;
+    }
+    expect(monthUsed).toBe(948);
+    const monthBlocked = await month.fetch(
+      creditRequest({ now: start, credits: TAVILY_CREDITS_PER_ANALYSIS, dailyCreditCap: 10_000 }),
+    );
+    expect((await monthBlocked.json()).code).toBe("tavily_monthly");
+  });
+
+  it("returns the IP slot when the credit cap refuses the analysis", async () => {
+    const namespaces = durableNamespaces();
+    const gate = new DurableRateGate(namespaces.IP_LIMITER, namespaces.TAVILY_CREDITS);
+    const now = Date.UTC(2026, 9, 18, 12, 0, 0);
+    for (let i = 0; i < 10; i += 1) {
+      const decision = await gate.reserve({
+        ip: `credit-${i}`,
+        now,
+        credits: TAVILY_CREDITS_PER_ANALYSIS,
+        dailyCreditCap: TAVILY_DAILY_CREDITS,
+        monthlyCreditCap: TAVILY_MONTHLY_CREDITS,
+      });
+      expect(decision.ok).toBe(true);
+      await gate.release(`credit-${i}`, now);
+    }
+    const blocked = await gate.reserve({
+      ip: "203.0.113.8",
+      now,
+      credits: TAVILY_CREDITS_PER_ANALYSIS,
+      dailyCreditCap: TAVILY_DAILY_CREDITS,
+      monthlyCreditCap: TAVILY_MONTHLY_CREDITS,
+    });
+    expect(blocked.code).toBe("tavily_daily");
+    for (let i = 0; i < IP_BURST_LIMIT; i += 1) {
+      const decision = await gate.reserve({
+        ip: "203.0.113.8",
+        now: now + 1_000 + i,
+        credits: 0,
+        dailyCreditCap: TAVILY_DAILY_CREDITS,
+      });
+      expect(decision.ok).toBe(true);
+      await gate.release("203.0.113.8", now + 1_000 + i);
+    }
+  });
+
+  it("expires an in-flight lock and stores a pipeline cache row", async () => {
+    const limiter = new IpRateLimiter({ storage: sqliteStore() });
+    const now = 1_700_000_000_000;
+    expect((await (await limiter.fetch(ipRequest("/reserve", now))).json()).ok).toBe(true);
+    expect((await (await limiter.fetch(ipRequest("/reserve", now + 1_000))).json()).code).toBe("ip_concurrent");
+    const later = await limiter.fetch(ipRequest("/reserve", now + IN_FLIGHT_MS));
+    expect((await later.json()).ok).toBe(true);
+
+    const cache = new PipelineCache({ storage: sqliteStore() });
+    const saved = await cache.fetch(
+      new Request("https://pipeline-cache.internal/put", {
+        method: "POST",
+        body: JSON.stringify({ key: "abc", body: "{\"title\":\"Cached\"}", ttl: 60 }),
+      }),
+    );
+    expect(saved.ok).toBe(true);
+    const hit = await cache.fetch(new Request("https://pipeline-cache.internal/get?key=abc"));
+    expect(await hit.text()).toContain("Cached");
+    const expired = new PipelineCache({
+      storage: sqliteStore(new Map([["old", { body: "{}", exp: Date.now() - 1_000 }]])),
+    });
+    const miss = await expired.fetch(new Request("https://pipeline-cache.internal/get?key=old"));
+    expect(miss.status).toBe(404);
   });
 });
 
@@ -236,6 +299,100 @@ describe("analyze guards", () => {
     expect(body.error).toContain("αύριο");
   });
 
+  it("returns 429 ip_burst for a fourth request inside 10 minutes", async () => {
+    const { IP_LIMITER, TAVILY_CREDITS } = durableNamespaces();
+    const rate = { buckets: new Map(), inFlight: { count: 0 } };
+    const fetchImpl: typeof fetch = async () => {
+      throw new Error("stop");
+    };
+    for (let i = 0; i < 3; i += 1) {
+      const response = await handleRequest(post({ text: "a".repeat(80) }), { ...env, IP_LIMITER, TAVILY_CREDITS }, {
+        rate,
+        now: () => 1_700_000_000_000 + i,
+        fetchImpl,
+        deadlineMs: 1_000,
+      });
+      expect(response.status).toBe(200);
+      await response.text();
+    }
+    const blocked = await handleRequest(post({ text: "a".repeat(80) }), { ...env, IP_LIMITER, TAVILY_CREDITS }, {
+      rate,
+      now: () => 1_700_000_000_000 + 3_000,
+      fetchImpl,
+    });
+    expect(blocked.status).toBe(429);
+    const body = (await blocked.json()) as { code: string };
+    expect(body.code).toBe("ip_burst");
+    expect(blocked.headers.get("retry-after")).toBeTruthy();
+    const other = await handleRequest(
+      post({ text: "a".repeat(80) }, "http://127.0.0.1:5173", "203.0.113.9"),
+      { ...env, IP_LIMITER, TAVILY_CREDITS },
+      { rate, now: () => 1_700_000_000_000 + 4_000, fetchImpl, deadlineMs: 1_000 },
+    );
+    expect(other.status).toBe(200);
+    await other.text();
+  });
+
+  it("returns 503 and does not start an analysis when the limiter storage throws", async () => {
+    let calls = 0;
+    const response = await handleRequest(post({ text: "a".repeat(80), uiLanguage: "el" }), {
+      ...env,
+      IP_LIMITER: throwingNamespace(),
+      TAVILY_CREDITS: throwingNamespace(),
+    }, {
+      now: () => 1_700_000_000_000,
+      fetchImpl: async () => {
+        calls += 1;
+        return new Response("nope");
+      },
+    });
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toContain("καταγράψει");
+    expect(calls).toBe(0);
+  });
+
+  it("does not ask the limiter for a cached analysis", async () => {
+    let reserves = 0;
+    const limiter = {
+      idFromName: (name: string) => ({ toString: () => name }) as DurableObjectId,
+      get() {
+        return {
+          fetch: async () => {
+            reserves += 1;
+            return Response.json({ ok: true, code: "ok", retryAfter: 0 });
+          },
+        };
+      },
+    } as unknown as DurableObjectNamespace;
+    const cacheObject = new PipelineCache({ storage: sqliteStore() });
+    const page = "https://www.kathimerini.gr/politics/story";
+    const key = await cacheStorageKey(new Request(analysisCacheUrl(page)));
+    await cacheObject.fetch(
+      new Request("https://pipeline-cache.internal/put", {
+        method: "POST",
+        body: JSON.stringify({
+          key,
+          body: JSON.stringify({ article: { title: "Cached", text: "The council voted." } }),
+          ttl: 3_600,
+        }),
+      }),
+    );
+    try {
+      const response = await handleRequest(post({ url: page }), {
+        ...env,
+        IP_LIMITER: limiter,
+        TAVILY_CREDITS: limiter,
+        PIPELINE_CACHE: singleNamespace(cacheObject),
+      }, { now: () => 1_700_000_000_000 });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain("Cached");
+      expect(reserves).toBe(0);
+    } finally {
+      bindPipelineCache(null);
+    }
+  });
+
   it("returns 429 from the edge limiter without charging Tavily credits", async () => {
     const gate = new MemoryRateGate();
     const response = await handleRequest(post({ text: "a".repeat(80) }), env, {
@@ -254,3 +411,106 @@ describe("analyze guards", () => {
     expect(gate.book.creditsUsed).toBe(0);
   });
 });
+
+function sqliteStore(initial?: Map<string, unknown>) {
+  const map = initial ?? new Map<string, unknown>();
+  const kv = {
+    get<T>(key: string) {
+      return map.get(key) as T | undefined;
+    },
+    put<T>(key: string, value: T) {
+      map.set(key, value);
+    },
+    delete(key: string) {
+      map.delete(key);
+      return true;
+    },
+  };
+  return {
+    kv,
+    transactionSync<T>(run: () => T) {
+      return run();
+    },
+    async get<T>(key: string) {
+      return kv.get<T>(key);
+    },
+    async put<T>(key: string, value: T) {
+      kv.put(key, value);
+    },
+    async delete(key: string) {
+      return kv.delete(key);
+    },
+    async transaction<T>(run: (txn: unknown) => Promise<T>) {
+      return run(this);
+    },
+  };
+}
+
+function creditRequest(body: { now: number; credits: number; dailyCreditCap?: number }): Request {
+  return new Request("https://credits.internal/reserve", {
+    method: "POST",
+    body: JSON.stringify({
+      ip: "global",
+      now: body.now,
+      credits: body.credits,
+      dailyCreditCap: body.dailyCreditCap ?? TAVILY_DAILY_CREDITS,
+      monthlyCreditCap: TAVILY_MONTHLY_CREDITS,
+    }),
+  });
+}
+
+function ipRequest(path: string, now: number): Request {
+  return new Request(`https://limiter.internal${path}`, {
+    method: "POST",
+    body: JSON.stringify({ now }),
+  });
+}
+
+function singleNamespace(object: { fetch(request: Request): Promise<Response> }): DurableObjectNamespace {
+  return {
+    idFromName: (name: string) => ({ toString: () => name }) as DurableObjectId,
+    get() {
+      return {
+        fetch: (input: RequestInfo | URL, init?: RequestInit) => object.fetch(new Request(input, init)),
+      };
+    },
+  } as unknown as DurableObjectNamespace;
+}
+
+function objectNamespace(factory: () => { fetch(request: Request): Promise<Response> }): DurableObjectNamespace {
+  const objects = new Map<string, { fetch(request: Request): Promise<Response> }>();
+  return {
+    idFromName: (name: string) => ({ toString: () => name }) as DurableObjectId,
+    get(id: DurableObjectId) {
+      const name = id.toString();
+      let object = objects.get(name);
+      if (!object) {
+        object = factory();
+        objects.set(name, object);
+      }
+      return {
+        fetch: (input: RequestInfo | URL, init?: RequestInit) => object!.fetch(new Request(input, init)),
+      };
+    },
+  } as unknown as DurableObjectNamespace;
+}
+
+function durableNamespaces(): { IP_LIMITER: DurableObjectNamespace; TAVILY_CREDITS: DurableObjectNamespace } {
+  return {
+    IP_LIMITER: objectNamespace(() => new IpRateLimiter({ storage: sqliteStore() })),
+    TAVILY_CREDITS: objectNamespace(() => new TavilyCredits({ storage: sqliteStore() })),
+  };
+}
+
+function throwingNamespace(): DurableObjectNamespace {
+  return {
+    idFromName: (name: string) => ({ toString: () => name }) as DurableObjectId,
+    get() {
+      return {
+        fetch: async () => {
+          throw new Error("storage down");
+        },
+      };
+    },
+  } as unknown as DurableObjectNamespace;
+}

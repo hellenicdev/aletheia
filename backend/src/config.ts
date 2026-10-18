@@ -11,8 +11,11 @@ export interface Env {
   TAVILY_DAILY_CREDITS?: string;
   /** Tavily credits reserved per calendar month. Default 950. A var, not a secret. */
   TAVILY_MONTHLY_CREDITS?: string;
-  /** Edge guard: 3 requests per 60 seconds for one IP. The Cache API book is stricter. */
+  /** Edge guard: 3 requests per 60 seconds for one IP. The Durable Objects are stricter. */
   ANALYZE_IP?: { limit(options: { key: string }): Promise<{ success: boolean }> };
+  IP_LIMITER?: DurableObjectNamespace;
+  TAVILY_CREDITS?: DurableObjectNamespace;
+  PIPELINE_CACHE?: DurableObjectNamespace;
 }
 
 export interface AppConfig {

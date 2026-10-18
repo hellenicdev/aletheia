@@ -5,11 +5,27 @@ import { clearProbeCache } from "../src/probe";
 import { handleRequest } from "../src/index";
 import type { RateState } from "../src/limits";
 import { analyze } from "../src/pipeline";
+import { bindPipelineCache, type ResultCache } from "../src/persistentCache";
 import { isProvisionalScore } from "../../shared/score";
+
+function bindMapCache(store = new Map<string, string>()): Map<string, string> {
+  const cache: ResultCache = {
+    async match(request) {
+      const hit = store.get(request.url);
+      return hit ? new Response(hit) : undefined;
+    },
+    async put(request, response) {
+      store.set(request.url, await response.text());
+    },
+  };
+  bindPipelineCache(cache);
+  return store;
+}
 
 beforeEach(() => {
   clearSearchCache();
   clearProbeCache();
+  bindPipelineCache(null);
 });
 
 const vote = "The council voted 7 to 2 on Monday.";
@@ -1411,16 +1427,7 @@ describe("analyze", () => {
     ];
     let firecrawlSearches = 0;
     let tavilySearches = 0;
-    const caches = {
-      default: {
-        async match() {
-          return undefined;
-        },
-        async put() {},
-      },
-    };
-    const previous = (globalThis as { caches?: unknown }).caches;
-    (globalThis as { caches?: unknown }).caches = caches;
+    bindMapCache();
     try {
       const fetchImpl: typeof fetch = async (input, init) => {
         const url = String(input);
@@ -1494,8 +1501,7 @@ describe("analyze", () => {
       expect(result.meta.subrequests.total).toBeLessThanOrEqual(32);
       expect(result.meta.warnings.join(" ")).not.toContain("subrequest limit");
     } finally {
-      if (previous === undefined) delete (globalThis as { caches?: unknown }).caches;
-      else (globalThis as { caches?: unknown }).caches = previous;
+      bindPipelineCache(null);
     }
   });
 
@@ -2035,19 +2041,7 @@ describe("handleRequest", () => {
 
   it("reuses a cached verification for the same claim and evidence", async () => {
     clearSearchCache();
-    const store = new Map<string, string>();
-    const previous = (globalThis as { caches?: unknown }).caches;
-    (globalThis as { caches?: unknown }).caches = {
-      default: {
-        async match(request: Request) {
-          const hit = store.get(request.url);
-          return hit ? new Response(hit) : undefined;
-        },
-        async put(request: Request, response: Response) {
-          store.set(request.url, await response.text());
-        },
-      },
-    };
+    const store = bindMapCache();
     let verifyCalls = 0;
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);
@@ -2103,8 +2097,7 @@ describe("handleRequest", () => {
       expect(verifyCalls).toBe(afterFirst);
       expect(store.size).toBeGreaterThan(0);
     } finally {
-      if (previous === undefined) delete (globalThis as { caches?: unknown }).caches;
-      else (globalThis as { caches?: unknown }).caches = previous;
+      bindPipelineCache(null);
       clearSearchCache();
     }
   });
@@ -2120,7 +2113,7 @@ describe("handleRequest", () => {
     expect(await response.json()).toEqual({ error: "Request body is too large." });
   });
 
-  it("does not search a personal anecdote and leaves an echo-only claim out of coverage", async () => {
+  it("does not search a personal anecdote and keeps an echo-only claim in coverage", async () => {
     const anecdote = "\"I've been vaping for two years,\" said Maria, a teacher from Leeds.";
     const vote = "The council voted 7 to 2 on Monday and published the minutes for residents.";
     const echo = "Twelve boats remain on the waiting list until the spring season opens for residents.";
@@ -2184,8 +2177,8 @@ describe("handleRequest", () => {
     expect(queries.some((query) => /maria|vaping/i.test(query))).toBe(false);
     expect(result.claimsVerified).toBe(1);
     expect(result.claimsCovered).toBe(1);
-    expect(result.claimsTotal).toBe(1);
-    expect(result.score.verdict).toContain("1 of 1");
+    expect(result.claimsTotal).toBe(2);
+    expect(result.score.verdict).toContain("1 of 2");
     expect(result.provisional).toBe(false);
   });
 

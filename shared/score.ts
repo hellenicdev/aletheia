@@ -51,7 +51,8 @@ export interface ScoreSegment {
   /**
    * Unverifiable claims left outside the search budget are still shown, but they
    * are not part of the coverage ratio. Omitted means the claim was selected.
-   * A claim whose only evidence is the article or a copy of it is also omitted.
+   * A claim whose only evidence is a copy of the article stays in the ratio
+   * as uncovered, so a handful of sourced claims cannot score as full coverage.
    */
   inCoverage?: boolean;
   /**
@@ -118,7 +119,8 @@ export function isProvisionalScore(input: {
  * confirmed-or-refuted count. `covered` is any checkable label with such a source,
  * Unverifiable included: the provisional rule. The total is every selected
  * checkable claim still in coverage, including ones the run did not finish.
- * Personal accounts are not checkable. Echo-only claims are left out via inCoverage.
+ * Personal accounts are not checkable. Echo-only claims stay in the total
+ * with no source, so they count as uncovered.
  */
 export function coverageOf(segments: ScoreSegment[]): { verified: number; covered: number; total: number } {
   let verified = 0;
