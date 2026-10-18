@@ -21,6 +21,7 @@ jobs:
         env:
           PAGES_BASE: /aletheia/
       - run: node scripts/axe.mjs
+        timeout-minutes: 3
         env:
           PAGES_BASE: /aletheia/
       - run: npm ci --prefix backend
