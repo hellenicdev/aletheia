@@ -90,18 +90,26 @@ export interface AnalysisResult {
   degraded: boolean;
   /**
    * Selected claims labelled True, False, or Misleading that have at least one
-   * relevant cited source. The verdict sentence uses this same count.
+   * relevant cited source. The verdict sentence uses this count and says
+   * "confirmed or refuted", so it is not the provisional coverage ratio.
    */
   claimsVerified: number;
   /**
-   * Selected checkable claims in the coverage total. A personal anecdote is not
+   * Selected checkable claims that have at least one relevant independent source,
+   * whatever the label, Unverifiable included. The provisional flag uses this
+   * count. It is larger than claimsVerified when sourced claims stay unverified.
+   */
+  claimsCovered: number;
+  /**
+   * Selected checkable claims in the coverage total. A personal account is not
    * selected, and a claim whose only pages are the article or a copy of it is left out.
    */
   claimsTotal: number;
   /**
-   * True when live search is not ok, or fewer than half of the coverage claims
-   * are verified. The gauge is provisional, the factual and sourcing sub-scores
-   * are empty, and the overall is pulled toward a neutral prior by coverage.
+   * True when live search is not ok, or fewer than 40% of the coverage claims
+   * are covered by a relevant independent source. The gauge is provisional, the
+   * factual and sourcing sub-scores are empty, and the overall is pulled part
+   * of the way toward a neutral prior.
    */
   provisional: boolean;
   meta: {

@@ -40,7 +40,7 @@ describe("inferClaimType", () => {
     expect(reconcileClaimType("The council voted 7 to 2.", "checkable_factual")).toBe("checkable_factual");
     expect(
       reconcileClaimType("\"I have been vaping for two years,\" said Maria, a teacher from Leeds.", "opinion"),
-    ).toBe("opinion");
+    ).toBe("personal");
   });
 
   it("treats a calendar aside as rhetorical and keeps a dated news claim", () => {
@@ -65,15 +65,23 @@ describe("inferClaimType", () => {
   it("does not select personal testimony, an age anecdote, or a private story", () => {
     const quote = "\"I've been vaping for two years,\" said Maria, a teacher from Leeds.";
     expect(isPersonalAccount(quote)).toBe(true);
-    expect(inferClaimType(quote)).toBe("opinion");
-    expect(reconcileClaimType(quote, "checkable_factual")).toBe("opinion");
+    expect(inferClaimType(quote)).toBe("personal");
+    expect(reconcileClaimType(quote, "checkable_factual")).toBe("personal");
     expect(isPersonalAccount("A 26-year-old from Leeds said she started vaping at university.")).toBe(true);
     expect(
       isPersonalAccount("When vaping first took off at Gracey Mungulu's school, the habit looked like a fad."),
     ).toBe(true);
+    const ageRange = "At 33, she falls in the age range most likely to vape.";
+    expect(isPersonalAccount(ageRange)).toBe(true);
+    expect(inferClaimType(ageRange)).toBe("personal");
+    expect(isPersonalAccount("At 33 percent of adults smoke, according to the survey.")).toBe(false);
     const statistic = "4.9 million adults in the UK smoke, according to the health survey.";
     expect(isPersonalAccount(statistic)).toBe(false);
     expect(inferClaimType(statistic)).toBe("checkable_factual");
+    const secretary = "\"The ban starts in June,\" the health secretary said.";
+    expect(isPersonalAccount(secretary)).toBe(false);
+    expect(inferClaimType(secretary)).toBe("checkable_factual");
+    expect(isPersonalAccount("This betrayal will ruin everything we love.")).toBe(false);
   });
 });
 

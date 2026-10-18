@@ -17,6 +17,8 @@
   --unverifiable-bg: rgba(154, 168, 184, 0.16);
   --opinion: #c4b5fd;
   --opinion-bg: rgba(167, 139, 250, 0.18);
+  --personal: #7eb6ff;
+  --personal-bg: rgba(126, 182, 255, 0.18);
   --rhetorical: #f0a06a;
   --rhetorical-bg: rgba(240, 160, 106, 0.18);
   --sans: "IBM Plex Sans", "Noto Sans", "Segoe UI", sans-serif;
@@ -415,6 +417,7 @@ textarea { min-height: 200px; resize: vertical; line-height: 1.5; }
 .summary button[data-filter="Misleading"], .pill[data-label="Misleading"], .legend-item[data-label="Misleading"] { --claim-ink: var(--misleading); }
 .summary button[data-filter="Unverifiable"], .pill[data-label="Unverifiable"], .legend-item[data-label="Unverifiable"] { --claim-ink: var(--unverifiable); }
 .summary button[data-filter="Opinion"], .pill[data-label="Opinion"], .legend-item[data-label="Opinion"] { --claim-ink: var(--opinion); }
+.summary button[data-filter="Personal"], .pill[data-label="Personal"], .legend-item[data-label="Personal"] { --claim-ink: var(--personal); }
 .summary button[data-filter="Rhetorical"], .pill[data-label="Rhetorical"], .legend-item[data-label="Rhetorical"] { --claim-ink: var(--rhetorical); }
 
 .claims-heading {
@@ -459,6 +462,7 @@ textarea { min-height: 200px; resize: vertical; line-height: 1.5; }
 .pill[data-label="Misleading"] { background: var(--misleading-bg); }
 .pill[data-label="Unverifiable"] { background: var(--unverifiable-bg); }
 .pill[data-label="Opinion"] { background: var(--opinion-bg); }
+.pill[data-label="Personal"] { background: var(--personal-bg); }
 .pill[data-label="Rhetorical"] { background: var(--rhetorical-bg); }
 
 .claim-confidence {
@@ -631,6 +635,7 @@ textarea { min-height: 200px; resize: vertical; line-height: 1.5; }
 .claim[data-label="Misleading"] { --claim-bg: var(--misleading-bg); --claim-ink: var(--misleading); }
 .claim[data-label="Unverifiable"] { --claim-bg: var(--unverifiable-bg); --claim-ink: var(--unverifiable); }
 .claim[data-label="Opinion"] { --claim-bg: var(--opinion-bg); --claim-ink: var(--opinion); }
+.claim[data-label="Personal"] { --claim-bg: var(--personal-bg); --claim-ink: var(--personal); }
 .claim[data-label="Rhetorical"] { --claim-bg: var(--rhetorical-bg); --claim-ink: var(--rhetorical); }
 
 .claim.is-selected { outline: 2px solid var(--claim-ink); outline-offset: 2px; }

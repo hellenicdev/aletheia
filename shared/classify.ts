@@ -26,6 +26,9 @@ export function isAttributedClaim(text: string): boolean {
 }
 
 const AGE_ANECDOTE = /\b\d{1,2}[-\s]?year[-\s]?old\b|\b\d{1,2}\s*(?:ετών|χρονών)\b/iu;
+const AGE_AT = /\bat\s+\d{1,2}\b(?!\s*(?:%|percent|per cent))/i;
+const AGE_PRONOUN = /\b(?:she|he|they|her|his|hers)\b/i;
+const AGE_RANGE = /\b(?:she|he)\b[^.]{0,80}\bage range\b|\bage range\b[^.]{0,80}\b(?:she|he)\b/i;
 const PRIVATE_NARRATIVE =
   /\b[\p{Lu}][\p{L}'’-]{2,}'s\s+(?:school|home|family|flat|house|mum|dad|mother|father)\b/u;
 const WHO_EXPERIENCE = /\bwho (?:has |had |have )?(?:been |started |used |smoked |vaped |quit )/i;
@@ -41,6 +44,8 @@ const PRIVATE_ROLE =
 export function isPersonalAccount(text: string): boolean {
   const value = text.replace(/\s+/g, " ").trim();
   if (AGE_ANECDOTE.test(value)) return true;
+  if (AGE_AT.test(value) && AGE_PRONOUN.test(value)) return true;
+  if (AGE_RANGE.test(value)) return true;
   if (PRIVATE_NARRATIVE.test(value)) return true;
   if (WHO_EXPERIENCE.test(value)) return true;
   const quoted = [...value.matchAll(/["“«]([^"”»]{8,})["”»]/g)].map((match) => match[1]);
@@ -77,7 +82,7 @@ export function isDateFiller(text: string): boolean {
 export function inferClaimType(text: string): ClaimType {
   const value = text.replace(/\s+/g, " ").trim();
   if (isDateFiller(value)) return "rhetorical";
-  if (isPersonalAccount(value)) return "opinion";
+  if (isPersonalAccount(value)) return "personal";
   const factual = FACTUAL.test(value) || FACTUAL_FIGURE.test(value);
   const rhetorical = RHETORICAL.test(value);
   const opinion = OPINION.test(value) && !isAttributedClaim(value);
@@ -94,7 +99,7 @@ export function inferClaimType(text: string): ClaimType {
 /** Keep a local opinion or insult label when the model treated it as a fact. */
 export function reconcileClaimType(text: string, model: ClaimType): ClaimType {
   if (isDateFiller(text)) return "rhetorical";
-  if (isPersonalAccount(text)) return "opinion";
+  if (isPersonalAccount(text)) return "personal";
   if (isAttributedClaim(text) && model === "opinion") return "checkable_factual";
   const local = inferClaimType(text);
   if (local === "rhetorical" || local === "opinion") return local;

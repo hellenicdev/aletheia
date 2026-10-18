@@ -25,6 +25,7 @@ import {
 } from "../../shared/messages";
 import { claimImportance, compareClaims, tokenOverlap } from "../../shared/rank";
 import { outletFromDomain, resolveOutlet } from "../../shared/reputation";
+import { stabilizeQuery } from "../../shared/query";
 import { aggregateScore, coverageOf, isProvisionalScore } from "../../shared/score";
 import { splitPastedTitle, splitSentences } from "../../shared/sentences";
 import { blendTone, combineTone, type Rhetoric } from "../../shared/tone";
@@ -253,7 +254,17 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     const queries =
       selected.length === 0
         ? new Map<string, string>()
-        : await buildQueries(selected, config, llmKey, fetchImpl, warnings, deadline, budget, signal);
+        : await buildQueries(
+            selected,
+            segmented.detectedLanguage,
+            config,
+            llmKey,
+            fetchImpl,
+            warnings,
+            deadline,
+            budget,
+            signal,
+          );
     llmHold = 1 + verifyGroups;
     let finishedSearches = planned < budgeted.length ? budgeted.length - planned : 0;
     for (let index = 0; index < selected.length; index++) {
@@ -281,7 +292,11 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
         searchDegraded = true;
         break;
       }
-      const query = queries.get(segment.id) || segment.text.slice(0, 180);
+      const query = stabilizeQuery(
+        queries.get(segment.id) || segment.text,
+        segment.text,
+        segmented.detectedLanguage,
+      );
       const timeoutMs = Math.max(1_000, Math.min(10_000, deadline - Date.now() - 2_000));
       try {
         searchAttempts += 1;
@@ -443,11 +458,11 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
 
   for (const segment of segmented.segments) {
     if (verified.has(segment.id)) continue;
-    if (isPersonalAccount(segment.text)) {
+    if (isPersonalAccount(segment.text) || segment.claimType === "personal") {
       verified.set(
         segment.id,
         finishSegment(segment, {
-          label: "Opinion",
+          label: "Personal",
           confidence: 0.7,
           explanation: anecdoteExplanation(uiLanguage),
           sources: [],
@@ -573,11 +588,12 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   }));
   const coverage = coverageOf(scoredSegments);
   const claimsVerified = coverage.verified;
+  const claimsCovered = coverage.covered;
   const claimsTotal = coverage.total;
   const provisional = isProvisionalScore({
     searchEnabled,
     searchState: searchStatus.state,
-    claimsVerified,
+    claimsCovered,
     claimsTotal,
   });
   const outlet = resolveOutlet({
@@ -593,6 +609,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     outlet,
     degraded: cutShort.size > 0,
     claimsVerified,
+    claimsCovered,
     claimsTotal,
     provisional,
     confidentSatire: outletFromDomain(ingested.sourceDomain) === "satire",
@@ -614,6 +631,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     truncated: segmented.truncated || ingested.truncated,
     degraded: cutShort.size > 0,
     claimsVerified,
+    claimsCovered,
     claimsTotal,
     provisional,
     meta: {
@@ -839,6 +857,7 @@ function validateSegments(data: unknown): {
 
 async function buildQueries(
   segments: DraftSegment[],
+  language: DetectedLanguage,
   config: ReturnType<typeof resolveConfig>,
   apiKey: string,
   fetchImpl: typeof fetch,
@@ -859,7 +878,7 @@ async function buildQueries(
         config,
         apiKey,
         fetchImpl,
-        system: querySystem(),
+        system: querySystem(language),
         user: queryUser(batch.map((segment) => ({ id: segment.id, text: segment.text.slice(0, 280) }))),
         validate: (data) => validateQueries(data, new Set(batch.map((segment) => segment.id))),
         reasoningEffort: "low",
@@ -868,7 +887,10 @@ async function buildQueries(
         timeoutMs: remainingMs(deadline, 16_000),
         signal,
       });
-      for (const item of parsed) queries.set(item.id, item.query);
+      for (const item of parsed) {
+        const claim = batch.find((segment) => segment.id === item.id);
+        queries.set(item.id, stabilizeQuery(item.query, claim?.text ?? item.query, language));
+      }
     } catch (error) {
       remember(warnings, error, "llm");
       if (isBudgetExhausted(error)) break;
@@ -1200,7 +1222,7 @@ function remainingMs(deadline: number, cap: number): number {
 }
 
 function boundQuery(query: string): string {
-  return query.replace(/\s+/g, " ").trim().split(" ").slice(0, 8).join(" ").slice(0, 120);
+  return query.replace(/\s+/g, " ").trim().split(/\s+/).slice(0, 12).join(" ").slice(0, 180);
 }
 
 function outageFromStatus(status: number): SearchOutageReason | null {

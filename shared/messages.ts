@@ -61,6 +61,7 @@ export function unverifiableExplanation(
     | "not-independent"
     | "entity-mismatch"
     | "not-contradiction"
+    | "detail-missing"
     | "check-failed",
 ): string {
   const el: Record<typeof reason, string> = {
@@ -82,6 +83,8 @@ export function unverifiableExplanation(
       "Τα τεκμήρια αφορούν διαφορετικό πρόσωπο, τόπο ή γεγονός, οπότε ο ισχυρισμός δεν κρίνεται ψευδής και μένει μη επαληθεύσιμος.",
     "not-contradiction":
       "Τα τεκμήρια δεν παραθέτουν ασύμβατο γεγονός για το ίδιο πράγμα, οπότε μια διαφορά ή μια παράλειψη δεν κάνει τον ισχυρισμό ψευδή.",
+    "detail-missing":
+      "Τα τεκμήρια στηρίζουν ένα σχετικό γεγονός, όχι αυτή τη συγκεκριμένη λεπτομέρεια, οπότε ο ισχυρισμός μένει μη επαληθεύσιμος.",
     "check-failed":
       "Ο έλεγχος δεν ολοκληρώθηκε επειδή απέτυχε η κλήση του μοντέλου, οπότε αυτό δεν είναι κρίση επί των τεκμηρίων.",
   };
@@ -104,6 +107,8 @@ export function unverifiableExplanation(
       "The evidence is about a different person, place, or event, so this claim is not marked false and stays unverified.",
     "not-contradiction":
       "The evidence does not quote an incompatible fact about the same thing, so a different detail or an omission does not make this claim false.",
+    "detail-missing":
+      "The evidence supports a related fact but not this specific detail, so the claim stays unverified.",
     "check-failed":
       "The fact-check did not finish because the model call failed, so this is not a verdict on the evidence.",
   };

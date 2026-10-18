@@ -28,6 +28,26 @@ describe("splitSentences", () => {
     ]);
   });
 
+  it("splits a standfirst from the anecdote on the next line", () => {
+    const text =
+      "Now a million non-smokers are vaping\nWhen vaping first took off at Gracey Mungulu's school, the habit looked like a fad.";
+    const parts = splitSentences(text);
+    expect(parts.map((span) => span.text)).toEqual([
+      "Now a million non-smokers are vaping",
+      "When vaping first took off at Gracey Mungulu's school, the habit looked like a fad.",
+    ]);
+    for (const span of parts) expect(text.slice(span.start, span.end)).toBe(span.text);
+  });
+
+  it("keeps a lowercase wrap and a digit continuation in one sentence", () => {
+    const wrapped = "The council voted\nseven to two on Monday and published the minutes.";
+    expect(splitSentences(wrapped).map((span) => span.text)).toEqual([
+      "The council voted\nseven to two on Monday and published the minutes.",
+    ]);
+    const digits = "The council voted\n7 to 2 on Monday and published the minutes.";
+    expect(splitSentences(digits)).toHaveLength(1);
+  });
+
   it("returns offsets that match the source", () => {
     const text = "First claim here. Second claim here.";
     for (const span of splitSentences(text)) {

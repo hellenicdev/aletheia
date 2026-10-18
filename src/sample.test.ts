@@ -15,7 +15,10 @@ describe("buildSample", () => {
       expect(report.score.verdict).toContain(`${report.score.overall}/100`);
       if (lang === "el") {
         expect(report.score.verdict).toMatch(/[\u0370-\u03FF]/);
-        expect(report.score.verdict).toContain("2 αληθείς, 1 ψευδής και 1 μη επαληθεύσιμος");
+        expect(report.score.verdict).toContain("2 αληθείς");
+        expect(report.score.verdict).toContain("1 ψευδής");
+        expect(report.score.verdict).toContain("1 παραπλανητικός");
+        expect(report.score.verdict).toContain("1 μη επαληθεύσιμος");
       }
       expect(report.contradictions).toHaveLength(1);
     }

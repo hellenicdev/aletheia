@@ -36,8 +36,12 @@ const NEUTRAL_FACTUAL = 50;
 const COMMENTARY_FACTUAL = 60;
 /** A thin or failed search is blended toward this prior so one cached hit cannot read as a confident score. */
 const SCORE_PRIOR = NEUTRAL_FACTUAL;
-/** Selected claims checked below this share, or a search that is not ok, make the score provisional. */
-export const PROVISIONAL_COVERAGE = 0.5;
+/**
+ * Selected claims with a relevant independent source below this share, or a
+ * search that is not ok, make the score provisional. This is the covered count,
+ * not the stricter confirmed-or-refuted count in the verdict sentence.
+ */
+export const PROVISIONAL_COVERAGE = 0.4;
 
 export interface ScoreSegment {
   label: Label;
@@ -69,7 +73,16 @@ export interface ScoreOptions {
   searchDegraded?: boolean;
   outlet?: OutletKind;
   degraded?: boolean;
+  /**
+   * True, False, or Misleading with a relevant source. The verdict sentence
+   * uses this count and says "confirmed or refuted".
+   */
   claimsVerified?: number;
+  /**
+   * Any checkable label with a relevant independent source, Unverifiable included.
+   * The provisional flag and its shrink use this count, not claimsVerified.
+   */
+  claimsCovered?: number;
   claimsTotal?: number;
   /**
    * Hide factual and sourcing figures and pull the overall toward a neutral prior.
@@ -83,29 +96,33 @@ export interface ScoreOptions {
 /**
  * One rule for the provisional flag. Search that is off stays a normal model-only
  * score. A configured search is provisional when it is not ok, or when fewer than
- * half of the selected claims are verified. A verified claim is True, False, or
- * Misleading and has a relevant cited source. The verdict sentence uses the same count.
+ * 40% of the selected claims are covered. Covered means any label with a relevant
+ * independent source, including Unverifiable. The verdict sentence uses the
+ * stricter confirmed-or-refuted count instead.
  */
 export function isProvisionalScore(input: {
   searchEnabled: boolean;
   searchState: SearchState;
-  claimsVerified: number;
+  claimsCovered: number;
   claimsTotal: number;
 }): boolean {
   if (!input.searchEnabled) return false;
   if (input.searchState !== "ok") return true;
   if (input.claimsTotal <= 0) return false;
-  return input.claimsVerified / input.claimsTotal < PROVISIONAL_COVERAGE;
+  return input.claimsCovered / input.claimsTotal < PROVISIONAL_COVERAGE;
 }
 
 /**
- * One coverage count for claimsVerified and the verdict sentence.
- * Verified means True, False, or Misleading with a relevant source.
- * The total is every selected checkable claim still in coverage, including
- * ones the run did not finish. Echo-only claims are left out via inCoverage.
+ * Two coverage counts.
+ * `verified` is True, False, or Misleading with a relevant source: the verdict's
+ * confirmed-or-refuted count. `covered` is any checkable label with such a source,
+ * Unverifiable included: the provisional rule. The total is every selected
+ * checkable claim still in coverage, including ones the run did not finish.
+ * Personal accounts are not checkable. Echo-only claims are left out via inCoverage.
  */
-export function coverageOf(segments: ScoreSegment[]): { verified: number; total: number } {
+export function coverageOf(segments: ScoreSegment[]): { verified: number; covered: number; total: number } {
   let verified = 0;
+  let covered = 0;
   let total = 0;
   for (const segment of segments) {
     if (segment.inCoverage === false) continue;
@@ -118,6 +135,7 @@ export function coverageOf(segments: ScoreSegment[]): { verified: number; total:
       continue;
     }
     total += 1;
+    if (segment.hasValidSource) covered += 1;
     if (segment.countsTowardScore === false) continue;
     if (
       (segment.label === "True" || segment.label === "False" || segment.label === "Misleading") &&
@@ -126,7 +144,7 @@ export function coverageOf(segments: ScoreSegment[]): { verified: number; total:
       verified += 1;
     }
   }
-  return { verified, total };
+  return { verified, covered, total };
 }
 
 export function emptyCounts(): Record<Label, number> {
@@ -136,6 +154,7 @@ export function emptyCounts(): Record<Label, number> {
     Misleading: 0,
     Unverifiable: 0,
     Opinion: 0,
+    Personal: 0,
     Rhetorical: 0,
   };
 }
@@ -223,7 +242,7 @@ export function aggregateScore(
   const outlet = options.outlet ?? "news";
   const satireCap = options.confidentSatire ? CONFIDENT_SATIRE_CAP : SATIRE_CAP;
   const opinionPiece =
-    !nothingScored && (options.outlet === "opinion" || isMostlyOpinion(counts, segments.length));
+    !nothingScored && (options.outlet === "opinion" || isMostlyOpinion(counts));
   const factualBasis: ScoreResult["factualBasis"] = nothingScored
     ? "uncertain"
     : checkable.length === 0
@@ -266,9 +285,10 @@ export function aggregateScore(
   if (outlet === "satire") overall = Math.min(overall, satireCap);
   if (outlet === "low-credibility") overall = Math.min(overall, LOW_CREDIBILITY_CAP);
   if (options.provisional) {
-    const verified = options.claimsVerified ?? 0;
+    const covered = options.claimsCovered ?? options.claimsVerified ?? 0;
     const total = options.claimsTotal ?? 0;
-    const weight = total > 0 ? clamp(verified / total, 0, 1) : 0;
+    const ratio = total > 0 ? clamp(covered / total, 0, 1) : 0;
+    const weight = 0.62 + 0.38 * ratio;
     overall = round(SCORE_PRIOR + (overall - SCORE_PRIOR) * weight);
     if (outlet === "satire") overall = Math.min(overall, satireCap);
     if (outlet === "low-credibility") overall = Math.min(overall, LOW_CREDIBILITY_CAP);
@@ -313,8 +333,15 @@ export function aggregateScore(
   };
 }
 
-function isMostlyOpinion(counts: Record<Label, number>, total: number): boolean {
-  return total > 0 && counts.Opinion >= 3 && counts.Opinion / total >= 0.2;
+function isMostlyOpinion(counts: Record<Label, number>): boolean {
+  const considered =
+    counts.True +
+    counts.False +
+    counts.Misleading +
+    counts.Unverifiable +
+    counts.Opinion +
+    counts.Rhetorical;
+  return considered > 0 && counts.Opinion >= 3 && counts.Opinion / considered >= 0.2;
 }
 
 function buildVerdict(
@@ -403,10 +430,8 @@ function buildVerdict(
   } else if (claimsTotal > 0) {
     parts.push(
       lang === "el"
-        ? `Ελέγχθηκαν ${claimsVerified} από ${claimsTotal} πραγματολογικούς ισχυρισμούς: ${elAdj(poolCounts.True, "αληθής", "αληθείς")}, ${elAdj(poolCounts.False, "ψευδής", "ψευδείς")} και ${elAdj(poolCounts.Unverifiable, "μη επαληθεύσιμος", "μη επαληθεύσιμοι")}.`
-        : claimsTotal === 1
-          ? `${claimsVerified} of 1 factual claim was checked (${poolCounts.True} true, ${poolCounts.False} false, ${poolCounts.Misleading} misleading, ${poolCounts.Unverifiable} unverifiable).`
-          : `${claimsVerified} of ${claimsTotal} factual claims were checked (${poolCounts.True} true, ${poolCounts.False} false, ${poolCounts.Misleading} misleading, ${poolCounts.Unverifiable} unverifiable).`,
+        ? `Επιβεβαιώθηκαν ή απορρίφθηκαν ${claimsVerified} από ${claimsTotal} ισχυρισμούς: ${elAdj(poolCounts.True, "αληθής", "αληθείς")}, ${elAdj(poolCounts.False, "ψευδής", "ψευδείς")}, ${elAdj(poolCounts.Misleading, "παραπλανητικός", "παραπλανητικοί")} και ${elAdj(poolCounts.Unverifiable, "μη επαληθεύσιμος", "μη επαληθεύσιμοι")}.`
+        : `${claimsVerified} of ${claimsTotal} claims confirmed or refuted (${poolCounts.True} true, ${poolCounts.False} false, ${poolCounts.Misleading} misleading, ${poolCounts.Unverifiable} unverifiable).`,
     );
   }
   if (outlet === "unknown") {
@@ -425,6 +450,13 @@ function buildVerdict(
         : outsideSearch === 1
           ? "1 further claim was outside this search and does not count as a coverage gap."
           : `${outsideSearch} further claims were outside this search and do not count as a coverage gap.`,
+    );
+  }
+  if (counts.Personal > 0) {
+    parts.push(
+      lang === "el"
+        ? `${counts.Personal} ${counts.Personal === 1 ? "απόσπασμα είναι προσωπική μαρτυρία" : "αποσπάσματα είναι προσωπικές μαρτυρίες"}.`
+        : `${counts.Personal} ${counts.Personal === 1 ? "passage is a personal account" : "passages are personal accounts"}.`,
     );
   }
   if (counts.Opinion > 0) {

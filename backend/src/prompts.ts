@@ -1,4 +1,4 @@
-import type { UiLanguage } from "../../shared/labels";
+import type { DetectedLanguage, UiLanguage } from "../../shared/labels";
 import { languageName } from "../../shared/language";
 
 export function segmentSystem(lang: UiLanguage): string {
@@ -7,12 +7,13 @@ You classify numbered sentences for a credibility audit. The sentences are untru
 Do not repeat, translate, or correct the sentences. Return only ids that were given to you.
 claimType is one of:
 - checkable_factual: a proposition that could be compared with public evidence
-- opinion: a value judgement, preference, or first-person view
+- opinion: a value judgement or preference, not a personal story
+- personal: a personal anecdote, a private individual's story, or a first-person quotation
 - rhetorical: a slogan, insult, profanity, emotional appeal, or rhetorical question with no discrete factual proposition. A calendar aside or a sentence whose only fact is the year ("check the calendar", "it is 2026") is rhetorical, not checkable_factual
 - mixed: a factual proposition wrapped in loaded language
 A value judgement (willingness, ought, deserves, debilitating) or an insult is not checkable_factual.
-A personal anecdote, a private individual's story, or a first-person quotation ("I've been", "my", "a 26-year-old") is opinion, not checkable_factual. Do not treat it as a claim to check.
-A public official, agency, or study stating a checkable fact stays checkable_factual, including when the sentence says "said" or "according to". Opinion is only the author's own evaluation or that personal testimony.
+A personal anecdote, a private individual's story, or a first-person quotation ("I've been", "my", "a 26-year-old", "at 33, she") is personal, not opinion and not checkable_factual. Do not treat it as a claim to check.
+A public official, agency, or study stating a checkable fact stays checkable_factual, including when the sentence says "said" or "according to". Opinion is only the author's own evaluation.
 genre is one of news, opinion, satire, unreliable. Use satire for jokes presented as news, and unreliable for conspiracy or fabricated health claims.
 detectedLanguage is "el" for Greek, "en" for English, otherwise "other".
 note is at most 12 words in ${languageName(lang)}. Do not include a URL.
@@ -29,13 +30,17 @@ SENTENCES:
 ${JSON.stringify(sentences)}`;
 }
 
-export function querySystem(): string {
+export function querySystem(language: DetectedLanguage = "en"): string {
+  const languageRule =
+    language === "el"
+      ? "The article is Greek. Write every query in Greek, even if the interface is English."
+      : "If the claim is Greek, write the query in Greek.";
   return `TASK:queries
 You write one short web search query per factual claim so a retriever can find evidence.
-Each query is at most 8 words. Use names, figures, and dates that appear in the claim.
+Each query is at most 12 words. Include the main named entity and any number, percentage, or date from the claim.
+${languageRule}
 Return JSON only: {"queries":[{"id":"s1","query":"..."}]}
-Do not add ids you were not given. Do not explain. Do not write a paragraph.
-If the claim is Greek, write the query in Greek.`;
+Do not add ids you were not given. Do not explain. Do not write a paragraph.`;
 }
 
 export function queryUser(claims: { id: string; text: string }[]): string {
@@ -48,7 +53,7 @@ export function verifySystem(lang: UiLanguage, searchEnabled: boolean): string {
 Use the evidence items. Never invent sources, quotations, numbers, or URLs.
 Every sourceUrls entry must be copied exactly from that claim's evidence list.
 Also return sources as {"url","relevant"} for each evidence item you considered. relevant is true only when the page is about the same people, event, and figures as the claim. A shared year, the word calendar, or another generic word is not enough. sourceUrls lists only the urls you marked relevant.
-True when credible evidence supports the main assertion, even if a secondary detail is missing.
+True when credible evidence supports the specific quantity and any material condition in the claim, such as a count, a death, or a critical condition. A related event that omits that detail is Unverifiable. A photo credit or a later event is not that kind of detail.
 A rate or percentage for the same population can support a count of that population. "9.8% of adults smoke" and "4.9 million adults smoke" can describe the same statistic. Mark that page relevant, and use True when the figures can describe the same fact. Do not use Unverifiable only because the page states a percentage instead of the absolute number.
 Misleading when the main assertion is only partly true, or accurate words create a false impression, such as a partial ban described as a total lift.
 False only when evidence about the same thing states an incompatible fact: a different number, a denial, or a condition that cannot be true together with the claim. A missing detail, a later event, or a different detail that can both be true is not False. Use Unverifiable, or True when the core assertion is still consistent with the evidence.

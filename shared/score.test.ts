@@ -206,8 +206,8 @@ describe("aggregateScore", () => {
     );
     expect(thin.factualAccuracy).toBeNull();
     expect(thin.sourcing).toBeNull();
-    expect(thin.overall).toBe(54);
-    expect(thin.verdict).toContain("54/100");
+    expect(thin.overall).toBe(83);
+    expect(thin.verdict).toContain("83/100");
   });
 
   it("does not let a provisional blend lift a satire or low-credibility cap", () => {
@@ -246,28 +246,34 @@ describe("aggregateScore", () => {
 
   it("uses one rule for provisional coverage and a search that is not ok", () => {
     expect(
-      isProvisionalScore({ searchEnabled: false, searchState: "ok", claimsVerified: 0, claimsTotal: 2 }),
+      isProvisionalScore({ searchEnabled: false, searchState: "ok", claimsCovered: 0, claimsTotal: 2 }),
     ).toBe(false);
     expect(
-      isProvisionalScore({ searchEnabled: true, searchState: "ok", claimsVerified: 12, claimsTotal: 12 }),
+      isProvisionalScore({ searchEnabled: true, searchState: "ok", claimsCovered: 12, claimsTotal: 12 }),
     ).toBe(false);
     expect(
-      isProvisionalScore({ searchEnabled: true, searchState: "ok", claimsVerified: 6, claimsTotal: 12 }),
+      isProvisionalScore({ searchEnabled: true, searchState: "ok", claimsCovered: 6, claimsTotal: 12 }),
     ).toBe(false);
     expect(
-      isProvisionalScore({ searchEnabled: true, searchState: "ok", claimsVerified: 1, claimsTotal: 12 }),
+      isProvisionalScore({ searchEnabled: true, searchState: "ok", claimsCovered: 4, claimsTotal: 9 }),
+    ).toBe(false);
+    expect(
+      isProvisionalScore({ searchEnabled: true, searchState: "ok", claimsCovered: 3, claimsTotal: 9 }),
     ).toBe(true);
     expect(
-      isProvisionalScore({ searchEnabled: true, searchState: "partial", claimsVerified: 1, claimsTotal: 12 }),
+      isProvisionalScore({ searchEnabled: true, searchState: "ok", claimsCovered: 1, claimsTotal: 12 }),
     ).toBe(true);
     expect(
-      isProvisionalScore({ searchEnabled: true, searchState: "partial", claimsVerified: 1, claimsTotal: 9 }),
+      isProvisionalScore({ searchEnabled: true, searchState: "partial", claimsCovered: 1, claimsTotal: 12 }),
     ).toBe(true);
     expect(
-      isProvisionalScore({ searchEnabled: true, searchState: "unavailable", claimsVerified: 0, claimsTotal: 12 }),
+      isProvisionalScore({ searchEnabled: true, searchState: "partial", claimsCovered: 1, claimsTotal: 9 }),
     ).toBe(true);
     expect(
-      isProvisionalScore({ searchEnabled: true, searchState: "ok", claimsVerified: 0, claimsTotal: 0 }),
+      isProvisionalScore({ searchEnabled: true, searchState: "unavailable", claimsCovered: 0, claimsTotal: 12 }),
+    ).toBe(true);
+    expect(
+      isProvisionalScore({ searchEnabled: true, searchState: "ok", claimsCovered: 0, claimsTotal: 0 }),
     ).toBe(false);
   });
 
@@ -349,7 +355,7 @@ describe("aggregateScore", () => {
       segment("Unverifiable", 0.4, true),
       { ...segment("Unverifiable", 0.3, false), inCoverage: false, countsAsGap: false },
     ];
-    expect(coverageOf(segments)).toEqual({ verified: 1, total: 2 });
+    expect(coverageOf(segments)).toEqual({ verified: 1, covered: 2, total: 2 });
     const score = aggregateScore(segments, {
       contradictionCount: 0,
       searchEnabled: true,
@@ -463,5 +469,166 @@ describe("aggregateScore", () => {
       { contradictionCount: 0, searchEnabled: true, uiLanguage: "en" },
     );
     expect(score.factualAccuracy).toBe(67);
+  });
+});
+
+describe("demo-set reconstructions", () => {
+  function toned(
+    label: ScoreSegment["label"],
+    tone: number,
+    hasValidSource = true,
+  ): ScoreSegment {
+    return { label, confidence: 1, hasValidSource, tone };
+  }
+
+  it("scores a news feature with personal accounts in the BBC band and not as mostly opinion", () => {
+    const segments = [
+      ...Array.from({ length: 5 }, () => toned("True", 87)),
+      ...Array.from({ length: 4 }, () => toned("Unverifiable", 87, false)),
+      ...Array.from({ length: 5 }, () => toned("Personal", 87, false)),
+    ];
+    const tally = coverageOf(segments);
+    expect(tally).toEqual({ verified: 5, covered: 5, total: 9 });
+    expect(
+      isProvisionalScore({
+        searchEnabled: true,
+        searchState: "ok",
+        claimsCovered: tally.covered,
+        claimsTotal: tally.total,
+      }),
+    ).toBe(false);
+    const score = aggregateScore(segments, {
+      contradictionCount: 0,
+      searchEnabled: true,
+      uiLanguage: "en",
+      outlet: "news",
+      claimsVerified: tally.verified,
+      claimsCovered: tally.covered,
+      claimsTotal: tally.total,
+    });
+    expect(score.overall).toBeGreaterThanOrEqual(74);
+    expect(score.overall).toBeLessThanOrEqual(84);
+    expect(score.verdict).not.toContain("mostly opinion");
+    expect(score.verdict).toContain("5 of 9 claims confirmed or refuted");
+    expect(score.verdict).toContain("personal account");
+  });
+
+  it("caps a real opinion column at 65, below the news feature", () => {
+    const news = aggregateScore(
+      [
+        ...Array.from({ length: 5 }, () => toned("True", 87)),
+        ...Array.from({ length: 4 }, () => toned("Unverifiable", 87, false)),
+      ],
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "en", outlet: "news" },
+    );
+    const column = aggregateScore(
+      [
+        ...Array.from({ length: 5 }, () => toned("True", 76)),
+        ...Array.from({ length: 6 }, () => toned("Unverifiable", 76, false)),
+        ...Array.from({ length: 4 }, () => toned("Opinion", 76, false)),
+      ],
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "en", outlet: "opinion" },
+    );
+    expect(column.verdict).toContain("mostly opinion");
+    expect(column.overall).toBeLessThanOrEqual(65);
+    expect(column.overall).toBeLessThan(news.overall);
+  });
+
+  it("keeps a wire story at 74 or above when a sourced detail stays unverified", () => {
+    const clean = aggregateScore(
+      [
+        ...Array.from({ length: 4 }, () => toned("True", 94)),
+        ...Array.from({ length: 4 }, () => toned("Unverifiable", 94, false)),
+      ],
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "en", outlet: "news" },
+    );
+    const tally = coverageOf([
+      ...Array.from({ length: 3 }, () => toned("True", 94)),
+      ...Array.from({ length: 5 }, () => toned("Unverifiable", 94, true)),
+    ]);
+    expect(tally.covered / tally.total).toBeGreaterThanOrEqual(0.4);
+    const withDetail = aggregateScore(
+      [
+        ...Array.from({ length: 3 }, () => toned("True", 94)),
+        ...Array.from({ length: 5 }, () => toned("Unverifiable", 94, true)),
+      ],
+      {
+        contradictionCount: 0,
+        searchEnabled: true,
+        uiLanguage: "en",
+        outlet: "news",
+        provisional: false,
+        claimsVerified: tally.verified,
+        claimsCovered: tally.covered,
+        claimsTotal: tally.total,
+      },
+    );
+    expect(clean.overall).toBeGreaterThanOrEqual(74);
+    expect(withDetail.overall).toBeGreaterThanOrEqual(74);
+    expect(withDetail.verdict).toContain("3 of 8 claims confirmed or refuted");
+  });
+
+  it("scores a Greek news mix at 60 or above and names the misleading count", () => {
+    const segments = [
+      ...Array.from({ length: 5 }, () => toned("True", 87)),
+      toned("Misleading", 87),
+      ...Array.from({ length: 2 }, () => toned("Unverifiable", 87, true)),
+      ...Array.from({ length: 4 }, () => toned("Unverifiable", 87, false)),
+    ];
+    const tally = coverageOf(segments);
+    expect(tally.covered / tally.total).toBeGreaterThanOrEqual(0.4);
+    expect(
+      isProvisionalScore({
+        searchEnabled: true,
+        searchState: "ok",
+        claimsCovered: tally.covered,
+        claimsTotal: tally.total,
+      }),
+    ).toBe(false);
+    const score = aggregateScore(segments, {
+      contradictionCount: 0,
+      searchEnabled: true,
+      uiLanguage: "el",
+      outlet: "news",
+      claimsVerified: tally.verified,
+      claimsCovered: tally.covered,
+      claimsTotal: tally.total,
+    });
+    expect(score.overall).toBeGreaterThanOrEqual(60);
+    expect(score.verdict).toContain("παραπλανητικ");
+    expect(score.verdict).toContain(`${tally.verified} από ${tally.total}`);
+  });
+
+  it("keeps a known satire outlet at or under 25", () => {
+    const score = aggregateScore(Array.from({ length: 6 }, () => toned("True", 63)), {
+      contradictionCount: 0,
+      searchEnabled: true,
+      uiLanguage: "en",
+      outlet: "satire",
+      confidentSatire: true,
+    });
+    expect(score.overall).toBeLessThanOrEqual(25);
+  });
+
+  it("does not let personal accounts trigger or dilute mostly opinion", () => {
+    const anecdotes = aggregateScore(
+      [
+        ...Array.from({ length: 5 }, () => toned("Personal", 90, false)),
+        ...Array.from({ length: 2 }, () => toned("Opinion", 90, false)),
+        ...Array.from({ length: 8 }, () => toned("True", 90)),
+      ],
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "en" },
+    );
+    expect(anecdotes.verdict).not.toContain("mostly opinion");
+    const column = aggregateScore(
+      [
+        ...Array.from({ length: 5 }, () => toned("Personal", 90, false)),
+        ...Array.from({ length: 5 }, () => toned("Opinion", 90, false)),
+        ...Array.from({ length: 2 }, () => toned("True", 90)),
+      ],
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "en" },
+    );
+    expect(column.verdict).toContain("mostly opinion");
+    expect(column.overall).toBeLessThanOrEqual(65);
   });
 });

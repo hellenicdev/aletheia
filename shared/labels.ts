@@ -4,6 +4,7 @@ export const LABELS = [
   "Misleading",
   "Unverifiable",
   "Opinion",
+  "Personal",
   "Rhetorical",
 ] as const;
 
@@ -12,6 +13,7 @@ export type Label = (typeof LABELS)[number];
 export const CLAIM_TYPES = [
   "checkable_factual",
   "opinion",
+  "personal",
   "rhetorical",
   "mixed",
 ] as const;

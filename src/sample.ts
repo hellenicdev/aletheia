@@ -70,6 +70,14 @@ function englishSeeds(): Seed[] {
       evidenceMode: "web-search",
     },
     {
+      text: "At 33, she falls in the age range most likely to keep a boat, and she started sailing at university.",
+      label: "Personal",
+      confidence: 0.7,
+      explanation: "This is a personal anecdote, so it was not selected for checking.",
+      sources: [],
+      evidenceMode: "not-applicable",
+    },
+    {
       text: "The waterfront should belong to the people who live here, not to a balance sheet.",
       label: "Opinion",
       confidence: 0.8,
@@ -129,6 +137,14 @@ function greekSeeds(): Seed[] {
       explanation: "Τα αποτελέσματα αναζήτησης δεν αναφέρουν πώληση της δεξαμενής και η ανώνυμη πηγή δεν ελέγχεται.",
       sources: [],
       evidenceMode: "web-search",
+    },
+    {
+      text: "Στα 33 της, η ίδια πέφτει στην ηλικιακή ομάδα που κρατά πιο συχνά βάρκα και ξεκίνησε ιστιοπλοΐα στο πανεπιστήμιο.",
+      label: "Personal",
+      confidence: 0.7,
+      explanation: "Πρόκειται για προσωπική μαρτυρία, οπότε δεν επιλέχθηκε για έλεγχο.",
+      sources: [],
+      evidenceMode: "not-applicable",
     },
     {
       text: "Η παραλία πρέπει να ανήκει σε όσους ζουν εδώ, όχι σε έναν ισολογισμό.",
@@ -222,7 +238,8 @@ export function buildSample(lang: UiLanguage): AnalysisResult {
     contradictions,
     truncated: false,
     degraded: false,
-    claimsVerified: 5,
+    claimsVerified: 4,
+    claimsCovered: 4,
     claimsTotal: 5,
     provisional: false,
     meta: {
