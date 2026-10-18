@@ -1,11 +1,23 @@
 import type { AnalysisResult, ArticlePreview, StageName } from "../../shared/types";
+import { cacheApiAnalysisCache, type AnalysisCache } from "./analysisCache";
 import { resolveConfig, type Env } from "./config";
 import { corsHeaders, jsonResponse } from "./cors";
 import { HttpError } from "./errors";
 import { LIMITS, allowRequest, type RateState } from "./limits";
 import { probeUpstreams } from "./probe";
 import { analyze, type AnalyzeInput } from "./pipeline";
+import { AnalysisRateLimiter } from "./rateLimiter";
+import {
+  MemoryRateGate,
+  TAVILY_CREDITS_PER_ANALYSIS,
+  TAVILY_DAILY_CREDITS,
+  rateLimitMessage,
+  type RateDecision,
+} from "./rateLimit";
 import { resolveFetch } from "./runtime";
+import { assertPublicHttpUrl } from "./ssrf";
+
+export { AnalysisRateLimiter };
 
 export interface HandlerDeps {
   fetchImpl?: typeof fetch;
@@ -19,6 +31,10 @@ export interface HandlerDeps {
   waitUntil?: (promise: Promise<unknown>) => void;
   /** Test hook. Production pings every 10 seconds, on its own timer. */
   pingMs?: number;
+  /** Shared across requests in production via the Durable Object. Tests pass one gate. */
+  gate?: MemoryRateGate;
+  /** Same URL on this pipeline version, for 24 hours. A hit skips the per-IP quota. */
+  analysisCache?: AnalysisCache;
 }
 
 const isolateRate: RateState = {
@@ -41,7 +57,7 @@ export async function handleRequest(
 
   const origin = request.headers.get("Origin");
   const cors = corsHeaders(origin, config.allowedOrigins);
-  if (origin && !config.allowedOrigins.includes(origin)) {
+  if (origin && !config.allowedOrigins.includes(origin) && !localhostOrigin(origin)) {
     return jsonResponse({ error: "Origin not allowed." }, 403, cors);
   }
   if (request.method === "OPTIONS") {
@@ -79,6 +95,10 @@ export async function handleRequest(
     return jsonResponse({ error: "Use POST." }, 405, cors);
   }
 
+  if (!analyzeOriginAllowed(origin)) {
+    return jsonResponse({ error: "Origin not allowed." }, 403, cors);
+  }
+
   const declared = Number(request.headers.get("content-length") || "0");
   if (Number.isFinite(declared) && declared > LIMITS.maxBodyBytes) {
     return jsonResponse({ error: "Request body is too large." }, 413, cors);
@@ -87,12 +107,6 @@ export async function handleRequest(
   const rate = deps.rate ?? isolateRate;
   const now = deps.now ?? Date.now;
   const key = clientKey(request);
-  if (!allowRequest(rate, key, now(), config.rateLimit, config.rateWindowMs)) {
-    return jsonResponse({ error: "Too many analyses from this network. Try again shortly." }, 429, cors);
-  }
-  if (rate.inFlight.count >= LIMITS.maxInFlight) {
-    return jsonResponse({ error: "The analyser is busy. Try again in a moment." }, 429, cors);
-  }
 
   let input: AnalyzeInput;
   try {
@@ -114,9 +128,29 @@ export async function handleRequest(
     return jsonResponse({ error: "Expected JSON." }, 400, cors);
   }
 
+  const lang = input.uiLanguage === "el" ? "el" : "en";
+  const rejection = rejectInput(input);
+  if (rejection) return jsonResponse({ error: rejection.error }, rejection.status, cors);
+
+  const analysisCache = deps.analysisCache ?? cacheApiAnalysisCache();
+  if (input.url) {
+    const cached = await analysisCache.get(input.url);
+    if (cached) return streamResponse(cors, (send) => send("result", cached));
+  }
+
   if (!env.OPENAI_API_KEY?.trim()) {
     return jsonResponse({ error: "OPENAI_API_KEY is not configured on the worker." }, 503, cors);
   }
+
+  if (rate.inFlight.count >= LIMITS.maxInFlight) {
+    return limitResponse("ip_concurrent", 30, lang, cors);
+  }
+
+  const gate = await resolveGate(env, deps.gate);
+  const credits = env.TAVILY_API_KEY?.trim() ? TAVILY_CREDITS_PER_ANALYSIS : 0;
+  const dailyCreditCap = positiveCap(env.TAVILY_DAILY_CREDITS, TAVILY_DAILY_CREDITS);
+  const decision = await gate.reserve({ ip: key, now: now(), credits, dailyCreditCap });
+  if (!decision.ok) return limitResponse(decision.code, decision.retryAfter, lang, cors);
 
   rate.inFlight.count += 1;
   const encoder = new TextEncoder();
@@ -168,6 +202,7 @@ export async function handleRequest(
           }
         }
         rate.inFlight.count = Math.max(0, rate.inFlight.count - 1);
+        void Promise.resolve(gate.release(key, now())).catch(() => undefined);
         try {
           controller.close();
         } catch {
@@ -236,10 +271,13 @@ export async function handleRequest(
                 grace = setTimeout(() => resolve(null), 1_500);
               }),
             ]);
-            if (late) sendTerminal("result", late);
-            else sendTerminal("error", { message: timeoutMessage });
+            if (late) {
+              sendTerminal("result", late);
+              if (input.url) void analysisCache.put(input.url, late).catch(() => undefined);
+            } else sendTerminal("error", { message: timeoutMessage });
           } else {
             sendTerminal("result", winner);
+            if (input.url) void analysisCache.put(input.url, winner).catch(() => undefined);
           }
         } catch (error) {
           const timedOut =
@@ -287,6 +325,109 @@ function errorEvent(
   if (error.extraction) event.extraction = error.extraction;
   if (error.reason) event.reason = error.reason;
   return event;
+}
+
+function localhostOrigin(origin: string): boolean {
+  try {
+    const url = new URL(origin);
+    if (url.protocol !== "http:") return false;
+    return url.hostname === "localhost" || url.hostname === "127.0.0.1";
+  } catch {
+    return false;
+  }
+}
+
+function analyzeOriginAllowed(origin: string | null): boolean {
+  if (!origin) return false;
+  if (origin === "https://hellenicdev.eu" || origin === "https://www.hellenicdev.eu") return true;
+  return localhostOrigin(origin);
+}
+
+function rejectInput(input: AnalyzeInput): { status: number; error: string } | null {
+  const text = input.text?.trim() ?? "";
+  const url = input.url?.trim() ?? "";
+  if (text && url) return { status: 400, error: "Provide either article text or a URL, not both." };
+  if (!text && !url) return { status: 400, error: "Provide article text or a URL." };
+  if (text.length > LIMITS.maxArticleChars) return { status: 413, error: "Request body is too large." };
+  if (!url) return null;
+  if (url.length > LIMITS.maxUrlChars) return { status: 400, error: "That URL is too long." };
+  try {
+    assertPublicHttpUrl(url);
+  } catch (error) {
+    return { status: 400, error: error instanceof Error ? error.message : "That address cannot be fetched." };
+  }
+  return null;
+}
+
+function limitResponse(
+  code: RateDecision["code"],
+  retryAfter: number,
+  lang: "en" | "el",
+  cors: Headers,
+): Response {
+  const seconds = Math.max(1, Math.ceil(retryAfter));
+  return jsonResponse(
+    { error: rateLimitMessage(code, seconds, lang), code, retryAfter: seconds },
+    429,
+    cors,
+    { "Retry-After": String(seconds) },
+  );
+}
+
+function streamResponse(
+  cors: Headers,
+  write: (send: (event: string, data: unknown) => void) => void,
+): Response {
+  const encoder = new TextEncoder();
+  const chunks: string[] = [];
+  write((event, data) => {
+    chunks.push(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  });
+  const headers = new Headers(cors);
+  headers.set("Content-Type", "text/event-stream; charset=utf-8");
+  headers.set("Cache-Control", "no-cache, no-store");
+  return new Response(encoder.encode(chunks.join("")), { status: 200, headers });
+}
+
+async function resolveGate(env: Env, gate?: MemoryRateGate): Promise<MemoryRateGate | DurableGate> {
+  if (gate) return gate;
+  if (!env.RATE_LIMITER) return new MemoryRateGate();
+  return new DurableGate(env.RATE_LIMITER);
+}
+
+class DurableGate {
+  constructor(private readonly namespace: DurableObjectNamespace) {}
+
+  private stub(): DurableObjectStub {
+    return this.namespace.get(this.namespace.idFromName("global"));
+  }
+
+  async reserve(input: {
+    ip: string;
+    now: number;
+    credits: number;
+    dailyCreditCap: number;
+  }): Promise<RateDecision> {
+    const response = await this.stub().fetch("https://limiter.internal/reserve", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    return (await response.json()) as RateDecision;
+  }
+
+  async release(ip: string, now: number): Promise<void> {
+    await this.stub().fetch("https://limiter.internal/release", {
+      method: "POST",
+      body: JSON.stringify({ ip, now }),
+    });
+  }
+}
+
+function positiveCap(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) return fallback;
+  return parsed;
 }
 
 function clientKey(request: Request): string {

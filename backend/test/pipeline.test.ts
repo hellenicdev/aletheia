@@ -1867,12 +1867,31 @@ describe("handleRequest", () => {
   });
 
   it("rate limits repeated analyses", async () => {
+    const { MemoryRateGate } = await import("../src/rateLimit");
+    const gate = new MemoryRateGate();
     const rate: RateState = { buckets: new Map(), inFlight: { count: 0 } };
-    const envTight = { ...env, RATE_LIMIT_PER_IP: "1" };
-    const first = await handleRequest(post(article), envTight, { rate, now: () => 5_000, fetchImpl: scriptedFetch().fetchImpl });
-    await first.text();
-    const second = await handleRequest(post(article), envTight, { rate, now: () => 5_100, fetchImpl: scriptedFetch().fetchImpl });
-    expect(second.status).toBe(429);
+    for (let i = 0; i < 3; i += 1) {
+      const response = await handleRequest(post(article), env, {
+        rate,
+        gate,
+        now: () => 5_000 + i,
+        fetchImpl: scriptedFetch().fetchImpl,
+      });
+      expect(response.status).toBe(200);
+      await response.text();
+    }
+    const blocked = await handleRequest(post(article), env, {
+      rate,
+      gate,
+      now: () => 5_100,
+      fetchImpl: scriptedFetch().fetchImpl,
+    });
+    expect(blocked.status).toBe(429);
+    expect(blocked.headers.get("retry-after")).toBeTruthy();
+    const body = (await blocked.json()) as { code?: string; retryAfter?: number };
+    expect(body.code).toBe("ip_burst");
+    expect(body.retryAfter).toBeGreaterThan(0);
+    expect(rate.inFlight.count).toBe(0);
   });
 
   it("closes the stream when a search fetch never resolves", async () => {
@@ -2090,21 +2109,15 @@ describe("handleRequest", () => {
     }
   });
 
-  it("truncates pasted text over the character budget and still returns a result", async () => {
+  it("rejects pasted text over the character budget before starting an analysis", async () => {
     const { fetchImpl } = scriptedFetch();
     const response = await handleRequest(post(`${"The council voted 7 to 2 on Monday. ".repeat(400)}`), env, {
       fetchImpl,
       rate: { buckets: new Map(), inFlight: { count: 0 } },
       now: () => 9_000,
     });
-    const events = parseSse(await response.text());
-    const result = events.find((event) => event.event === "result")?.data as {
-      truncated: boolean;
-      article: { text: string };
-    };
-    expect(result.truncated).toBe(true);
-    expect(result.article.text.length).toBeLessThanOrEqual(12_000);
-    expect(events.some((event) => event.event === "preview")).toBe(true);
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: "Request body is too large." });
   });
 
   it("does not search a personal anecdote and leaves an echo-only claim out of coverage", async () => {

@@ -23,6 +23,18 @@ export const ANALYSIS_STALL_MS = 45_000;
 
 export const STALL_MESSAGE = "The analysis stopped sending updates.";
 
+export class AnalysisError extends Error {
+  readonly code?: string;
+  readonly retryAfterSeconds?: number;
+
+  constructor(message: string, detail?: { code?: string; retryAfterSeconds?: number }) {
+    super(message);
+    this.name = "AnalysisError";
+    this.code = detail?.code;
+    this.retryAfterSeconds = detail?.retryAfterSeconds;
+  }
+}
+
 export async function analyzeArticle(
   body: { text?: string; url?: string; uiLanguage: "en" | "el" },
   onStage: (event: StageEvent) => void,
@@ -40,13 +52,20 @@ export async function analyzeArticle(
 
   if (!response.ok) {
     let message = `Request failed (${response.status}).`;
+    let code: string | undefined;
+    let retryAfter = Number(response.headers.get("Retry-After") || "");
     try {
-      const payload = (await response.json()) as { error?: string };
+      const payload = (await response.json()) as { error?: string; code?: string; retryAfter?: number };
       if (payload.error) message = payload.error;
+      if (payload.code) code = payload.code;
+      if (typeof payload.retryAfter === "number") retryAfter = payload.retryAfter;
     } catch {
       /* The body was not JSON. */
     }
-    throw new Error(message);
+    throw new AnalysisError(message, {
+      code,
+      retryAfterSeconds: Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : undefined,
+    });
   }
   if (!response.body) throw new Error("The analysis response was empty.");
 

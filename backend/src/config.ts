@@ -7,6 +7,9 @@ export interface Env {
   ALLOWED_ORIGINS?: string;
   RATE_LIMIT_PER_IP?: string;
   RATE_LIMIT_WINDOW_SEC?: string;
+  /** Tavily credits reserved per UTC day. Default 30. A var, not a secret. */
+  TAVILY_DAILY_CREDITS?: string;
+  RATE_LIMITER?: DurableObjectNamespace;
 }
 
 export interface AppConfig {
@@ -20,6 +23,7 @@ export interface AppConfig {
 
 export const DEFAULT_ORIGINS = [
   "https://hellenicdev.eu",
+  "https://www.hellenicdev.eu",
   "https://hellenicdev.github.io",
   "http://localhost:5173",
   "http://127.0.0.1:5173",

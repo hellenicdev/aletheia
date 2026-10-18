@@ -13,7 +13,7 @@ import { LABELS, type UiLanguage } from "../shared/labels";
 import { partialClaimsNotice } from "../shared/messages";
 import type { AnalysisResult, SearchOutageReason, SegmentResult, StageName } from "../shared/types";
 import { CONSENT_STORAGE_KEY, grantAnalytics, injectGtag, readConsent, scheduleGtag, trackAnalyzeStarted, trackPageView } from "./analytics";
-import { analyzeArticle, fetchHealth, STALL_MESSAGE } from "./api";
+import { AnalysisError, analyzeArticle, fetchHealth, STALL_MESSAGE } from "./api";
 import { detectedName, labelHelp, labelName, t, type MessageKey } from "./i18n";
 import { scheduleKofi } from "./kofi";
 import { appBaseFromPath, documentMeta, languageUrl, pageLangFromSearch, siteBase } from "./seo";
@@ -381,6 +381,33 @@ function showError(message: string | null, retryable = false) {
   errorBox.hidden = !message;
   errorBox.textContent = message ? presentError(message) : "";
   retryButton.hidden = !message || !retryable;
+}
+
+function presentCaught(error: unknown): string {
+  if (error instanceof AnalysisError && error.code && error.retryAfterSeconds) {
+    const time = formatWait(error.retryAfterSeconds, state.lang);
+    const key =
+      error.code === "tavily_daily"
+        ? "rateLimitCredits"
+        : error.code === "ip_daily"
+          ? "rateLimitDaily"
+          : error.code === "ip_concurrent"
+            ? "rateLimitConcurrent"
+            : "rateLimitBurst";
+    return t(state.lang, key).replace("{time}", time);
+  }
+  return error instanceof Error ? presentError(error.message) : t(state.lang, "errorEmpty");
+}
+
+function formatWait(seconds: number, lang: "en" | "el"): string {
+  const minutes = Math.max(1, Math.ceil(Math.max(1, seconds) / 60));
+  if (minutes < 60) {
+    if (lang === "el") return minutes === 1 ? "1 λεπτό" : `${minutes} λεπτά`;
+    return minutes === 1 ? "1 minute" : `${minutes} minutes`;
+  }
+  const hours = Math.ceil(minutes / 60);
+  if (lang === "el") return hours === 1 ? "1 ώρα" : `${hours} ώρες`;
+  return hours === 1 ? "1 hour" : `${hours} hours`;
 }
 
 function presentError(message: string): string {
@@ -958,7 +985,7 @@ async function runAnalysis() {
     analyzeButton.disabled = false;
     analyzeButton.textContent = t(state.lang, "analyze");
     setPhase("idle");
-    const message = error instanceof Error ? error.message : t(state.lang, "errorEmpty");
+    const message = presentCaught(error);
     showError(message, canRetry(message));
   }
 }

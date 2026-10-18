@@ -9,6 +9,17 @@ compatibility_date = "2026-10-01"
 [vars]
 OPENAI_BASE_URL = "https://api.reflection.ai/openai/v1"
 OPENAI_MODEL = "Beam-501B-A23B"
-ALLOWED_ORIGINS = "https://hellenicdev.eu,https://hellenicdev.github.io,http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173,http://localhost:8787,http://127.0.0.1:8787"
+ALLOWED_ORIGINS = "https://hellenicdev.eu,https://www.hellenicdev.eu,https://hellenicdev.github.io,http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173,http://localhost:8787,http://127.0.0.1:8787"
 RATE_LIMIT_PER_IP = "30"
 RATE_LIMIT_WINDOW_SEC = "600"
+# Credits reserved for Tavily per UTC day. Each analysis reserves 12. A new
+# analysis is refused once the day's count has reached this number.
+TAVILY_DAILY_CREDITS = "30"
+
+[[durable_objects.bindings]]
+name = "RATE_LIMITER"
+class_name = "AnalysisRateLimiter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AnalysisRateLimiter"]
