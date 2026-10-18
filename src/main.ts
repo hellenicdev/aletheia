@@ -12,11 +12,11 @@ import { renderHighlighted } from "../shared/highlight";
 import { LABELS, type UiLanguage } from "../shared/labels";
 import { partialClaimsNotice } from "../shared/messages";
 import type { AnalysisResult, SearchOutageReason, SegmentResult, StageName } from "../shared/types";
-import { trackAnalyzeStarted } from "./analytics";
+import { denyAnalytics, grantAnalytics, scheduleGtag, trackAnalyzeStarted } from "./analytics";
 import { analyzeArticle, fetchHealth, STALL_MESSAGE } from "./api";
 import { detectedName, labelHelp, labelName, t, type MessageKey } from "./i18n";
 import { scheduleKofi } from "./kofi";
-import { appBaseFromPath, documentMeta, langSearch, pageLangFromSearch, siteBase } from "./seo";
+import { appBaseFromPath, documentMeta, languageUrl, pageLangFromSearch, siteBase } from "./seo";
 import { CLAIM_LIMIT, joinNotice, parseFilter, presentLabels, visibleClaims, type ClaimFilter } from "./resultsView";
 import { buildSample } from "./sample";
 
@@ -60,6 +60,16 @@ app.classList.add("app");
 app.dataset.phase = "idle";
 app.innerHTML = `
   <a class="skip" href="#composer" data-i18n="skip"></a>
+  <div class="consent" id="consent" role="region" aria-labelledby="consent-title" hidden>
+    <div class="consent-copy">
+      <p class="consent-title" id="consent-title" data-i18n="consentTitle"></p>
+      <p class="consent-body" data-i18n="consentBody"></p>
+    </div>
+    <div class="consent-actions">
+      <button type="button" id="consent-decline" data-i18n="consentDecline"></button>
+      <button type="button" class="consent-accept" id="consent-accept" data-i18n="consentAccept"></button>
+    </div>
+  </div>
   <header class="top">
     <div class="brand">
       <svg class="mark" viewBox="0 0 44 44" aria-hidden="true">
@@ -74,11 +84,11 @@ app.innerHTML = `
       </div>
     </div>
     <div class="header-side">
-      <a class="github-link" href="https://github.com/hellenicdev/aletheia" target="_blank" rel="noopener noreferrer">
+      <a class="github-link" href="https://github.com/hellenicdev/aletheia" target="_blank" rel="noopener noreferrer" data-i18n-aria="github">
         <svg class="github-mark" viewBox="0 0 16 16" aria-hidden="true">
           <path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"></path>
         </svg>
-        <span class="visually-hidden" data-i18n="github"></span>
+        <span class="github-label">GitHub</span>
       </a>
       <p class="health" id="health" data-state="unknown"></p>
       <div class="langs" role="group" aria-labelledby="lang-label">
@@ -120,7 +130,7 @@ app.innerHTML = `
           <button class="ghost" type="button" id="retry-button" data-i18n="retry" hidden></button>
         </form>
       </section>
-      <section id="stages" hidden aria-labelledby="stages-label">
+      <section id="stages" hidden tabindex="-1" aria-labelledby="stages-label">
         <h2 id="stages-label" class="visually-hidden" data-i18n="stagesLabel"></h2>
         <ol class="stepper" id="stage-list"></ol>
         <p class="step-name" id="step-name" aria-live="polite"></p>
@@ -132,7 +142,7 @@ app.innerHTML = `
           <div class="article-body preview-body" id="preview-body"></div>
         </div>
       </details>
-      <section id="report" hidden aria-labelledby="score-label">
+      <section id="report" hidden tabindex="-1" aria-labelledby="score-label">
         <div class="focal">
           <div class="gauge" id="gauge" data-band="mid" role="img">
             <svg viewBox="0 0 120 120" aria-hidden="true">
@@ -243,6 +253,8 @@ function applyHead() {
   setMetaProperty("og:locale", meta.locale);
   setMetaName("twitter:title", meta.title);
   setMetaName("twitter:description", meta.description);
+  setMetaProperty("og:image:alt", meta.imageAlt);
+  setMetaName("twitter:image:alt", meta.imageAlt);
   setCanonical(meta.canonical);
   setAlternate("en", meta.alternates.en);
   setAlternate("el", meta.alternates.el);
@@ -290,10 +302,21 @@ function setAlternate(hreflang: string, href: string) {
   node.href = href;
 }
 
-function syncLangParam(lang: "en" | "el") {
-  const next = langSearch(location.search, lang);
-  if (next === location.search) return;
-  history.replaceState(null, "", `${location.pathname}${next}${location.hash}`);
+function syncSkip() {
+  const skip = $<HTMLAnchorElement>(".skip");
+  const phase = app.dataset.phase;
+  if (phase === "result") {
+    skip.href = "#report";
+    skip.dataset.i18n = "skipResults";
+  } else if (phase === "running") {
+    skip.href = "#stages";
+    skip.dataset.i18n = "skipProgress";
+  } else {
+    skip.href = "#composer";
+    skip.dataset.i18n = "skip";
+  }
+  const key = skip.dataset.i18n as MessageKey;
+  skip.textContent = t(state.lang, key);
 }
 
 function applyI18n() {
@@ -308,6 +331,11 @@ function applyI18n() {
       node.placeholder = t(state.lang, key);
     }
   }
+  for (const node of app.querySelectorAll<HTMLElement>("[data-i18n-aria]")) {
+    const key = node.dataset.i18nAria as MessageKey;
+    node.setAttribute("aria-label", t(state.lang, key));
+  }
+  syncSkip();
   for (const button of app.querySelectorAll<HTMLButtonElement>("[data-lang]")) {
     button.setAttribute("aria-pressed", String(button.dataset.lang === state.lang));
   }
@@ -321,15 +349,20 @@ function applyI18n() {
 }
 
 function setLanguage(lang: UiLanguage) {
-  state.lang = lang;
   try {
     localStorage.setItem("aletheia-lang", lang);
   } catch {
     /* Storage can be blocked. */
   }
-  syncLangParam(lang);
+  const next = languageUrl(location.pathname, location.search, lang);
+  if (next !== `${location.pathname}${location.search}`) {
+    location.assign(`${next}${location.hash}`);
+    return;
+  }
+  state.lang = lang;
   if (state.sample && state.result) state.result = buildSample(lang);
   applyI18n();
+  scheduleKofi(window, lang);
 }
 
 function setMode(mode: "paste" | "url") {
@@ -851,6 +884,7 @@ function setPhase(phase: "idle" | "running" | "result") {
   report.hidden = phase !== "result";
   newAnalysis.hidden = phase !== "result";
   if (phase !== "running") $<HTMLElement>("#extract-preview").hidden = true;
+  syncSkip();
 }
 
 function showPreview(article: { title: string | null; text: string }) {
@@ -991,12 +1025,41 @@ const stored = (() => {
     return null;
   }
 })();
-state.lang = pageLangFromSearch(location.search, stored, navigator.language);
-syncLangParam(state.lang);
-applyI18n();
-scheduleKofi();
-void fetchHealth().then((health) => {
-  healthKind = !health ? "down" : health.searchConfigured ? "search" : "nosearch";
-  renderHealth();
-});
-if (demo) void runSample(params.get("instant") === "1");
+state.lang = pageLangFromSearch(location.search, stored, navigator.language, location.pathname);
+const aligned = languageUrl(location.pathname, location.search, state.lang);
+if ((params.get("lang") === "el" || params.get("lang") === "en") && aligned !== `${location.pathname}${location.search}`) {
+  location.replace(`${aligned}${location.hash}`);
+} else {
+  const consentChoice = (() => {
+    try {
+      return localStorage.getItem("aletheia-consent");
+    } catch {
+      return null;
+    }
+  })();
+  if (consentChoice !== "accepted" && consentChoice !== "declined") {
+    $<HTMLElement>("#consent").hidden = false;
+  }
+  applyI18n();
+  scheduleKofi(window, state.lang);
+  scheduleGtag();
+  void fetchHealth().then((health) => {
+    healthKind = !health ? "down" : health.searchConfigured ? "search" : "nosearch";
+    renderHealth();
+  });
+  if (demo) void runSample(params.get("instant") === "1");
+}
+
+function rememberConsent(choice: "accepted" | "declined") {
+  try {
+    localStorage.setItem("aletheia-consent", choice);
+  } catch {
+    /* Storage can be blocked. The choice still applies to this visit. */
+  }
+  if (choice === "accepted") grantAnalytics(window.gtag);
+  else denyAnalytics(window.gtag);
+  $<HTMLElement>("#consent").hidden = true;
+}
+
+$<HTMLButtonElement>("#consent-accept").addEventListener("click", () => rememberConsent("accepted"));
+$<HTMLButtonElement>("#consent-decline").addEventListener("click", () => rememberConsent("declined"));

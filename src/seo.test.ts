@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { documentMeta, langSearch, pageLangFromSearch, siteBase } from "./seo";
+import { documentMeta, languageUrl, langSearch, pageLangFromSearch, siteBase } from "./seo";
 
 describe("seo", () => {
   it("describes the page in English and Greek", () => {
@@ -12,11 +12,13 @@ describe("seo", () => {
     expect(el.title).toBe("Αλήθεια — αξιοπιστία ειδήσεων");
     expect(el.description).toMatch(/[\u0370-\u03FF]/);
     expect(en.canonical).toBe("https://hellenicdev.eu/aletheia/");
-    expect(el.canonical).toBe("https://hellenicdev.eu/aletheia/?lang=el");
+    expect(el.canonical).toBe("https://hellenicdev.eu/aletheia/el/");
     expect(en.alternates.el).toBe(el.canonical);
     expect(el.alternates.en).toBe(en.canonical);
     expect(en.alternates["x-default"]).toBe(en.canonical);
     expect(en.image).toBe("https://hellenicdev.eu/aletheia/og.png");
+    expect(en.imageAlt).toBe("Aletheia mark on a dark background");
+    expect(el.imageAlt).toMatch(/[\u0370-\u03FF]/);
     expect(en.locale).toBe("en_GB");
     expect(el.locale).toBe("el_GR");
   });
@@ -34,9 +36,15 @@ describe("seo", () => {
   it("honours an explicit language parameter ahead of the stored language", () => {
     expect(pageLangFromSearch("?lang=el", "en", "en-US")).toBe("el");
     expect(pageLangFromSearch("?demo=1", "el", "el")).toBe("en");
+    expect(pageLangFromSearch("", "el", "en-US", "/aletheia/el/")).toBe("el");
+    expect(pageLangFromSearch("", "en", "en-US", "/el")).toBe("el");
     expect(pageLangFromSearch("", "el", "en-US")).toBe("el");
     expect(pageLangFromSearch("", null, "el-GR")).toBe("el");
-    expect(langSearch("?demo=1", "el")).toBe("?demo=1&lang=el");
+    expect(langSearch("?demo=1", "el")).toBe("?demo=1");
     expect(langSearch("?lang=el&demo=1", "en")).toBe("?demo=1");
+    expect(languageUrl("/aletheia/", "?lang=el", "el")).toBe("/aletheia/el/");
+    expect(languageUrl("/aletheia/el/", "?lang=en", "en")).toBe("/aletheia/");
+    expect(languageUrl("/", "?demo=el", "el")).toBe("/el/?demo=el");
+    expect(languageUrl("/el/", "?lang=en&demo=el", "en")).toBe("/?demo=1");
   });
 });
