@@ -8,12 +8,12 @@ Do not repeat, translate, or correct the sentences. Return only ids that were gi
 claimType is one of:
 - checkable_factual: a proposition that could be compared with public evidence
 - opinion: a value judgement or preference, not a personal story
-- personal: a personal anecdote, a private individual's story, or a first-person quotation
+- personal: a private individual's anecdote or story. A first-person quotation from an official, expert, or spokesperson is not personal
 - rhetorical: a slogan, insult, profanity, emotional appeal, or rhetorical question with no discrete factual proposition. A calendar aside or a sentence whose only fact is the year ("check the calendar", "it is 2026") is rhetorical, not checkable_factual
 - mixed: a factual proposition wrapped in loaded language
 A value judgement (willingness, ought, deserves, debilitating) or an insult is not checkable_factual.
-A personal anecdote, a private individual's story, or a first-person quotation ("I've been", "my", "a 26-year-old", "at 33, she") is personal, not opinion and not checkable_factual. Do not treat it as a claim to check.
-A public official, agency, or study stating a checkable fact stays checkable_factual, including when the sentence says "said" or "according to". Opinion is only the author's own evaluation.
+A personal anecdote or a private individual's story ("I've been", "my", "a 26-year-old", "at 33, she") is personal, not opinion and not checkable_factual. Do not treat it as a claim to check.
+A public official, expert, scientist, spokesperson, or archaeologist stating a fact stays checkable_factual, including a first-person quotation and a sentence that says "said" or "according to". Opinion is only the author's own evaluation.
 genre is one of news, opinion, satire, unreliable. Use satire for jokes presented as news, and unreliable for conspiracy or fabricated health claims.
 detectedLanguage is "el" for Greek, "en" for English, otherwise "other".
 note is at most 12 words in ${languageName(lang)}. Do not include a URL.
@@ -53,7 +53,8 @@ export function verifySystem(lang: UiLanguage, searchEnabled: boolean): string {
 Use the evidence items. Never invent sources, quotations, numbers, or URLs.
 Every sourceUrls entry must be copied exactly from that claim's evidence list.
 Also return sources as {"url","relevant"} for each evidence item you considered. relevant is true only when the page is about the same people, event, and figures as the claim. A shared year, the word calendar, or another generic word is not enough. sourceUrls lists only the urls you marked relevant.
-True when credible evidence supports the specific quantity and any material condition in the claim, such as a count, a death, or a critical condition. A related event that omits that detail is Unverifiable. A photo credit or a later event is not that kind of detail.
+True when credible evidence supports the claim's main figure, name, or event. Missing secondary details are fine: a time of day, a radio call, or another circumstance the evidence simply does not mention does not block True.
+Block True only when a core quantity is missing or contradicted, or when a material condition in the claim is absent. A core quantity is the main count, distance, or statistic. A material condition is a death, injury, or critical condition. "Sixteen people were rescued" is True when reports confirm that rescue count. "140 miles west of Ensenada" is True when reports confirm that distance and place. "Two were in critical condition" stays Unverifiable when reports describe the event but do not state the condition. A photo credit or a later event is not that kind of detail.
 A rate or percentage for the same population can support a count of that population. "9.8% of adults smoke" and "4.9 million adults smoke" can describe the same statistic. Mark that page relevant, and use True when the figures can describe the same fact. Do not use Unverifiable only because the page states a percentage instead of the absolute number.
 Misleading when the main assertion is only partly true, or accurate words create a false impression, such as a partial ban described as a total lift.
 False only when evidence about the same thing states an incompatible fact: a different number, a denial, or a condition that cannot be true together with the claim. A missing detail, a later event, or a different detail that can both be true is not False. Use Unverifiable, or True when the core assertion is still consistent with the evidence.

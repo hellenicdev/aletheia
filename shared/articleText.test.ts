@@ -209,4 +209,16 @@ describe("cleanArticleText", () => {
     expect(text).not.toContain("Red Carpet");
     expect(filtered.ignored).toBeGreaterThanOrEqual(2);
   });
+
+  it("keeps a title headline that has no sentence punctuation", () => {
+    const title = "Oldest Shipwreck Found Off Antalya";
+    const article = [
+      title,
+      "",
+      "Archaeologists described the wreck as the oldest known in the Mediterranean and published the first photographs.",
+    ].join("\n");
+    const spans = splitSentences(article).filter((span) => !isSkippableFragment(span.text));
+    const filtered = filterClaimSpans(spans, title, article);
+    expect(filtered.spans.some((span) => span.text.includes("Oldest Shipwreck"))).toBe(true);
+  });
 });

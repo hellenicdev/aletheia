@@ -641,6 +641,68 @@ describe("relevance and contradiction", () => {
     expect(greek.explanation).toContain("συγκεκριμένη λεπτομέρεια");
   });
 
+  it("keeps True when the rescue count is confirmed and a secondary detail is absent", () => {
+    const claim = "Sixteen people were rescued after sending a mayday on Friday.";
+    const page = {
+      url: "https://apnews.com/article/coast-guard",
+      title: "Coast Guard rescue",
+      snippet: "Sixteen people were rescued west of Ensenada, the Coast Guard said.",
+    };
+    expect(missingSpecificDetail(claim, [page])).toBe(false);
+    const applied = applyEvidence({
+      label: "True",
+      confidence: 0.86,
+      explanation: "Reports confirm the rescue.",
+      claimText: claim,
+      sourceUrls: [page.url],
+      evidence: [page],
+      searchEnabled: true,
+      uiLanguage: "en",
+    });
+    expect(applied.label).toBe("True");
+  });
+
+  it("keeps True when outlets confirm the distance and place", () => {
+    const claim = "The boat was 140 miles west of Ensenada.";
+    const page = {
+      url: "https://apnews.com/article/ensenada",
+      title: "Rescue west of Ensenada",
+      snippet: "The vessel was 140 miles west of Ensenada when the crew was found.",
+    };
+    expect(missingSpecificDetail(claim, [page])).toBe(false);
+    const applied = applyEvidence({
+      label: "True",
+      confidence: 0.9,
+      explanation: "The Coast Guard reported the position.",
+      claimText: claim,
+      sourceUrls: [page.url],
+      evidence: [page],
+      searchEnabled: true,
+      uiLanguage: "en",
+    });
+    expect(applied.label).toBe("True");
+    const different = {
+      ...page,
+      snippet: "The vessel was 40 miles west of Ensenada when the crew was found.",
+    };
+    expect(missingSpecificDetail(claim, [different])).toBe(true);
+  });
+
+  it("keeps the main vaping figure when the age bound is missing from the page", () => {
+    const claim = "5.4 million people aged 16 and over vape in Britain.";
+    const page = {
+      url: "https://www.ons.gov.uk/vaping",
+      title: "Adult vaping",
+      snippet: "An estimated 5.4 million people vape in Britain, the survey said.",
+    };
+    expect(missingSpecificDetail(claim, [page])).toBe(false);
+    expect(
+      missingSpecificDetail(claim, [
+        { title: "Vaping ages", snippet: "People aged 16 and over were asked about vaping." },
+      ]),
+    ).toBe(true);
+  });
+
   it("keeps True when the cited snippet contains the council figures", () => {
     const applied = applyEvidence({
       label: "True",

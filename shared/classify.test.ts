@@ -82,6 +82,18 @@ describe("inferClaimType", () => {
     expect(isPersonalAccount(secretary)).toBe(false);
     expect(inferClaimType(secretary)).toBe("checkable_factual");
     expect(isPersonalAccount("This betrayal will ruin everything we love.")).toBe(false);
+    const chief = "\"We will count every butterfly,\" the EPA chief told reporters on Monday.";
+    expect(isPersonalAccount(chief)).toBe(false);
+    expect(inferClaimType(chief)).toBe("checkable_factual");
+    expect(reconcileClaimType(chief, "personal")).toBe("checkable_factual");
+    const archaeologist =
+      "\"We are the first people to touch these objects,\" the archaeologist said at the site.";
+    expect(isPersonalAccount(archaeologist)).toBe(false);
+    expect(reconcileClaimType(archaeologist, "personal")).toBe("checkable_factual");
+    const greek =
+      "«Είμαστε οι πρώτοι που αγγίξαμε αυτά τα αντικείμενα», είπε ο αρχαιολόγος.";
+    expect(isPersonalAccount(greek)).toBe(false);
+    expect(inferClaimType(greek)).toBe("checkable_factual");
   });
 });
 

@@ -253,8 +253,12 @@ const RELEVANCE_STOP = new Set([
 
 const WORD_NUMBER: Record<string, string> = {
   zero: "0", one: "1", two: "2", three: "3", four: "4", five: "5", six: "6", seven: "7",
-  eight: "8", nine: "9", ten: "10", eleven: "11", twelve: "12",
+  eight: "8", nine: "9", ten: "10", eleven: "11", twelve: "12", thirteen: "13", fourteen: "14",
+  fifteen: "15", sixteen: "16", seventeen: "17", eighteen: "18", nineteen: "19", twenty: "20",
+  thirty: "30", forty: "40", fifty: "50", sixty: "60", seventy: "70", eighty: "80", ninety: "90",
+  hundred: "100",
   μηδέν: "0", ένα: "1", μία: "1", δυο: "2", δύο: "2", τρία: "3", τέσσερα: "4", πέντε: "5",
+  δεκαέξι: "16", είκοσι: "20",
 };
 
 const NEGATION =
@@ -361,10 +365,20 @@ function quantityTokens(text: string): Set<string> {
 const MATERIAL_CONDITION =
   /\b(?:critical|died|dead|killed|injured|wounded|hospitali[sz]ed|arrested|missing|drowned)\b|κρίσιμ\p{L}*|πέθαν\p{L}*|νεκρ\p{L}*|σκοτώ\p{L}*|τραυματ\p{L}*|νοσηλεύ\p{L}*|συνελήφ\p{L}*|αγνοούμ\p{L}*|πνίγηκ\p{L}*/giu;
 
+const MAGNITUDE_UNIT =
+  /(?:%|percent|per cent|million|billion|thousand|miles?|kilomet(?:er|re)s?|χλμ|εκατομμ\p{L}*|δισ\p{L}*)/iu;
+
+interface QuantitySpan {
+  token: string;
+  index: number;
+  raw: string;
+}
+
 /**
- * True needs the cited pages to carry the claim's own quantity and any material
- * condition. A related event, such as a shark bite without "critical condition",
- * is not enough. A statistical claim may still match a rate for the same population.
+ * True needs the claim's main figure, name, or event. A missing secondary
+ * detail does not block it. An unsupported or contradicted core quantity, or a
+ * missing material condition such as "critical", does.
+ * A statistical claim may still match a rate for the same population.
  */
 export function missingSpecificDetail(
   claim: string,
@@ -372,12 +386,87 @@ export function missingSpecificDetail(
 ): boolean {
   const surface = sources.map((source) => `${source.title ?? ""} ${source.snippet ?? ""}`).join("\n");
   const surfaceQty = quantityTokens(surface);
-  const missingQty = [...quantityTokens(claim)].some((quantity) => !surfaceQty.has(quantity));
   const rateBacked = isStatisticalClaim(claim) && /(?:%|percent|per cent)/i.test(surface);
-  if (missingQty && !rateBacked) return true;
+  if (!rateBacked) {
+    for (const quantity of coreQuantityTokens(claim)) {
+      if (!surfaceQty.has(quantity)) return true;
+    }
+  }
+  if (contradictedCore(claim, surface)) return true;
   const surfaceLower = surface.toLowerCase();
   for (const match of claim.matchAll(MATERIAL_CONDITION)) {
     if (!surfaceLower.includes(match[0].toLowerCase())) return true;
+  }
+  return false;
+}
+
+function quantitySpans(text: string): QuantitySpan[] {
+  const spans: QuantitySpan[] = [];
+  for (const match of text.matchAll(/\d+(?:[.,]\d+)?/g)) {
+    spans.push({ token: match[0].replace(",", "."), index: match.index ?? 0, raw: match[0] });
+  }
+  for (const match of text.matchAll(/[\p{L}]+/gu)) {
+    const mapped = WORD_NUMBER[match[0].toLowerCase()];
+    if (!mapped) continue;
+    spans.push({ token: mapped, index: match.index ?? 0, raw: match[0] });
+  }
+  return spans;
+}
+
+function isYearToken(token: string): boolean {
+  return /^(?:19|20)\d{2}$/.test(token);
+}
+
+function nearby(text: string, index: number, before: number, after: number): string {
+  return text.slice(Math.max(0, index - before), index + after).toLowerCase();
+}
+
+function isTimeQuantity(text: string, index: number): boolean {
+  return /\b(?:a\.?m\.?|p\.?m\.?|o'clock)\b/.test(nearby(text, index, 8, 18));
+}
+
+function isAgeQuantity(text: string, index: number): boolean {
+  return /\b(?:aged|age|year-old|years old|and over|or older|or over)\b/.test(nearby(text, index, 18, 22));
+}
+
+/** The main count, distance, or statistic. Years, clock times, and age bounds are secondary when a main figure exists. */
+function coreQuantityTokens(claim: string): Set<string> {
+  const spans = quantitySpans(claim);
+  const cores = new Set<string>();
+  const pair = claim.match(/(\d+(?:[.,]\d+)?)\s+to\s+(\d+(?:[.,]\d+)?)/i);
+  if (pair) {
+    cores.add(pair[1].replace(",", "."));
+    cores.add(pair[2].replace(",", "."));
+  }
+  for (const span of spans) {
+    const window = nearby(claim, span.index, 18, span.raw.length + 28);
+    if (MAGNITUDE_UNIT.test(window)) cores.add(span.token);
+  }
+  if (cores.size > 0) return cores;
+  const primary = spans.filter(
+    (span) => !isYearToken(span.token) && !isTimeQuantity(claim, span.index) && !isAgeQuantity(claim, span.index),
+  );
+  const pool = primary.length > 0 ? primary : spans;
+  if (pool.length === 0) return cores;
+  let best = pool[0];
+  for (const span of pool) {
+    if (Number(span.token) > Number(best.token)) best = span;
+  }
+  cores.add(best.token);
+  return cores;
+}
+
+function contradictedCore(claim: string, surface: string): boolean {
+  const claimLower = claim.toLowerCase();
+  const surfaceLower = surface.toLowerCase();
+  const claimsRescue = /\brescued\b|διασώ/u.test(claimLower);
+  const surfaceRescue = /\brescued\b|διασώ/u.test(surfaceLower);
+  if (claimsRescue && /\b(?:died|dead|killed|drowned)\b/.test(surfaceLower) && !surfaceRescue) return true;
+  for (const match of claim.matchAll(/(\d+(?:[.,]\d+)?)\s*(miles?|million|billion|percent|%)/gi)) {
+    const number = match[1].replace(",", ".");
+    const escaped = number.replace(".", "\\.");
+    const denied = new RegExp(`\\b(?:not|no|never|only|instead(?:\\s+of)?)\\s+(?:\\w+\\s+){0,4}${escaped}\\b`, "i");
+    if (denied.test(surface)) return true;
   }
   return false;
 }

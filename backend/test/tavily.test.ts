@@ -49,6 +49,56 @@ describe("searchTavily", () => {
     expect(hits[0]?.publishedAt).toBe("2026-03-01T00:00:00.000Z");
   });
 
+  it("keeps a figure that sits past the short snippet for the first matching source", async () => {
+    clearTavilyCache();
+    const prefix = "Navigation and an unrelated introduction to the health survey. ".repeat(20);
+    const fetchImpl: typeof fetch = async () =>
+      new Response(
+        JSON.stringify({
+          results: [
+            {
+              title: "Other news",
+              url: "https://example.com/other",
+              content: "A short summary about shipping delays and harbour fees this week.",
+              raw_content: `${prefix} Nothing here names the survey figure.`,
+            },
+            {
+              title: "Adult vaping",
+              url: "https://example.com/vaping",
+              content: "A short summary of the health survey without the total.",
+              raw_content: `${prefix} Official figures say 5.4 million people aged 16 and over vape in Britain.`,
+            },
+            {
+              title: "Second copy",
+              url: "https://example.com/copy",
+              content: "Another short summary without the total.",
+              raw_content: `${prefix} The same bulletin repeats that 5.4 million people vape.`,
+            },
+            {
+              title: "Third copy",
+              url: "https://example.com/third",
+              content: "A third short summary without the total.",
+              raw_content: `${prefix} A later wire also says 5.4 million people vape.`,
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    const hits = await searchTavily({
+      apiKey: "tavily-test-key",
+      query: "5.4 million vape",
+      claim: "5.4 million people aged 16 and over vape in Britain.",
+      fetchImpl,
+      topic: "news",
+      includeRawContent: true,
+    });
+    expect(hits[0]?.snippet).not.toContain("5.4 million");
+    expect(hits[1]?.snippet).toContain("Official figures say 5.4 million");
+    expect(hits[1]?.snippet.length).toBeLessThanOrEqual(1500);
+    expect(hits[2]?.snippet).toContain("5.4 million");
+    expect(hits[3]?.snippet).not.toContain("5.4 million");
+  });
+
   it("stops further calls after HTTP 432 and does not echo the key", async () => {
     clearTavilyCache();
     const gate = createTavilyGate();

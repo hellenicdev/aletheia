@@ -340,6 +340,14 @@ function isLooseHeadline(text: string): boolean {
   return !/\b(was|were|is|are|said|says|will|have|has|had|είπε|δήλωσε|ανακοίνωσε|είναι|ήταν)\b/iu.test(value);
 }
 
+function matchesTitleLine(text: string, title: string): boolean {
+  const left = text.replace(/\s+/g, " ").trim().toLowerCase();
+  const right = title.replace(/\s+/g, " ").trim().toLowerCase();
+  if (!left || !right) return false;
+  if (left.includes(right) || right.includes(left)) return true;
+  return keywordOverlap(text, keywordsOf(title)) >= 0.45;
+}
+
 function keywordsOf(text: string): Set<string> {
   const words = text.toLowerCase().match(/[\p{L}\p{N}]{4,}/gu) ?? [];
   return new Set(words.filter((word) => !STOP_WORDS.has(word)));
@@ -368,7 +376,12 @@ export function filterClaimSpans<T extends { text: string; start: number; end: n
   let ignored = 0;
   spans.forEach((span, index) => {
     const text = span.text.replace(/\s+/g, " ").trim();
-    if (isMarkdownLinkLine(text) || isHeadlineOnlyLine(text)) {
+    const titleClaim =
+      Boolean(title) &&
+      index <= 1 &&
+      span.start < 700 &&
+      matchesTitleLine(text, title ?? "");
+    if ((isMarkdownLinkLine(text) || isHeadlineOnlyLine(text)) && !titleClaim) {
       ignored += 1;
       return;
     }
