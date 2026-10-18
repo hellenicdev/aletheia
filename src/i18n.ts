@@ -120,6 +120,11 @@ const en = {
   searchViaTavily: "Search: Tavily",
   searchViaFirecrawl: "Search: Firecrawl",
   ignoredNav: "Ignored {n} lines of page navigation / related headlines",
+  github: "View source on GitHub",
+  metaTitle: "Aletheia — claim-level news credibility",
+  metaDescription:
+    "Aletheia labels each claim in a news article and scores credibility from evidence, sourcing, tone, and consistency.",
+  stagesLabel: "Analysis progress",
 };
 
 const el: Record<keyof typeof en, string> = {
@@ -242,6 +247,11 @@ const el: Record<keyof typeof en, string> = {
   searchViaTavily: "Αναζήτηση: Tavily",
   searchViaFirecrawl: "Αναζήτηση: Firecrawl",
   ignoredNav: "Αγνοήθηκαν {n} γραμμές πλοήγησης της σελίδας / σχετικών τίτλων",
+  github: "Πηγαίος κώδικας στο GitHub",
+  metaTitle: "Αλήθεια — αξιοπιστία ειδήσεων",
+  metaDescription:
+    "Η Αλήθεια χαρακτηρίζει κάθε ισχυρισμό ενός ειδησεογραφικού άρθρου και βαθμολογεί την αξιοπιστία από τεκμήρια, πηγές, ύφος και συνέπεια.",
+  stagesLabel: "Πρόοδος ανάλυσης",
 };
 
 export const STRINGS = { en, el };

@@ -32,6 +32,8 @@
 
 html, body { margin: 0; min-height: 100%; }
 
+html { scroll-padding-bottom: 120px; }
+
 body {
   font-family: var(--sans);
   font-size: 16px;
@@ -69,7 +71,8 @@ button { cursor: pointer; }
 .app {
   width: min(var(--content), calc(100% - 32px));
   margin: 0 auto;
-  padding: 32px 0 48px;
+  /* Bottom padding clears the Ko-fi floating chat (fixed, bottom-left, about 65px). */
+  padding: 32px 0 128px;
 }
 
 .top {
@@ -120,6 +123,21 @@ h1 {
   font-size: 13px;
   color: var(--muted);
 }
+
+.github-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  color: var(--muted);
+  border-radius: 999px;
+  flex: none;
+}
+
+.github-link:hover { color: var(--text); }
+
+.github-mark { width: 20px; height: 20px; }
 
 .health[data-state="search"] { color: var(--true); }
 .health[data-state="nosearch"] { color: var(--misleading); }
@@ -176,7 +194,7 @@ h1 {
   display: flex;
   justify-content: center;
   align-items: center;
-  min-height: calc(100vh - 240px);
+  min-height: calc(100vh - 380px);
 }
 
 .app[data-phase="idle"] .stack,
@@ -225,6 +243,12 @@ textarea, input[type="url"] {
 }
 
 textarea { min-height: 200px; resize: vertical; line-height: 1.5; }
+
+textarea::placeholder,
+input::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
 
 .composer-foot, .actions {
   display: flex;
@@ -666,7 +690,13 @@ textarea { min-height: 200px; resize: vertical; line-height: 1.5; }
 }
 
 @media (max-width: 640px) {
-  .app { width: min(100% - 32px, var(--content)); }
+  .app { width: min(100% - 32px, var(--content)); padding-bottom: 140px; }
+  .app[data-phase="idle"] .layout,
+  .app[data-phase="running"] .layout {
+    min-height: 0;
+    align-items: flex-start;
+  }
+  textarea { min-height: 160px; }
   .app[data-phase="result"] .top { flex-direction: column; align-items: stretch; }
   .app[data-phase="result"] .brand { width: 100%; }
   .app[data-phase="result"] .header-side { width: 100%; justify-content: flex-start; }
@@ -682,6 +712,12 @@ textarea { min-height: 200px; resize: vertical; line-height: 1.5; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation: none !important;
+    transition: none !important;
+  }
+  .floatingchat-container-wrap,
+  .floatingchat-container-wrap-mobi,
+  .floating-chat-kofi-popup-iframe,
+  .floating-chat-kofi-popup-iframe-mobi {
     transition: none !important;
   }
 }

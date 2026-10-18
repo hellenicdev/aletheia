@@ -16,6 +16,13 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run typecheck
+      - uses: browser-actions/setup-chrome@v1
+      - run: npm run build
+        env:
+          PAGES_BASE: /aletheia/
+      - run: node scripts/axe.mjs
+        env:
+          PAGES_BASE: /aletheia/
       - run: npm ci --prefix backend
       - run: npm test --prefix backend
       - run: npm run typecheck --prefix backend
