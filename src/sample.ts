@@ -224,9 +224,11 @@ export function buildSample(lang: UiLanguage): AnalysisResult {
     degraded: false,
     claimsVerified: 5,
     claimsTotal: 5,
+    provisional: false,
     meta: {
       searchEnabled: true,
       searchDegraded: false,
+      searchStatus: { state: "ok", reason: null },
       model: "sample",
       uiLanguage: lang,
       requestId: "sample",

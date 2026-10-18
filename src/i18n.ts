@@ -43,6 +43,17 @@ const en = {
   truncated: "Lower-priority sentences were left out so the check could focus on the strongest claims.",
   searchDegraded: "Live search was degraded. Claims without sources were not confirmed.",
   searchFailedBanner: "Search degraded. This run could not check every claim. Do not read the gauge as a finished judgement.",
+  searchOutageCredits:
+    "Live web search is unavailable (provider credits exhausted); results are based on model knowledge only",
+  searchOutageUnauthorized:
+    "Live web search is unavailable (the provider rejected the request); results are based on model knowledge only",
+  searchOutageRate:
+    "Live web search is unavailable (the provider rate limit was reached); results are based on model knowledge only",
+  searchOutageUpstream:
+    "Live web search is unavailable (the provider returned an error); results are based on model knowledge only",
+  searchOutageFailed:
+    "Live web search is unavailable (search failed); results are based on model knowledge only",
+  provisional: "provisional",
   satireBanner: "This outlet is known satire. The score is capped and its own page is not treated as proof.",
   lowCredBanner: "This outlet is associated with unreliable or conspiratorial claims. The score is capped.",
   extracted: "Extracted text",
@@ -136,6 +147,17 @@ const el: Record<keyof typeof en, string> = {
   truncated: "Προτάσεις χαμηλότερης προτεραιότητας έμειναν έξω, ώστε ο έλεγχος να εστιάσει στους ισχυρότερους ισχυρισμούς.",
   searchDegraded: "Η ζωντανή αναζήτηση υποβαθμίστηκε. Ισχυρισμοί χωρίς πηγές δεν επιβεβαιώθηκαν.",
   searchFailedBanner: "Η αναζήτηση υποβαθμίστηκε. Αυτό το τρέξιμο δεν έλεγξε κάθε ισχυρισμό. Μην διαβάσετε τον δείκτη ως τελική κρίση.",
+  searchOutageCredits:
+    "Η ζωντανή αναζήτηση δεν είναι διαθέσιμη (εξαντλήθηκαν οι μονάδες του παρόχου)· τα αποτελέσματα στηρίζονται μόνο στη γνώση του μοντέλου.",
+  searchOutageUnauthorized:
+    "Η ζωντανή αναζήτηση δεν είναι διαθέσιμη (ο πάροχος απέρριψε το αίτημα)· τα αποτελέσματα στηρίζονται μόνο στη γνώση του μοντέλου.",
+  searchOutageRate:
+    "Η ζωντανή αναζήτηση δεν είναι διαθέσιμη (ξεπεράστηκε το όριο του παρόχου)· τα αποτελέσματα στηρίζονται μόνο στη γνώση του μοντέλου.",
+  searchOutageUpstream:
+    "Η ζωντανή αναζήτηση δεν είναι διαθέσιμη (ο πάροχος επέστρεψε σφάλμα)· τα αποτελέσματα στηρίζονται μόνο στη γνώση του μοντέλου.",
+  searchOutageFailed:
+    "Η ζωντανή αναζήτηση δεν είναι διαθέσιμη (η αναζήτηση απέτυχε)· τα αποτελέσματα στηρίζονται μόνο στη γνώση του μοντέλου.",
+  provisional: "προσωρινό",
   satireBanner: "Η πηγή είναι γνωστή σάτιρα. Η βαθμολογία έχει όριο και η ίδια η σελίδα δεν μετρά ως απόδειξη.",
   lowCredBanner: "Η πηγή συνδέεται με αναξιόπιστους ή συνωμοσιολογικούς ισχυρισμούς. Η βαθμολογία έχει όριο.",
   extracted: "Εξαγμένο κείμενο",

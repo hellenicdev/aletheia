@@ -19,10 +19,24 @@ describe("subrequest budget", () => {
     expect(budget.used).toBe(2);
   });
 
+  it("counts one extra subrequest when the response was redirected", async () => {
+    const budget = createSubrequestBudget(4);
+    const fetchImpl = trackFetch(async () => {
+      const response = new Response("ok", { status: 200 });
+      Object.defineProperty(response, "redirected", { value: true });
+      return response;
+    }, budget);
+    await fetchImpl("https://example.com/a");
+    expect(budget.used).toBe(2);
+    const plain = createSubrequestBudget(4);
+    await trackFetch(async () => new Response("ok"), plain)("https://example.com/b");
+    expect(plain.used).toBe(1);
+  });
+
   it("uses a hard budget under the free-plan limit and records the stage", () => {
-    expect(SUBREQUEST_LIMIT).toBe(40);
+    expect(SUBREQUEST_LIMIT).toBe(32);
     const budget = createSubrequestBudget();
-    expect(budget.limit).toBe(40);
+    expect(budget.limit).toBe(32);
     budget.setStage("evidence");
     expect(budget.trySpend()).toBe(true);
     expect(budget.trySpend(100)).toBe(false);
@@ -39,14 +53,14 @@ describe("subrequest budget", () => {
 
   it("reserves model calls before it spends the rest on searches", () => {
     const costs = { search: 2, verify: 2 };
-    const searches = planEvidence(40, 12, costs);
+    const searches = planEvidence(32, 12, costs);
     expect(searches).toBeGreaterThan(0);
     expect(searches).toBeLessThanOrEqual(12);
     const groups = Math.ceil(searches / 4);
     const reserved = 1 + 1 + groups * costs.verify + searches * costs.search;
-    expect(reserved).toBeLessThanOrEqual(40);
+    expect(reserved).toBeLessThanOrEqual(32);
     expect(planEvidence(2, 8)).toBe(0);
     expect(planEvidence(8, 3, { search: 2, verify: 1 })).toBe(2);
-    expect(planEvidence(40, 0)).toBe(0);
+    expect(planEvidence(32, 0)).toBe(0);
   });
 });

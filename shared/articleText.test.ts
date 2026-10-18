@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cleanArticleText } from "./articleText";
+import { cleanArticleText, isSkippableFragment } from "./articleText";
 
 describe("cleanArticleText", () => {
   it("drops navigation and keeps the article paragraphs", () => {
@@ -115,6 +115,24 @@ describe("cleanArticleText", () => {
     const prose =
       "The committee discussed episode 166 of the series during a hearing that lasted two hours and produced a written report for the board.";
     expect(cleanArticleText(prose)).toContain("written report");
+    expect(isSkippableFragment(prose)).toBe(false);
+  });
+
+  it("drops show and sidebar lines that never say episode", () => {
+    const raw = [
+      "Decentralize.TV | Health Ranger Report | Situation Update",
+      "Brighteon.TV: watch the broadcast",
+      "The coastal plant received a federal loan that will fund the restart, according to the filing released on Monday.",
+      "Decentralize.TV The coastal plant received a federal loan that will fund the restart, according to the filing released on Monday.",
+    ].join("\n");
+    const text = cleanArticleText(raw);
+    expect(text).toContain("federal loan");
+    expect(text).not.toContain("Decentralize");
+    expect(text).not.toContain("Brighteon");
+    expect(text).not.toContain("Health Ranger");
+    expect(
+      isSkippableFragment("Decentralize.TV offers a weekly interview about supplements and immunity on the network."),
+    ).toBe(true);
   });
 
   it("keeps a Greek opinion kicker and drops the related-story list under it", () => {

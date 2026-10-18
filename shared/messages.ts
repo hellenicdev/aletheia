@@ -1,9 +1,26 @@
 import type { UiLanguage } from "./labels";
 
-/** Shown in the verdict and the page when verification stopped early. */
+/** Short banner when the run stopped early but search itself was not down. */
 export function partialClaimsNotice(lang: UiLanguage, verified: number, total: number): string {
   if (lang === "el") return `Επαληθεύτηκαν μόνο ${verified} από ${total} ισχυρισμούς.`;
   return `Only ${verified} of ${total} claims could be verified.`;
+}
+
+/** One sentence for a cut-short run, including how the checked claims came out. */
+export function degradedClaimsSentence(
+  lang: UiLanguage,
+  verified: number,
+  total: number,
+  counts: { True: number; False: number; Misleading: number; Unverifiable: number },
+): string {
+  if (lang === "el") {
+    return `Επαληθεύτηκαν μόνο ${verified} από ${total} ισχυρισμούς (${elCount(counts.True, "αληθής", "αληθείς")}, ${elCount(counts.False, "ψευδής", "ψευδείς")}, ${elCount(counts.Misleading, "παραπλανητικός", "παραπλανητικοί")}, ${elCount(counts.Unverifiable, "μη επαληθεύσιμος", "μη επαληθεύσιμοι")}).`;
+  }
+  return `Only ${verified} of ${total} claims could be verified (${counts.True} true, ${counts.False} false, ${counts.Misleading} misleading, ${counts.Unverifiable} unverifiable).`;
+}
+
+function elCount(count: number, singular: string, plural: string): string {
+  return `${count} ${count === 1 ? singular : plural}`;
 }
 
 export function opinionExplanation(lang: UiLanguage): string {

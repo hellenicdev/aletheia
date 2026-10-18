@@ -15,7 +15,15 @@ import { resolveOutlet } from "../../shared/reputation";
 import { aggregateScore } from "../../shared/score";
 import { splitPastedTitle, splitSentences } from "../../shared/sentences";
 import { blendTone, combineTone, type Rhetoric } from "../../shared/tone";
-import type { AnalysisResult, ArticlePreview, Contradiction, SegmentResult, StageName } from "../../shared/types";
+import type {
+  AnalysisResult,
+  ArticlePreview,
+  Contradiction,
+  SearchOutageReason,
+  SearchStatus,
+  SegmentResult,
+  StageName,
+} from "../../shared/types";
 import type { Env } from "./config";
 import { resolveConfig } from "./config";
 import { HttpError, UpstreamError } from "./errors";
@@ -40,6 +48,7 @@ import {
   trackFetch,
   type SubrequestBudget,
 } from "./budget";
+import { raceAbort } from "./deadline";
 import {
   cacheCountsAsSubrequest,
   readVerification,
@@ -70,6 +79,8 @@ export interface AnalyzeDeps {
   consistencyTimeoutMs?: number;
   /** Test hook. Production uses the worker subrequest ceiling. */
   subrequestLimit?: number;
+  /** Test hook. Production caps the segmentation call at 45 seconds. */
+  segmentTimeoutMs?: number;
 }
 
 interface DraftSegment {
@@ -135,6 +146,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     deadline,
     signal,
     attempts: budget.canSpend(6) ? 2 : 1,
+    segmentTimeoutMs: deps.segmentTimeoutMs,
   });
   stage("segment", "done");
   if (
@@ -160,6 +172,9 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   const echoOnly = new Set<string>();
   const searchFailed = new Set<string>();
   const cutShort = new Set<string>();
+  let providerReason: SearchOutageReason | null = null;
+  let searchAttempts = 0;
+  let searchErrors = 0;
 
   if (searchEnabled && searchKey && budgeted.length > 0) {
     const searchCost = cacheOn ? 2 : 1;
@@ -198,9 +213,23 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
         searchDegraded = true;
         break;
       }
+      if (providerReason) {
+        abandonSearches(
+          selected,
+          index,
+          evidence,
+          searchFailed,
+          cutShort,
+          warnings,
+          "search stopped after the provider rejected the request",
+        );
+        searchDegraded = true;
+        break;
+      }
       const query = queries.get(segment.id) || segment.text.slice(0, 180);
       const timeoutMs = Math.max(1_000, Math.min(10_000, deadline - Date.now() - 2_000));
       try {
+        searchAttempts += 1;
         const hits = dedupeEvidence(
           await withTimeout(
             searchWeb({
@@ -228,10 +257,13 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       } catch (error) {
         remember(warnings, error, "search");
         searchDegraded = true;
+        searchErrors += 1;
         searchFailed.add(segment.id);
         cutShort.add(segment.id);
         evidence.set(segment.id, []);
-        if (isBudgetExhausted(error) || signal.aborted) {
+        const outage = providerOutage(error);
+        if (outage) providerReason = providerReason ?? outage;
+        if (outage || isBudgetExhausted(error) || signal.aborted) {
           abandonSearches(
             selected,
             index + 1,
@@ -239,9 +271,11 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
             searchFailed,
             cutShort,
             warnings,
-            isBudgetExhausted(error)
-              ? "search stopped to stay within the worker subrequest limit"
-              : "analysis deadline reached before search finished",
+            outage
+              ? "search stopped after the provider rejected the request"
+              : isBudgetExhausted(error)
+                ? "search stopped to stay within the worker subrequest limit"
+                : "analysis deadline reached before search finished",
           );
           break;
         }
@@ -322,6 +356,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
               timeoutMs,
               signal,
               charge: chargeCache,
+              suppressModelKnowledge: providerReason !== null,
             }),
             timeoutMs + 750,
             "verification timed out",
@@ -440,6 +475,21 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   tick();
 
   const draftById = new Map(segmented.segments.map((segment) => [segment.id, segment]));
+  const searchStatus = resolveSearchStatus({
+    searchEnabled,
+    providerReason,
+    searchAttempts,
+    searchErrors,
+    searchDegraded,
+    evidenceBacked: [...evidence.values()].filter((items) => items.length > 0).length,
+  });
+  if (searchStatus.state !== "ok") {
+    for (const segment of ordered) {
+      if (segment.sources.length === 0 && segment.confidence > 0.4) segment.confidence = 0.4;
+    }
+  }
+  const provisional =
+    searchEnabled && searchStatus.state !== "ok" && ordered.every((segment) => segment.sources.length === 0);
   const outlet = resolveOutlet({
     domain: ingested.sourceDomain,
     genre: segmented.genre,
@@ -463,6 +513,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       degraded: cutShort.size > 0,
       claimsVerified: budgeted.filter((segment) => !cutShort.has(segment.id)).length,
       claimsTotal: budgeted.length,
+      provisional,
     },
   );
   stage("score", "done");
@@ -483,9 +534,11 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     degraded: cutShort.size > 0,
     claimsVerified: budgeted.filter((segment) => !cutShort.has(segment.id)).length,
     claimsTotal: budgeted.length,
+    provisional,
     meta: {
       searchEnabled,
       searchDegraded,
+      searchStatus,
       model: config.llmModel,
       uiLanguage,
       requestId,
@@ -580,6 +633,7 @@ async function segmentArticle(options: {
   deadline: number;
   signal?: AbortSignal;
   attempts: number;
+  segmentTimeoutMs?: number;
 }): Promise<{
   segments: DraftSegment[];
   detectedLanguage: DetectedLanguage;
@@ -611,24 +665,33 @@ async function segmentArticle(options: {
 
   let detected: DetectedLanguage = localLanguage;
   let genre: string | null = null;
-  if (Date.now() < options.deadline - 8_000) {
+  const segmentCap = options.segmentTimeoutMs ?? 45_000;
+  const segmentMs = Math.min(segmentCap, Math.max(300, options.deadline - Date.now()));
+  if (Date.now() < options.deadline - 1_000) {
     try {
-      const parsed = await completeJson({
-        config: options.config,
-        apiKey: options.apiKey,
-        fetchImpl: options.fetchImpl,
-        system: segmentSystem(options.uiLanguage),
-        user: segmentUser(
-          drafts.map((segment) => ({ id: segment.id, text: segment.text })),
-          options.uiLanguage,
+      const parsed = await withTimeout(
+        raceAbort(
+          completeJson({
+            config: options.config,
+            apiKey: options.apiKey,
+            fetchImpl: options.fetchImpl,
+            system: segmentSystem(options.uiLanguage),
+            user: segmentUser(
+              drafts.map((segment) => ({ id: segment.id, text: segment.text })),
+              options.uiLanguage,
+            ),
+            validate: validateSegments,
+            reasoningEffort: "low",
+            maxTokens: 4096,
+            timeoutMs: segmentMs,
+            signal: options.signal,
+            attempts: options.attempts,
+          }),
+          options.signal,
         ),
-        validate: validateSegments,
-        reasoningEffort: "low",
-        maxTokens: 4096,
-        timeoutMs: remainingMs(options.deadline, 22_000),
-        signal: options.signal,
-        attempts: options.attempts,
-      });
+        segmentMs + 500,
+        "segment timed out",
+      );
       genre = parsed.genre;
       detected = localLanguage === "other" ? parsed.detectedLanguage : localLanguage;
       const byId = new Map(parsed.segments.map((segment) => [segment.id, segment]));
@@ -750,6 +813,7 @@ async function judgeGroup(options: {
   timeoutMs: number;
   signal?: AbortSignal;
   charge?: CacheCharge;
+  suppressModelKnowledge?: boolean;
 }): Promise<Map<string, SegmentResult>> {
   const results = new Map<string, SegmentResult>();
   const pending: DraftSegment[] = [];
@@ -777,7 +841,8 @@ async function judgeGroup(options: {
           articleDomain: options.articleDomain,
           articleText: options.articleText,
           articleTitle: options.articleTitle,
-          allowModelKnowledge: options.searchEnabled && urls.length === 0,
+          allowModelKnowledge:
+            options.searchEnabled && urls.length === 0 && !options.suppressModelKnowledge,
         }),
       ),
     );
@@ -836,7 +901,10 @@ async function judgeGroup(options: {
       articleDomain: options.articleDomain,
       articleText: options.articleText,
       articleTitle: options.articleTitle,
-      allowModelKnowledge: options.searchEnabled && (options.evidence.get(segment.id)?.length ?? 0) === 0,
+      allowModelKnowledge:
+        options.searchEnabled &&
+        (options.evidence.get(segment.id)?.length ?? 0) === 0 &&
+        !options.suppressModelKnowledge,
     });
     results.set(segment.id, finishSegment(segment, applied));
     const urls = (options.evidence.get(segment.id) ?? []).map((item) => item.url);
@@ -1013,6 +1081,43 @@ function remainingMs(deadline: number, cap: number): number {
 
 function boundQuery(query: string): string {
   return query.replace(/\s+/g, " ").trim().split(" ").slice(0, 8).join(" ").slice(0, 120);
+}
+
+function providerOutage(error: unknown): SearchOutageReason | null {
+  const message = error instanceof Error ? error.message : "";
+  if (/HTTP\s*402\b|insufficient credits/i.test(message)) return "out_of_credits";
+  if (/HTTP\s*401\b|HTTP\s*403\b/.test(message)) return "unauthorized";
+  if (/HTTP\s*429\b/.test(message)) return "rate_limited";
+  if (/HTTP\s*5\d\d\b/.test(message)) return "upstream_error";
+  return null;
+}
+
+function resolveSearchStatus(input: {
+  searchEnabled: boolean;
+  providerReason: SearchOutageReason | null;
+  searchAttempts: number;
+  searchErrors: number;
+  searchDegraded: boolean;
+  evidenceBacked: number;
+}): SearchStatus {
+  if (!input.searchEnabled) return { state: "ok", reason: null };
+  const failedMost = input.searchAttempts > 0 && input.searchErrors > input.searchAttempts / 2;
+  if (input.providerReason) {
+    return {
+      state: input.evidenceBacked === 0 ? "unavailable" : "partial",
+      reason: input.providerReason,
+    };
+  }
+  if (failedMost) {
+    return {
+      state: input.evidenceBacked === 0 ? "unavailable" : "partial",
+      reason: "failed",
+    };
+  }
+  if (input.searchDegraded && input.searchErrors > 0) {
+    return { state: "partial", reason: "failed" };
+  }
+  return { state: "ok", reason: null };
 }
 
 function abandonSearches(

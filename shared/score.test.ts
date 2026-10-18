@@ -118,7 +118,10 @@ describe("aggregateScore", () => {
     expect(score.overall).toBe(100);
     expect(score.factualAccuracy).toBe(100);
     expect(score.sourcing).toBe(100);
-    expect(score.verdict).toContain("Only 3 of 12 claims could be verified.");
+    expect(score.verdict).toContain(
+      "Only 3 of 12 claims could be verified (3 true, 0 false, 0 misleading, 0 unverifiable).",
+    );
+    expect(score.verdict).not.toContain("factual claims were checked");
     expect(score.counts.Unverifiable).toBe(9);
     const greek = aggregateScore(checked, {
       contradictionCount: 0,
@@ -129,7 +132,10 @@ describe("aggregateScore", () => {
       claimsVerified: 3,
       claimsTotal: 12,
     });
-    expect(greek.verdict).toContain("Επαληθεύτηκαν μόνο 3 από 12 ισχυρισμούς.");
+    expect(greek.verdict).toContain(
+      "Επαληθεύτηκαν μόνο 3 από 12 ισχυρισμούς (3 αληθείς, 0 ψευδείς, 0 παραπλανητικοί, 0 μη επαληθεύσιμοι).",
+    );
+    expect(greek.verdict).not.toContain("Ελέγχθηκαν");
     expect(greek.overall).toBe(100);
   });
 
@@ -150,10 +156,28 @@ describe("aggregateScore", () => {
     expect(score.sourcing).toBeNull();
     expect(score.factualBasis).toBe("uncertain");
     expect(score.overall).toBeGreaterThanOrEqual(55);
-    expect(score.verdict).toContain("Only 0 of 12 claims could be verified.");
+    expect(score.verdict).toContain(
+      "Only 0 of 12 claims could be verified (0 true, 0 false, 0 misleading, 0 unverifiable).",
+    );
+    expect(score.verdict).not.toContain("factual claims were checked");
     expect(score.verdict).toContain("live search failed");
     expect(score.verdict).not.toContain("mostly opinion");
     expect(score.verdict).not.toContain("opinion or commentary");
+  });
+
+  it("hides factual and sourcing figures on a provisional score without changing the overall", () => {
+    const shown = aggregateScore(
+      [segment("True"), segment("True")],
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "en" },
+    );
+    const provisional = aggregateScore(
+      [segment("True"), segment("True")],
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "en", provisional: true },
+    );
+    expect(shown.factualAccuracy).toBe(100);
+    expect(provisional.overall).toBe(shown.overall);
+    expect(provisional.factualAccuracy).toBeNull();
+    expect(provisional.sourcing).toBeNull();
   });
 
   it("returns a zero score for an empty article", () => {

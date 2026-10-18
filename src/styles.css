@@ -457,6 +457,18 @@ textarea { min-height: 220px; resize: vertical; line-height: 1.55; }
 .gauge[data-band="mid"] .gauge-value { stroke: var(--misleading); }
 .gauge[data-band="high"] .gauge-value { stroke: var(--true); }
 
+.gauge.is-provisional .gauge-value { stroke: rgba(255, 255, 255, 0.28); }
+.gauge.is-provisional .gauge-number,
+.gauge.is-provisional .gauge-of { color: var(--faint); }
+
+.gauge-status {
+  margin-top: 2px;
+  color: var(--faint);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
 .gauge.is-running .gauge-value {
   stroke-dashoffset: 230;
   animation: sweep 1.4s ease-in-out infinite;

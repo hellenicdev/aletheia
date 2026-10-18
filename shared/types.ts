@@ -62,6 +62,20 @@ export interface SubrequestCounts {
   total: number;
 }
 
+export type SearchState = "ok" | "partial" | "unavailable";
+
+export type SearchOutageReason =
+  | "out_of_credits"
+  | "unauthorized"
+  | "rate_limited"
+  | "upstream_error"
+  | "failed";
+
+export interface SearchStatus {
+  state: SearchState;
+  reason: SearchOutageReason | null;
+}
+
 export interface AnalysisResult {
   article: AnalysisArticle;
   segments: SegmentResult[];
@@ -74,9 +88,15 @@ export interface AnalysisResult {
   claimsVerified: number;
   /** Selected claims that were meant to be checked, up to the search cap. */
   claimsTotal: number;
+  /**
+   * True when live search did not check any claim against evidence.
+   * The gauge is provisional and the factual and sourcing sub-scores are empty.
+   */
+  provisional: boolean;
   meta: {
     searchEnabled: boolean;
     searchDegraded: boolean;
+    searchStatus: SearchStatus;
     model: string;
     uiLanguage: UiLanguage;
     requestId: string;

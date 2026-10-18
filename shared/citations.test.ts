@@ -310,6 +310,55 @@ describe("wire reprints and entity match", () => {
       articleText: "An original AP story about a different financing vote.",
     });
     expect(ownWire.label).toBe("True");
+    const shortened = "Coast Guard rescues sailors after Baja storm warning";
+    const originalTitle = "Coast Guard rescues sailors after a storm warning delayed the Baja crossing";
+    const originalLede =
+      "The Coast Guard rescued sixteen sailors off Baja California on Monday after a storm warning delayed their crossing and the crew stayed out overnight.";
+    expect(
+      isSyndicatedCopy(
+        {
+          url: "https://www.opb.org/article/coast-guard-baja",
+          title: shortened,
+          snippet: "The station posted the story without a byline or wire credit.",
+        },
+        originalTitle,
+        originalLede,
+        "apnews.com",
+      ),
+    ).toBe(true);
+    expect(
+      isSyndicatedCopy(
+        {
+          url: "https://www.arabnews.com/node/coast-guard-baja",
+          title: "Rescue at sea",
+          snippet: originalLede,
+        },
+        originalTitle,
+        originalLede,
+        "apnews.com",
+      ),
+    ).toBe(true);
+    const shortenedCopy = applyEvidence({
+      label: "True",
+      confidence: 0.9,
+      explanation: "A partner site carried the same rescue.",
+      claimText: claim,
+      sourceUrls: ["https://www.opb.org/article/coast-guard-baja"],
+      evidence: [
+        {
+          url: "https://www.opb.org/article/coast-guard-baja",
+          title: shortened,
+          snippet: "The station posted the story without a byline or wire credit.",
+        },
+      ],
+      searchEnabled: true,
+      uiLanguage: "en",
+      articleDomain: "apnews.com",
+      articleTitle: originalTitle,
+      articleText: originalLede,
+    });
+    expect(shortenedCopy.label).toBe("Unverifiable");
+    expect(shortenedCopy.sources).toEqual([]);
     expect(
       isSyndicatedCopy(
         { url: "https://example.com/minutes", title: "The council voted 7 to 2.", snippet: "Residents can read the minutes." },

@@ -188,12 +188,16 @@ async function firecrawlPost(
       throw new BudgetExhausted();
     }
     try {
-      const response = await fetchImpl(url, {
-        method: "POST",
-        headers: firecrawlHeaders(apiKey.trim()),
-        body: JSON.stringify(payload),
+      const timeoutSignal = AbortSignal.timeout(Math.max(1_000, timeoutMs));
+      const response = await raceAbort(
+        fetchImpl(url, {
+          method: "POST",
+          headers: firecrawlHeaders(apiKey.trim()),
+          body: JSON.stringify(payload),
+          signal: timeoutSignal,
+        }),
         signal,
-      });
+      );
       if (response.status === 429 && attempt < 1) {
         const wait = retryAfterMs(response, retryDelayMs);
         await raceAbort(response.text().catch(() => ""), signal);
