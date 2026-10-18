@@ -93,6 +93,30 @@ describe("searchWeb retries", () => {
     expect(calls).toBe(2);
     expect(hits[0]?.snippet).toBe("Recovered");
   });
+
+  it("does not spend a retry when the budget cannot afford one", async () => {
+    let calls = 0;
+    let spare = true;
+    const fetchImpl: typeof fetch = async () => {
+      calls += 1;
+      return new Response("Consumed (req/min): 11, Remaining: 0", { status: 429, headers: { "retry-after": "0" } });
+    };
+    await expect(
+      searchWeb({
+        apiKey: "k",
+        query: "retry only if the budget allows",
+        language: "en",
+        fetchImpl,
+        retryDelayMs: 0,
+        canSpend: () => {
+          const allowed = spare;
+          spare = false;
+          return allowed;
+        },
+      }),
+    ).rejects.toThrow(/Too many subrequests/);
+    expect(calls).toBe(1);
+  });
 });
 
 describe("searchWeb failures", () => {

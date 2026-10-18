@@ -1,5 +1,6 @@
 import { cleanArticleText } from "../../shared/articleText";
 import type { EvidenceItem } from "../../shared/citations";
+import { BudgetExhausted, isBudgetExhausted } from "./budget";
 import { combineSignals, deadlineReached, isDeadline, raceAbort } from "./deadline";
 import { HttpError, UpstreamError, redactSecret } from "./errors";
 import { LIMITS } from "./limits";
@@ -88,6 +89,12 @@ function retryAfterMs(response: Response, fallback: number): number {
   return Math.min(cap, Math.max(0, fallback));
 }
 
+export type CacheCharge = (op: "read" | "write") => boolean;
+
+export function cacheCountsAsSubrequest(): boolean {
+  return resultCache() !== null;
+}
+
 export async function searchWeb(options: {
   apiKey: string;
   query: string;
@@ -98,13 +105,14 @@ export async function searchWeb(options: {
   timeoutMs?: number;
   canSpend?: () => boolean;
   signal?: AbortSignal;
+  charge?: CacheCharge;
 }): Promise<EvidenceItem[]> {
   const query = options.query.trim().slice(0, 240);
   if (!query) return [];
   const cacheKey = `${options.language}:${query}`;
   const cached = searchCache.get(cacheKey);
   if (cached && Date.now() - cached.at < 10 * 60_000) return cached.hits;
-  const persisted = await readPersisted<EvidenceItem[]>(`search:${cacheKey}`);
+  const persisted = await readPersisted<EvidenceItem[]>(`search:${cacheKey}`, options.charge);
   if (persisted) {
     searchCache.set(cacheKey, { at: Date.now(), hits: persisted });
     return persisted;
@@ -120,7 +128,7 @@ export async function searchWeb(options: {
   if (options.language === "el") payload.country = "GR";
 
   if (options.canSpend && !options.canSpend()) {
-    throw new Error("search skipped to stay within the worker subrequest limit");
+    throw new BudgetExhausted();
   }
   const timeoutMs = options.timeoutMs ?? 10_000;
   const signal = operationSignal(timeoutMs, options.signal);
@@ -159,7 +167,7 @@ export async function searchWeb(options: {
     .filter((item): item is EvidenceItem => item !== null)
     .slice(0, 4);
   searchCache.set(cacheKey, { at: Date.now(), hits });
-  await writePersisted(`search:${cacheKey}`, hits);
+  await writePersisted(`search:${cacheKey}`, hits, options.charge);
   return hits;
 }
 
@@ -177,7 +185,7 @@ async function firecrawlPost(
   for (let attempt = 0; attempt < 2; attempt++) {
     if (signal?.aborted) throw deadlineReached();
     if (attempt > 0 && canSpend && !canSpend()) {
-      throw new Error("search skipped to stay within the worker subrequest limit");
+      throw new BudgetExhausted();
     }
     try {
       const response = await fetchImpl(url, {
@@ -195,7 +203,7 @@ async function firecrawlPost(
       return response;
     } catch (error) {
       lastError = error;
-      if (isDeadline(error)) throw error;
+      if (isDeadline(error) || isBudgetExhausted(error)) throw error;
       break;
     }
   }
@@ -223,12 +231,14 @@ export async function scrapeArticle(options: {
   fetchImpl: typeof fetch;
   signal?: AbortSignal;
   timeoutMs?: number;
+  canSpend?: () => boolean;
+  charge?: CacheCharge;
 }): Promise<ScrapedPage> {
   const pageUrl = assertPublicHttpUrl(options.url);
   const cacheKey = pageUrl.toString();
   const memo = scrapeCache.get(cacheKey);
   if (memo && Date.now() - memo.at < 10 * 60_000) return memo.page;
-  const persisted = await readPersisted<ScrapedPage>(`scrape:${cacheKey}`);
+  const persisted = await readPersisted<ScrapedPage>(`scrape:${cacheKey}`, options.charge);
   if (persisted && persisted.text) {
     scrapeCache.set(cacheKey, { at: Date.now(), page: persisted });
     return persisted;
@@ -250,7 +260,7 @@ export async function scrapeArticle(options: {
       options.fetchImpl,
       timeoutMs,
       500,
-      undefined,
+      options.canSpend,
       signal,
     );
   }, signal);
@@ -308,7 +318,7 @@ export async function scrapeArticle(options: {
     rawHtml: html,
   };
   scrapeCache.set(cacheKey, { at: Date.now(), page });
-  await writePersisted(`scrape:${cacheKey}`, page);
+  await writePersisted(`scrape:${cacheKey}`, page, options.charge);
   return page;
 }
 
@@ -328,9 +338,10 @@ async function cacheRequest(key: string): Promise<Request> {
   return new Request(`https://cache.aletheia.internal/v1/${hex}`);
 }
 
-async function readPersisted<T>(key: string): Promise<T | null> {
+async function readPersisted<T>(key: string, charge?: CacheCharge): Promise<T | null> {
   const cache = resultCache();
   if (!cache) return null;
+  if (charge && !charge("read")) return null;
   try {
     const hit = await cache.match(await cacheRequest(key));
     if (!hit) return null;
@@ -348,23 +359,28 @@ export function verificationCacheKey(claim: string, urls: string[], language: st
   return `verify:${language}:${claim.replace(/\s+/g, " ").trim()}\n${list.join("\n")}`;
 }
 
-export async function readVerification(key: string): Promise<CachedVerdict | null> {
+export async function readVerification(key: string, charge?: CacheCharge): Promise<CachedVerdict | null> {
   const memo = verifyCache.get(key);
   if (memo && Date.now() - memo.at < CACHE_TTL_SECONDS * 1000) return memo.verdict;
-  const persisted = await readPersisted<CachedVerdict>(key);
+  const persisted = await readPersisted<CachedVerdict>(key, charge);
   if (!persisted || typeof persisted.label !== "string") return null;
   verifyCache.set(key, { at: Date.now(), verdict: persisted });
   return persisted;
 }
 
-export async function writeVerification(key: string, verdict: CachedVerdict): Promise<void> {
+export async function writeVerification(
+  key: string,
+  verdict: CachedVerdict,
+  charge?: CacheCharge,
+): Promise<void> {
   verifyCache.set(key, { at: Date.now(), verdict });
-  await writePersisted(key, verdict);
+  await writePersisted(key, verdict, charge);
 }
 
-async function writePersisted(key: string, value: unknown): Promise<void> {
+async function writePersisted(key: string, value: unknown, charge?: CacheCharge): Promise<void> {
   const cache = resultCache();
   if (!cache) return;
+  if (charge && !charge("write")) return;
   try {
     await cache.put(
       await cacheRequest(key),

@@ -19,6 +19,38 @@ const DATELINE =
 const PHOTO_CREDIT =
   /^(?:photograph|photo|image|caption|credit|φωτογραφία|εικόνα|πηγή)\s*[:：]|^\(?\s*(?:AP|Reuters|AFP|Getty)\s+Photo\b|^Getty Images\b/i;
 
+const GLUED_PROMO =
+  /^.{0,60}?\b(?:decentralize|brighteon)\.tv\b.{0,40}?\bepisode\s*\d+\b(?:\s*[–—|-][^\s.]{0,40})?\s*/i;
+
+/** Remove episode, promo, and show-title lines before sentences are split. */
+export function stripPromoItems(raw: string): string {
+  return raw
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return line;
+      const glued = trimmed.match(GLUED_PROMO);
+      if (glued && glued[0].length < trimmed.length) return trimmed.slice(glued[0].length);
+      if (isPromoLine(trimmed)) return "";
+      return line;
+    })
+    .join("\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n");
+}
+
+function isPromoLine(text: string): boolean {
+  const value = text.replace(/\s+/g, " ").trim();
+  if (!value) return false;
+  const words = value.split(/\s+/);
+  if (words.length > 24) return false;
+  if (/\b(?:decentralize|brighteon)\.tv\b/i.test(value)) return true;
+  if (!/\bepisode\s*\d+\b/i.test(value)) return false;
+  const early = words.slice(0, 4).join(" ");
+  if (/\bepisode\s*\d+\b/i.test(early)) return true;
+  return !/\b(was|were|is|are|said|says|discussed|voted|will|have|has|had|produced|lasted|during)\b/i.test(value);
+}
+
 export function stripCredits(raw: string): string {
   return raw
     .replace(/\s*\((?:AP|Reuters|AFP|Getty)\s+Photo\/[^)]{0,160}\)/gi, "")
@@ -32,6 +64,7 @@ export function isSkippableFragment(text: string): boolean {
   const value = text.replace(/\s+/g, " ").trim();
   if (!value) return true;
   if (SECTION_LABEL.test(value)) return true;
+  if (isPromoLine(value)) return true;
   if (isLinkTitle(value)) return true;
   if (value.length < 25) return true;
   if (MENU.test(value)) return true;
@@ -42,7 +75,7 @@ export function isSkippableFragment(text: string): boolean {
 }
 
 export function cleanArticleText(raw: string): string {
-  const lines = stripCredits(raw).replace(/\r\n/g, "\n").split("\n");
+  const lines = stripPromoItems(stripCredits(raw)).replace(/\r\n/g, "\n").split("\n");
   const seenLines = new Set<string>();
   let droppingTail = false;
   let keptProse = false;
@@ -53,7 +86,7 @@ export function cleanArticleText(raw: string): string {
       return false;
     }
     if (droppingTail) return false;
-    if (isLinkTitle(trimmed)) return false;
+    if (isPromoLine(trimmed) || isLinkTitle(trimmed)) return false;
     if (looksLikeBoilerplate(line)) return false;
     const key = line.replace(/\s+/g, " ").trim().toLowerCase();
     if (!key) return true;
@@ -109,7 +142,7 @@ function isPhotoCredit(text: string): boolean {
 function isLinkTitle(text: string): boolean {
   const value = text.replace(/\s+/g, " ").trim();
   if (!value) return false;
-  if (/episode\s*\d+/i.test(value) && value.length < 180) return true;
+  if (isPromoLine(value)) return true;
   if (value.length > 120 || value.length < 12) return false;
   if (!/[–—]/.test(value)) return false;
   if (/,/.test(value)) return false;

@@ -1,4 +1,4 @@
-import { isSkippableFragment, stripCredits } from "../../shared/articleText";
+import { isSkippableFragment, stripCredits, stripPromoItems } from "../../shared/articleText";
 import { evaluativeDensity, inferClaimType, looksLikeOpinionSection, reconcileClaimType } from "../../shared/classify";
 import { acceptContradiction } from "../../shared/consistency";
 import { applyEvidence, independentEvidence, type EvidenceItem } from "../../shared/citations";
@@ -33,8 +33,21 @@ import {
   verifySystem,
   verifyUser,
 } from "./prompts";
-import { createSubrequestBudget, SUBREQUEST_RESERVE, trackFetch, type SubrequestBudget } from "./budget";
-import { readVerification, searchWeb, verificationCacheKey, writeVerification } from "./firecrawl";
+import {
+  createSubrequestBudget,
+  isBudgetExhausted,
+  planEvidence,
+  trackFetch,
+  type SubrequestBudget,
+} from "./budget";
+import {
+  cacheCountsAsSubrequest,
+  readVerification,
+  searchWeb,
+  verificationCacheKey,
+  writeVerification,
+  type CacheCharge,
+} from "./firecrawl";
 import { expectNumber, expectOneOf, expectString, isRecord } from "../../shared/json";
 
 export interface AnalyzeInput {
@@ -88,12 +101,19 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   deps.signal?.addEventListener("abort", abortOwned);
   const budgetTimer = setTimeout(abortOwned, Math.max(1, deadline - Date.now()));
   const signal = owned.signal;
+  const cacheOn = cacheCountsAsSubrequest();
+  let llmHold = 2;
+  const chargeCache: CacheCharge = (op) => {
+    if (op === "write" && !budget.canSpend(llmHold + 1)) return false;
+    return budget.trySpend(1);
+  };
   try {
   const stage = (name: StageName, status: "start" | "done" | "progress", done?: number, total?: number) =>
     deps.onStage?.(name, status, done, total);
 
+  budget.setStage("ingest");
   stage("ingest", "start");
-  const ingested = await ingest(input, fetchImpl, searchKey, warnings, signal);
+  const ingested = await ingest(input, fetchImpl, searchKey, warnings, signal, () => budget.canSpend(1), chargeCache);
   stage("ingest", "done");
   deps.onPreview?.({
     title: ingested.title,
@@ -102,6 +122,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     publishedAt: ingested.publishedAt,
   });
 
+  budget.setStage("segment");
   stage("segment", "start");
   const segmented = await segmentArticle({
     text: ingested.text,
@@ -113,6 +134,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     warnings,
     deadline,
     signal,
+    attempts: budget.canSpend(6) ? 2 : 1,
   });
   stage("segment", "done");
   if (
@@ -129,6 +151,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   let searchDegraded = false;
   const evidence = new Map<string, EvidenceItem[]>();
 
+  budget.setStage("evidence");
   stage("evidence", "start");
   const searchable = segmented.segments.filter((segment) => isSearchable(segment.claimType));
   const budgeted = [...searchable].sort(compareClaims).slice(0, LIMITS.maxSearches);
@@ -136,19 +159,42 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   const overBudget = new Set(searchable.filter((segment) => !budgetedIds.has(segment.id)).map((segment) => segment.id));
   const echoOnly = new Set<string>();
   const searchFailed = new Set<string>();
+  const cutShort = new Set<string>();
 
-  if (searchEnabled && searchKey) {
-    const queries = await buildQueries(budgeted, config, llmKey, fetchImpl, warnings, deadline, budget, signal);
-    let finishedSearches = 0;
-    for (let index = 0; index < budgeted.length; index++) {
-      const segment = budgeted[index];
+  if (searchEnabled && searchKey && budgeted.length > 0) {
+    const searchCost = cacheOn ? 2 : 1;
+    const verifyCost = cacheOn ? 2 : 1;
+    const planned = planEvidence(budget.remaining(), budgeted.length, { search: searchCost, verify: verifyCost });
+    const selected = budgeted.slice(0, planned);
+    const verifyGroups = planned === 0 ? 0 : Math.ceil(planned / 4);
+    llmHold = 1 + verifyGroups;
+    if (planned < budgeted.length) {
+      abandonSearches(
+        budgeted,
+        planned,
+        evidence,
+        searchFailed,
+        cutShort,
+        warnings,
+        "search stopped to stay within the worker subrequest limit",
+      );
+      searchDegraded = true;
+    }
+    const queries =
+      selected.length === 0
+        ? new Map<string, string>()
+        : await buildQueries(selected, config, llmKey, fetchImpl, warnings, deadline, budget, signal);
+    llmHold = 1 + verifyGroups;
+    let finishedSearches = planned < budgeted.length ? budgeted.length - planned : 0;
+    for (let index = 0; index < selected.length; index++) {
+      const segment = selected[index];
       tick();
-      if (signal.aborted || Date.now() > deadline - 3_000 || !budget.canSpend(SUBREQUEST_RESERVE)) {
+      if (signal.aborted || Date.now() > deadline - 3_000 || !budget.canSpend(searchCost)) {
         const reason =
           signal.aborted || Date.now() > deadline - 3_000
             ? "analysis deadline reached before search finished"
             : "search stopped to stay within the worker subrequest limit";
-        abandonSearches(budgeted, index, evidence, searchFailed, warnings, reason);
+        abandonSearches(selected, index, evidence, searchFailed, cutShort, warnings, reason);
         searchDegraded = true;
         break;
       }
@@ -165,6 +211,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
               timeoutMs,
               canSpend: () => budget.canSpend(1),
               signal,
+              charge: chargeCache,
             }),
             timeoutMs + 750,
             "search timed out",
@@ -182,14 +229,30 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
         remember(warnings, error, "search");
         searchDegraded = true;
         searchFailed.add(segment.id);
+        cutShort.add(segment.id);
         evidence.set(segment.id, []);
+        if (isBudgetExhausted(error) || signal.aborted) {
+          abandonSearches(
+            selected,
+            index + 1,
+            evidence,
+            searchFailed,
+            cutShort,
+            warnings,
+            isBudgetExhausted(error)
+              ? "search stopped to stay within the worker subrequest limit"
+              : "analysis deadline reached before search finished",
+          );
+          break;
+        }
       }
       finishedSearches += 1;
-      stage("evidence", "progress", finishedSearches, budgeted.length);
+      stage("evidence", "progress", Math.min(finishedSearches, budgeted.length), budgeted.length);
     }
   }
   stage("evidence", "done");
 
+  budget.setStage("verify");
   stage("verify", "start");
   const verified = new Map<string, SegmentResult>();
   const toVerify = segmented.segments.filter(
@@ -222,19 +285,20 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   let cursor = 0;
   while (cursor < groups.length) {
     tick();
-    if (signal.aborted || Date.now() > deadline || !budget.canSpend(2)) {
+    if (signal.aborted || Date.now() > deadline || !budget.canSpend(1)) {
       remember(warnings, new Error("analysis deadline reached before verification finished"), "llm");
       for (const group of groups.slice(cursor)) {
         for (const segment of group) {
           verified.set(segment.id, unverifiedSegment(segment, uiLanguage, searchEnabled, "check-failed"));
+          cutShort.add(segment.id);
         }
       }
       break;
     }
-    const parallel = Math.max(1, Math.min(groups.length - cursor, Math.max(1, budget.remaining() - 2)));
+    const parallel = Math.max(1, Math.min(groups.length - cursor, Math.max(1, budget.remaining() - 1)));
     const batch = groups.slice(cursor, cursor + parallel);
     cursor += batch.length;
-    const attempts = budget.canSpend(SUBREQUEST_RESERVE) ? 2 : 1;
+    const attempts = budget.canSpend(6) ? 2 : 1;
     await Promise.all(
       batch.map(async (group, index) => {
         stage("verify", cursor - batch.length + index === 0 ? "start" : "progress", cursor, groups.length);
@@ -257,6 +321,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
               attempts,
               timeoutMs,
               signal,
+              charge: chargeCache,
             }),
             timeoutMs + 750,
             "verification timed out",
@@ -267,10 +332,21 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
           remember(warnings, error, "llm");
           for (const segment of group) {
             verified.set(segment.id, unverifiedSegment(segment, uiLanguage, searchEnabled, "check-failed"));
+            cutShort.add(segment.id);
           }
         }
       }),
     );
+    if (signal.aborted || !budget.canSpend(1)) {
+      for (const group of groups.slice(cursor)) {
+        for (const segment of group) {
+          if (verified.has(segment.id)) continue;
+          verified.set(segment.id, unverifiedSegment(segment, uiLanguage, searchEnabled, "check-failed"));
+          cutShort.add(segment.id);
+        }
+      }
+      break;
+    }
   }
 
   for (const segment of segmented.segments) {
@@ -329,6 +405,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   stage("verify", "done");
   tick();
 
+  budget.setStage("score");
   stage("score", "start");
   tick();
   const ordered = segmented.segments
@@ -338,7 +415,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   const consistencyMs =
     deps.consistencyTimeoutMs ?? Math.min(8_000, deadline - Date.now() - 500);
   let contradictions: Contradiction[] = [];
-  if (!signal.aborted && consistencyMs >= 200) {
+  if (!signal.aborted && consistencyMs >= 200 && budget.canSpend(1)) {
     try {
       contradictions = await withTimeout(
         findContradictions({
@@ -375,6 +452,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       hasValidSource: segment.sources.length > 0,
       tone: blendTone(segment.text, rhetoricOf(segment.label, draftById.get(segment.id)?.claimType)),
       inCoverage: !overBudget.has(segment.id),
+      countsTowardScore: !cutShort.has(segment.id),
     })),
     {
       contradictionCount: contradictions.length,
@@ -382,6 +460,9 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       searchDegraded,
       uiLanguage,
       outlet,
+      degraded: cutShort.size > 0,
+      claimsVerified: budgeted.filter((segment) => !cutShort.has(segment.id)).length,
+      claimsTotal: budgeted.length,
     },
   );
   stage("score", "done");
@@ -399,6 +480,9 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     score,
     contradictions,
     truncated: segmented.truncated || ingested.truncated,
+    degraded: cutShort.size > 0,
+    claimsVerified: budgeted.filter((segment) => !cutShort.has(segment.id)).length,
+    claimsTotal: budgeted.length,
     meta: {
       searchEnabled,
       searchDegraded,
@@ -408,6 +492,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       extraction: ingested.extraction,
       warnings,
       outlet,
+      subrequests: budget.snapshot(),
     },
   };
   } finally {
@@ -422,6 +507,8 @@ async function ingest(
   firecrawlKey: string | undefined,
   warnings: string[],
   signal?: AbortSignal,
+  canSpend?: () => boolean,
+  charge?: CacheCharge,
 ) {
   const hasText = typeof input.text === "string" && input.text.trim().length > 0;
   const hasUrl = typeof input.url === "string" && input.url.trim().length > 0;
@@ -437,7 +524,7 @@ async function ingest(
     if (url.length > LIMITS.maxUrlChars) {
       throw new HttpError(400, "That URL is too long.");
     }
-    const extracted = await fetchArticle(url, fetchImpl, firecrawlKey, signal);
+    const extracted = await fetchArticle(url, fetchImpl, firecrawlKey, signal, canSpend, charge);
     let hostname: string | null = null;
     try {
       hostname = new URL(extracted.finalUrl).hostname.replace(/^www\./, "");
@@ -456,7 +543,7 @@ async function ingest(
     };
   }
 
-  let raw = stripCredits(normalizeWhitespace(input.text || ""));
+  let raw = stripPromoItems(stripCredits(normalizeWhitespace(input.text || "")));
   let truncated = false;
   if (raw.length < LIMITS.minArticleChars) {
     throw new HttpError(400, "Paste a longer article. Very short text cannot be audited.");
@@ -492,6 +579,7 @@ async function segmentArticle(options: {
   warnings: string[];
   deadline: number;
   signal?: AbortSignal;
+  attempts: number;
 }): Promise<{
   segments: DraftSegment[];
   detectedLanguage: DetectedLanguage;
@@ -539,6 +627,7 @@ async function segmentArticle(options: {
         maxTokens: 4096,
         timeoutMs: remainingMs(options.deadline, 22_000),
         signal: options.signal,
+        attempts: options.attempts,
       });
       genre = parsed.genre;
       detected = localLanguage === "other" ? parsed.detectedLanguage : localLanguage;
@@ -602,7 +691,7 @@ async function buildQueries(
   const queries = new Map<string, string>();
   if (segments.length === 0) return queries;
   for (const batch of chunk(segments, 6)) {
-    if (Date.now() > deadline - 8_000 || !budget.canSpend(SUBREQUEST_RESERVE)) {
+    if (Date.now() > deadline - 8_000 || !budget.canSpend(1)) {
       remember(warnings, new Error("query generation stopped before the deadline or subrequest limit"), "llm");
       break;
     }
@@ -623,6 +712,7 @@ async function buildQueries(
       for (const item of parsed) queries.set(item.id, item.query);
     } catch (error) {
       remember(warnings, error, "llm");
+      if (isBudgetExhausted(error)) break;
     }
   }
   return queries;
@@ -659,13 +749,14 @@ async function judgeGroup(options: {
   attempts: number;
   timeoutMs: number;
   signal?: AbortSignal;
+  charge?: CacheCharge;
 }): Promise<Map<string, SegmentResult>> {
   const results = new Map<string, SegmentResult>();
   const pending: DraftSegment[] = [];
   for (const segment of options.group) {
     const urls = (options.evidence.get(segment.id) ?? []).map((item) => item.url);
     const key = verificationCacheKey(segment.text, urls, options.uiLanguage);
-    const cached = await readVerification(key);
+    const cached = await readVerification(key, options.charge);
     if (!cached || !(LABELS as readonly string[]).includes(cached.label)) {
       pending.push(segment);
       continue;
@@ -749,12 +840,16 @@ async function judgeGroup(options: {
     });
     results.set(segment.id, finishSegment(segment, applied));
     const urls = (options.evidence.get(segment.id) ?? []).map((item) => item.url);
-    await writeVerification(verificationCacheKey(segment.text, urls, options.uiLanguage), {
-      label: verdict.label,
-      confidence: verdict.confidence,
-      explanation: verdict.explanation,
-      sourceUrls: verdict.sourceUrls,
-    });
+    await writeVerification(
+      verificationCacheKey(segment.text, urls, options.uiLanguage),
+      {
+        label: verdict.label,
+        confidence: verdict.confidence,
+        explanation: verdict.explanation,
+        sourceUrls: verdict.sourceUrls,
+      },
+      options.charge,
+    );
   }
   return results;
 }
@@ -925,14 +1020,16 @@ function abandonSearches(
   fromIndex: number,
   evidence: Map<string, EvidenceItem[]>,
   searchFailed: Set<string>,
+  cutShort: Set<string>,
   warnings: string[],
   reason: string,
 ): void {
   remember(warnings, new Error(reason), "search");
   for (let index = fromIndex; index < budgeted.length; index++) {
     const id = budgeted[index].id;
-    if (evidence.has(id)) continue;
+    if (evidence.has(id) && !searchFailed.has(id)) continue;
     searchFailed.add(id);
+    cutShort.add(id);
     evidence.set(id, []);
   }
 }

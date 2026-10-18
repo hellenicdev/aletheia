@@ -97,7 +97,7 @@ export function consistencySystem(lang: UiLanguage): string {
   return `TASK:consistency
 You look only for direct logical contradictions.
 Flag a pair only when both sentences are about the same entity at the same time and cannot both be true.
-Do not flag different people, different ages, different wrecks, different dates, or a step where some objects remain and others were raised. Those can both be true.
+Do not flag different people, different ages, different wrecks, different dates, or a step where some objects remain and others were raised. Those can both be true. A shared kind of number is not a shared subject: 21 and 33 are different people when each number is an age.
 If you are unsure, return an empty list.
 Quote both sentences inside the explanation, then say why they cannot both be true.
 explanation is one or two sentences in ${languageName(lang)}.

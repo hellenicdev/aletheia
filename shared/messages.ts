@@ -1,5 +1,11 @@
 import type { UiLanguage } from "./labels";
 
+/** Shown in the verdict and the page when verification stopped early. */
+export function partialClaimsNotice(lang: UiLanguage, verified: number, total: number): string {
+  if (lang === "el") return `Επαληθεύτηκαν μόνο ${verified} από ${total} ισχυρισμούς.`;
+  return `Only ${verified} of ${total} claims could be verified.`;
+}
+
 export function opinionExplanation(lang: UiLanguage): string {
   return lang === "el"
     ? "Πρόκειται για αξιολογική κρίση ή ερμηνεία, όχι για ισχυρισμό που μπορεί να ελεγχθεί με δημόσια τεκμήρια."

@@ -425,6 +425,100 @@ describe("analyze", () => {
     expect(result.meta.searchDegraded).toBe(true);
   });
 
+  it("records subrequests per stage for a typical pasted article", async () => {
+    const { fetchImpl } = scriptedFetch();
+    const result = await analyze({ text: article, uiLanguage: "en" }, { env, fetchImpl });
+    const counts = result.meta.subrequests;
+    expect(counts.ingest + counts.segment + counts.evidence + counts.verify + counts.score).toBe(counts.total);
+    expect(counts.total).toBeLessThanOrEqual(40);
+    expect(counts).toEqual({ ingest: 0, segment: 1, evidence: 3, verify: 1, score: 1, total: 6 });
+    expect(result.degraded).toBe(false);
+    expect(result.claimsVerified).toBe(2);
+    expect(result.claimsTotal).toBe(2);
+    expect(result.score.verdict).not.toContain("Only ");
+  });
+
+  it("stops before search when the budget cannot cover it and does not drag the score", async () => {
+    const facts = [
+      "The council voted 7 to 2 on Monday and published the minutes for residents.",
+      "The marina fee doubled overnight after the harbour master signed the notice.",
+      "Twelve boats remain on the waiting list until the spring season opens.",
+    ].join(" ");
+    let searches = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        searches += 1;
+        throw new Error("Too many subrequests by single Worker invocation");
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(classifyPayload(user, () => ({ claimType: "checkable_factual", note: "A recorded claim." })));
+      }
+      if (system.startsWith("TASK:queries") || system.startsWith("TASK:verify")) {
+        throw new Error(`should not call ${system.slice(0, 24)}`);
+      }
+      if (system.startsWith("TASK:consistency")) {
+        return llmPayload({ contradictions: [] });
+      }
+      throw new Error(system.slice(0, 24));
+    };
+    const result = await analyze({ text: facts, uiLanguage: "en" }, { env, fetchImpl, subrequestLimit: 3 });
+    expect(searches).toBe(0);
+    expect(result.degraded).toBe(true);
+    expect(result.claimsVerified).toBe(0);
+    expect(result.claimsTotal).toBe(3);
+    expect(result.segments.every((segment) => segment.label === "Unverifiable")).toBe(true);
+    expect(result.segments[0]?.explanation.toLowerCase()).toContain("failed");
+    expect(result.score.factualAccuracy).toBeNull();
+    expect(result.score.sourcing).toBeNull();
+    expect(result.score.overall).toBeGreaterThanOrEqual(55);
+    expect(result.score.verdict).toContain("Only 0 of 3 claims could be verified.");
+    expect(result.meta.subrequests.total).toBeLessThanOrEqual(3);
+  });
+
+  it("stops the remaining searches after a subrequest error", async () => {
+    let searches = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        searches += 1;
+        throw new Error("Too many subrequests by single Worker invocation. To configure this limit, see the docs.");
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(classifyPayload(user, () => ({ claimType: "checkable_factual", note: "A recorded claim." })));
+      }
+      if (system.startsWith("TASK:queries")) {
+        return llmPayload({
+          queries: [
+            { id: "s1", query: "council vote Monday" },
+            { id: "s2", query: "marina fee doubled" },
+            { id: "s3", query: "boats waiting list" },
+          ],
+        });
+      }
+      if (system.startsWith("TASK:verify")) throw new Error("verify should not run");
+      if (system.startsWith("TASK:consistency")) return llmPayload({ contradictions: [] });
+      throw new Error(system.slice(0, 24));
+    };
+    const facts = [
+      "The council voted 7 to 2 on Monday and published the minutes for residents.",
+      "The marina fee doubled overnight after the harbour master signed the notice.",
+      "Twelve boats remain on the waiting list until the spring season opens.",
+    ].join(" ");
+    const result = await analyze({ text: facts, uiLanguage: "en" }, { env, fetchImpl });
+    expect(searches).toBe(1);
+    expect(result.degraded).toBe(true);
+    expect(result.claimsVerified).toBe(0);
+    expect(result.claimsTotal).toBe(3);
+    expect(result.score.verdict).toContain("Only 0 of 3 claims could be verified.");
+  });
+
   it("returns a partial result when search hangs past the deadline", async () => {
     const fact = "The council voted 7 to 2 on Monday and published the minutes for residents.";
     let ticks = 0;
@@ -921,6 +1015,64 @@ describe("handleRequest", () => {
     const terminal = events.filter((event) => event.event === "result" || event.event === "error");
     expect(terminal).toHaveLength(1);
   }, 12_000);
+
+  it("emits a final event when a model call never resolves", async () => {
+    const fetchImpl: typeof fetch = () => new Promise(() => {});
+    const started = Date.now();
+    const response = await handleRequest(post(article), env, {
+      fetchImpl,
+      rate: { buckets: new Map(), inFlight: { count: 0 } },
+      now: () => 80_000,
+      deadlineMs: 1_200,
+    });
+    const events = parseSse(await response.text());
+    expect(Date.now() - started).toBeLessThan(5_000);
+    const terminal = events.filter((event) => event.event === "result" || event.event === "error");
+    expect(terminal).toHaveLength(1);
+  }, 8_000);
+
+  it("emits a final event when the model stalls immediately after a scrape", async () => {
+    let scraped = false;
+    const fetchImpl: typeof fetch = (input) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        scraped = true;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              success: true,
+              data: {
+                markdown: `${article} The harbour master signed the notice and published the minutes for residents.`,
+                metadata: { title: "Harbour", sourceURL: "https://news.example/story" },
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        );
+      }
+      return new Promise(() => {});
+    };
+    const started = Date.now();
+    const response = await handleRequest(
+      new Request("https://worker.test/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: "http://127.0.0.1:5173" },
+        body: JSON.stringify({ url: "https://news.example/story", uiLanguage: "en" }),
+      }),
+      env,
+      {
+        fetchImpl,
+        rate: { buckets: new Map(), inFlight: { count: 0 } },
+        now: () => 90_000,
+        deadlineMs: 1_200,
+      },
+    );
+    const events = parseSse(await response.text());
+    expect(scraped).toBe(true);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    const terminal = events.filter((event) => event.event === "result" || event.event === "error");
+    expect(terminal).toHaveLength(1);
+  }, 8_000);
 
   it("reuses a cached verification for the same claim and evidence", async () => {
     clearSearchCache();

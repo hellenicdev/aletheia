@@ -53,12 +53,27 @@ export interface AnalysisArticle {
   detectedLanguage: DetectedLanguage;
 }
 
+export interface SubrequestCounts {
+  ingest: number;
+  segment: number;
+  evidence: number;
+  verify: number;
+  score: number;
+  total: number;
+}
+
 export interface AnalysisResult {
   article: AnalysisArticle;
   segments: SegmentResult[];
   score: ScoreResult;
   contradictions: Contradiction[];
   truncated: boolean;
+  /** True when budget, the deadline, or an error left some selected claims unchecked. */
+  degraded: boolean;
+  /** Selected claims that received a finished check. */
+  claimsVerified: number;
+  /** Selected claims that were meant to be checked, up to the search cap. */
+  claimsTotal: number;
   meta: {
     searchEnabled: boolean;
     searchDegraded: boolean;
@@ -68,6 +83,7 @@ export interface AnalysisResult {
     extraction: "pasted" | "firecrawl" | "local";
     warnings: string[];
     outlet: OutletKind;
+    subrequests: SubrequestCounts;
   };
 }
 

@@ -73,9 +73,22 @@ export function isIndependent(
 }
 
 const WIRE_BYLINE =
-  /\bassociated press\b|\(\s*ap\s*\)|(?:^|[\s—–|])ap\s*[—–|-]|[—–|-]\s*ap\s*$/i;
+  /\bassociated press\b|\(\s*ap\s*\)|(?:^|[\s—–|])ap\s*[—–|-]|[—–|-]\s*ap\s*$|\bvia the associated press\b/i;
 
 const AP_CREDIT = /\bassociated press\b|\(\s*ap\s*\)/i;
+
+/** A byline credit for a wire, ignored when the page is that wire's own site. */
+const FOREIGN_WIRE_CREDITS: { pattern: RegExp; origins: string[] }[] = [
+  { pattern: WIRE_BYLINE, origins: ["apnews.com"] },
+  {
+    pattern: /\bagence france-presse\b|\(\s*afp\s*\)|(?:^|[\s—–|])afp\s*[—–|-]|[—–|-]\s*afp\b/i,
+    origins: ["afp.com"],
+  },
+  {
+    pattern: /\(\s*reuters\s*\)|(?:^|[\s—–|])reuters\s*[—–:-]|[—–|-]\s*reuters\b|\bvia reuters\b/i,
+    origins: ["reuters.com"],
+  },
+];
 
 function articleIsAp(domain: string | null | undefined, title: string | null, text: string): boolean {
   const host = (domain ?? "").replace(/^www\./, "").toLowerCase();
@@ -83,9 +96,9 @@ function articleIsAp(domain: string | null | undefined, title: string | null, te
   return WIRE_BYLINE.test(`${title ?? ""} ${text.slice(0, 700)}`);
 }
 
-/** A reprint of this article, or a page carrying an AP byline, is not a second source. */
+/** A reprint of this article, or a page that credits a wire, is not a second source. */
 export function isSyndicatedCopy(
-  item: { title?: string; snippet?: string },
+  item: { url?: string; title?: string; snippet?: string },
   articleTitle: string | null,
   articleText: string,
   articleDomain?: string | null,
@@ -93,11 +106,11 @@ export function isSyndicatedCopy(
   const title = (item.title ?? "").replace(/\s+/g, " ").trim();
   const snippet = (item.snippet ?? "").replace(/\s+/g, " ").trim();
   const surface = `${title} ${snippet}`;
-  if (WIRE_BYLINE.test(surface)) return true;
+  if (creditsForeignWire(surface, item.url)) return true;
   if (articleIsAp(articleDomain, articleTitle, articleText) && AP_CREDIT.test(surface)) return true;
   const ours = (articleTitle ?? "").replace(/\s+/g, " ").trim();
   const lead = articleText.replace(/\s+/g, " ").trim().slice(0, 500);
-  if (nearCopy(ours, title, 24, 24)) return true;
+  if (nearlyIdenticalTitle(ours, title)) return true;
   if (nearCopy(ours, snippet, 24, 40)) return true;
   if (nearCopy(lead, title, 40, 24)) return true;
   if (snippet.length >= 48 && lead.length >= 48) {
@@ -106,6 +119,29 @@ export function isSyndicatedCopy(
   }
   if (nearCopy(lead, snippet, 40, 40)) return true;
   return false;
+}
+
+function creditsForeignWire(surface: string, url?: string): boolean {
+  const host = url ? (hostOf(url) ?? "") : "";
+  return FOREIGN_WIRE_CREDITS.some((wire) => {
+    if (!wire.pattern.test(surface)) return false;
+    if (!host) return true;
+    return !wire.origins.some((origin) => host === origin || host.endsWith(`.${origin}`));
+  });
+}
+
+/**
+ * A shorter headline that repeats the article title is the same story.
+ * One-sided overlap counts: the reprint often adds only a site suffix.
+ */
+function nearlyIdenticalTitle(articleTitle: string, resultTitle: string): boolean {
+  if (articleTitle.length < 24 || resultTitle.length < 24) return false;
+  const forward = tokenOverlap(articleTitle, resultTitle);
+  const backward = tokenOverlap(resultTitle, articleTitle);
+  const min = Math.min(forward, backward);
+  const max = Math.max(forward, backward);
+  if (min < 0.4) return false;
+  return min >= 0.55 || max >= 0.85;
 }
 
 /** Token overlap above ~0.6 in both directions means the result repeats this article. */

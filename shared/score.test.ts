@@ -101,6 +101,61 @@ describe("aggregateScore", () => {
     expect(score.verdict).toContain("0 από 2");
   });
 
+  it("does not let a cut-short run drag the score of the claims that were checked", () => {
+    const checked = [
+      ...Array.from({ length: 3 }, () => segment("True")),
+      ...Array.from({ length: 9 }, () => ({ ...segment("Unverifiable", 0.3, false), countsTowardScore: false })),
+    ];
+    const score = aggregateScore(checked, {
+      contradictionCount: 0,
+      searchEnabled: true,
+      searchDegraded: true,
+      uiLanguage: "en",
+      degraded: true,
+      claimsVerified: 3,
+      claimsTotal: 12,
+    });
+    expect(score.overall).toBe(100);
+    expect(score.factualAccuracy).toBe(100);
+    expect(score.sourcing).toBe(100);
+    expect(score.verdict).toContain("Only 3 of 12 claims could be verified.");
+    expect(score.counts.Unverifiable).toBe(9);
+    const greek = aggregateScore(checked, {
+      contradictionCount: 0,
+      searchEnabled: true,
+      searchDegraded: true,
+      uiLanguage: "el",
+      degraded: true,
+      claimsVerified: 3,
+      claimsTotal: 12,
+    });
+    expect(greek.verdict).toContain("Επαληθεύτηκαν μόνο 3 από 12 ισχυρισμούς.");
+    expect(greek.overall).toBe(100);
+  });
+
+  it("scores a run where nothing could be verified as uncertain rather than a failed search pool", () => {
+    const score = aggregateScore(
+      Array.from({ length: 12 }, () => ({ ...segment("Unverifiable", 0.3, false), countsTowardScore: false })),
+      {
+        contradictionCount: 0,
+        searchEnabled: true,
+        searchDegraded: true,
+        uiLanguage: "en",
+        degraded: true,
+        claimsVerified: 0,
+        claimsTotal: 12,
+      },
+    );
+    expect(score.factualAccuracy).toBeNull();
+    expect(score.sourcing).toBeNull();
+    expect(score.factualBasis).toBe("uncertain");
+    expect(score.overall).toBeGreaterThanOrEqual(55);
+    expect(score.verdict).toContain("Only 0 of 12 claims could be verified.");
+    expect(score.verdict).toContain("live search failed");
+    expect(score.verdict).not.toContain("mostly opinion");
+    expect(score.verdict).not.toContain("opinion or commentary");
+  });
+
   it("returns a zero score for an empty article", () => {
     const score = aggregateScore([], {
       contradictionCount: 0,
