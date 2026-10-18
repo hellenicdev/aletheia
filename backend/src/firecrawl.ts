@@ -5,6 +5,7 @@ import { combineSignals, deadlineReached, isDeadline, raceAbort } from "./deadli
 import { HttpError, UpstreamError, redactSecret } from "./errors";
 import { LIMITS } from "./limits";
 import { assertPublicHttpUrl, isBlockedHost } from "./ssrf";
+import { clearTavilyCache } from "./tavily";
 import { acquireOutbound, resetOutboundBudget } from "./throttle";
 
 const FIRECRAWL_API = "https://api.firecrawl.dev";
@@ -48,6 +49,7 @@ export function clearSearchCache(): void {
   searchCache.clear();
   scrapeCache.clear();
   verifyCache.clear();
+  clearTavilyCache();
   resetOutboundBudget();
 }
 

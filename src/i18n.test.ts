@@ -27,5 +27,7 @@ describe("i18n", () => {
       "This page could not be read. Paste the article text instead.",
     );
     expect(t("el", "scrapeFailed")).toContain("Επικολλήστε το κείμενο του άρθρου");
+    expect(t("en", "searchViaTavily")).toBe("Search: Tavily");
+    expect(t("el", "searchViaTavily")).toBe("Αναζήτηση: Tavily");
   });
 });

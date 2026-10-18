@@ -113,6 +113,8 @@ const en = {
   source: "Source",
   published: "Published",
   openSource: "Open source",
+  searchViaTavily: "Search: Tavily",
+  searchViaFirecrawl: "Search: Firecrawl",
 };
 
 const el: Record<keyof typeof en, string> = {
@@ -228,6 +230,8 @@ const el: Record<keyof typeof en, string> = {
   source: "Πηγή",
   published: "Δημοσίευση",
   openSource: "Άνοιγμα πηγής",
+  searchViaTavily: "Αναζήτηση: Tavily",
+  searchViaFirecrawl: "Αναζήτηση: Firecrawl",
 };
 
 export const STRINGS = { en, el };

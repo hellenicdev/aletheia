@@ -163,7 +163,10 @@ app.innerHTML = `
           </details>
           <details class="fold method">
             <summary data-i18n="howTitle"></summary>
-            <div class="fold-body"><p data-i18n="howBody"></p></div>
+            <div class="fold-body">
+              <p data-i18n="howBody"></p>
+              <p class="method-provider" id="search-provider" hidden></p>
+            </div>
           </details>
         </div>
       </section>
@@ -492,6 +495,7 @@ function renderScore() {
     $<HTMLElement>("#notice").hidden = true;
     $<HTMLElement>("#subscores").replaceChildren();
     $<HTMLElement>("#contradictions").replaceChildren();
+    $<HTMLElement>("#search-provider").hidden = true;
     $<HTMLElement>("#warnings").hidden = true;
     return;
   }
@@ -637,6 +641,12 @@ function outageMessage(result: AnalysisResult): string | null {
 function renderArticle() {
   const result = state.result;
   if (!result) return;
+  const providerLine = $<HTMLElement>("#search-provider");
+  const provider = result.meta.searchStatus.provider;
+  providerLine.hidden = !provider;
+  providerLine.textContent = provider
+    ? t(state.lang, provider === "tavily" ? "searchViaTavily" : "searchViaFirecrawl")
+    : "";
   const title = result.article.title || t(state.lang, "pasted");
   $<HTMLElement>("#article-title").textContent = title;
   $<HTMLElement>("#article-heading").textContent = title;

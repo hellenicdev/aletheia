@@ -71,9 +71,13 @@ export type SearchOutageReason =
   | "upstream_error"
   | "failed";
 
+export type SearchProviderName = "firecrawl" | "tavily";
+
 export interface SearchStatus {
   state: SearchState;
   reason: SearchOutageReason | null;
+  /** Provider that supplied the evidence. Null when search did not succeed. */
+  provider: SearchProviderName | null;
 }
 
 export interface AnalysisResult {
@@ -101,7 +105,7 @@ export interface AnalysisResult {
     model: string;
     uiLanguage: UiLanguage;
     requestId: string;
-    extraction: "pasted" | "firecrawl" | "local" | "direct";
+    extraction: "pasted" | "firecrawl" | "local" | "direct" | "tavily";
     warnings: string[];
     outlet: OutletKind;
     subrequests: SubrequestCounts;

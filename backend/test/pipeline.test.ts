@@ -260,7 +260,7 @@ describe("analyze", () => {
     expect(result.segments[1].label).toBe("Unverifiable");
     expect(result.segments[1].sources).toEqual([]);
     expect(result.score.verdict).toContain("model-knowledge-only");
-    expect(result.meta.searchStatus).toEqual({ state: "ok", reason: null });
+    expect(result.meta.searchStatus).toEqual({ state: "ok", reason: null, provider: null });
     expect(result.provisional).toBe(false);
   });
 
@@ -326,7 +326,7 @@ describe("analyze", () => {
     expect(result.segments[0].evidenceMode).toBe("model-knowledge-only");
     expect(result.segments[0].confidence).toBeLessThanOrEqual(0.55);
     expect(result.segments[1].label).toBe("Unverifiable");
-    expect(result.meta.searchStatus).toEqual({ state: "ok", reason: null });
+    expect(result.meta.searchStatus).toEqual({ state: "ok", reason: null, provider: "firecrawl" });
     expect(result.provisional).toBe(false);
   });
 
@@ -566,7 +566,7 @@ describe("analyze", () => {
     ].join(" ");
     const result = await analyze({ text: facts, uiLanguage: "en" }, { env, fetchImpl });
     expect(searches).toBe(1);
-    expect(result.meta.searchStatus).toEqual({ state: "unavailable", reason: "out_of_credits" });
+    expect(result.meta.searchStatus).toEqual({ state: "unavailable", reason: "out_of_credits", provider: null });
     expect(result.provisional).toBe(true);
     expect(result.meta.searchDegraded).toBe(true);
     expect(result.score.factualAccuracy).toBeNull();
@@ -620,7 +620,7 @@ describe("analyze", () => {
     ]);
     expect(Date.now() - started).toBeLessThan(2500);
     expect(searches).toBe(1);
-    expect(result.meta.searchStatus).toEqual({ state: "unavailable", reason: "out_of_credits" });
+    expect(result.meta.searchStatus).toEqual({ state: "unavailable", reason: "out_of_credits", provider: null });
     expect(result.provisional).toBe(true);
     expect(result.score.factualAccuracy).toBeNull();
     expect(result.score.sourcing).toBeNull();
@@ -671,7 +671,7 @@ describe("analyze", () => {
     expect(result.article.text).toContain("voted 7 to 2");
     expect(searches).toBe(0);
     expect(systems.some((system) => system.startsWith("TASK:queries"))).toBe(false);
-    expect(result.meta.searchStatus).toEqual({ state: "unavailable", reason: "out_of_credits" });
+    expect(result.meta.searchStatus).toEqual({ state: "unavailable", reason: "out_of_credits", provider: null });
     expect(result.provisional).toBe(true);
     expect(result.score.verdict).toContain("Only 0 of");
     expect(result.meta.subrequests.ingest).toBeGreaterThanOrEqual(2);
@@ -734,7 +734,11 @@ describe("analyze", () => {
     expect(searches).toBe(2);
     expect(result.claimsVerified).toBe(1);
     expect(result.claimsTotal).toBe(3);
-    expect(result.meta.searchStatus).toEqual({ state: "partial", reason: "out_of_credits" });
+    expect(result.meta.searchStatus).toEqual({
+      state: "partial",
+      reason: "out_of_credits",
+      provider: "firecrawl",
+    });
     expect(result.segments.some((segment) => segment.sources.length > 0)).toBe(true);
     expect(result.provisional).toBe(
       isProvisionalScore({
@@ -1098,6 +1102,215 @@ describe("analyze", () => {
       analyze({ url: "http://169.254.169.254/latest/meta-data", uiLanguage: "en" }, { env, fetchImpl }),
     ).rejects.toMatchObject({ status: 400 });
   });
+
+  it("uses Tavily when Firecrawl search is out of credits and keeps the score final", async () => {
+    let firecrawlSearches = 0;
+    let tavilySearches = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        firecrawlSearches += 1;
+        return new Response(JSON.stringify({ error: "Insufficient credits" }), { status: 402 });
+      }
+      if (url.includes("api.tavily.com/search")) {
+        tavilySearches += 1;
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        expect(body.search_depth).toBe("basic");
+        expect(body.topic).toBe("news");
+        expect(body.max_results).toBe(5);
+        expect(body.include_raw_content).toBe(true);
+        expect(JSON.stringify(body)).not.toContain("tavily-test-key");
+        const headers = new Headers(init?.headers);
+        expect(headers.get("authorization")).toBe("Bearer tavily-test-key");
+        return new Response(
+          JSON.stringify({
+            results: [
+              {
+                title: "Council minutes",
+                url: minutes.url,
+                content: "The council voted 7 to 2 on Monday.",
+                raw_content:
+                  "The council voted 7 to 2 on Monday and the minutes name the harbour master for residents who asked.",
+                published_date: "2026-03-01",
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(classifyPayload(user, (text) => {
+          if (text.includes("betrayal")) return { claimType: "rhetorical", note: "Loaded language without a fact." };
+          return { claimType: "checkable_factual", note: "A recorded claim." };
+        }));
+      }
+      if (system.startsWith("TASK:queries")) {
+        return llmPayload({
+          queries: [
+            { id: "s1", query: "council vote Monday" },
+            { id: "s2", query: "marina fee doubled" },
+          ],
+        });
+      }
+      if (system.startsWith("TASK:verify")) {
+        return llmPayload({
+          results: [
+            {
+              id: "s1",
+              label: "True",
+              confidence: 0.9,
+              explanation: "The minutes record a seven to two vote.",
+              sourceUrls: [minutes.url],
+            },
+            {
+              id: "s2",
+              label: "Unverifiable",
+              confidence: 0.4,
+              explanation: "The fee change is not in the retrieved pages.",
+              sourceUrls: [],
+            },
+          ],
+        });
+      }
+      if (system.startsWith("TASK:consistency")) return llmPayload({ contradictions: [] });
+      throw new Error(system.slice(0, 24));
+    };
+    const result = await analyze(
+      { text: article, uiLanguage: "en" },
+      { env: { ...env, TAVILY_API_KEY: "tavily-test-key" }, fetchImpl },
+    );
+    expect(firecrawlSearches).toBe(1);
+    expect(tavilySearches).toBe(2);
+    expect(result.meta.searchStatus).toEqual({ state: "ok", reason: null, provider: "tavily" });
+    expect(result.meta.searchDegraded).toBe(false);
+    expect(result.claimsTotal).toBeGreaterThan(0);
+    expect(result.claimsVerified).toBe(result.claimsTotal);
+    expect(result.provisional).toBe(false);
+    expect(result.segments[0]?.sources.map((source) => source.url)).toEqual([minutes.url]);
+    expect(result.segments[0]?.sources[0]?.snippet).toContain("voted 7 to 2");
+    expect(result.score.factualAccuracy).not.toBeNull();
+    expect(result.score.sourcing).not.toBeNull();
+  });
+
+  it("stops calling Tavily after a credit error", async () => {
+    let tavilySearches = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        return new Response(JSON.stringify({ error: "Insufficient credits" }), { status: 402 });
+      }
+      if (url.includes("api.tavily.com")) {
+        tavilySearches += 1;
+        return new Response(JSON.stringify({ error: "usage limit exceeded" }), { status: 432 });
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(classifyPayload(user, () => ({ claimType: "checkable_factual", note: "A recorded claim." })));
+      }
+      if (system.startsWith("TASK:queries")) {
+        return llmPayload({
+          queries: [
+            { id: "s1", query: "council vote Monday" },
+            { id: "s2", query: "marina fee doubled" },
+            { id: "s3", query: "boats waiting list" },
+          ],
+        });
+      }
+      if (system.startsWith("TASK:verify") || system.startsWith("TASK:consistency")) {
+        throw new Error("should not run");
+      }
+      throw new Error(system.slice(0, 24));
+    };
+    const facts = [
+      "The council voted 7 to 2 on Monday and published the minutes for residents.",
+      "The marina fee doubled overnight after the harbour master signed the notice.",
+      "Twelve boats remain on the waiting list until the spring season opens.",
+    ].join(" ");
+    const result = await analyze(
+      { text: facts, uiLanguage: "en" },
+      { env: { ...env, TAVILY_API_KEY: "tavily-test-key" }, fetchImpl },
+    );
+    expect(tavilySearches).toBe(1);
+    expect(result.meta.searchStatus).toEqual({ state: "unavailable", reason: "out_of_credits", provider: null });
+    expect(result.provisional).toBe(true);
+    expect(result.score.factualAccuracy).toBeNull();
+  });
+
+  it("reads the article with Tavily after scrape and direct fetch both fail", async () => {
+    let directCalls = 0;
+    let extracts = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev/v2/scrape")) {
+        return new Response(JSON.stringify({ error: "Insufficient credits" }), { status: 402 });
+      }
+      if (url.includes("api.firecrawl.dev/v2/search")) {
+        return new Response(JSON.stringify({ error: "Insufficient credits" }), { status: 402 });
+      }
+      if (url.includes("api.tavily.com/extract")) {
+        extracts += 1;
+        const body = JSON.parse(String(init?.body)) as { extract_depth?: string; urls?: string[] };
+        expect(body.extract_depth).toBe("basic");
+        expect(body.urls?.[0]).toBe("https://news.example/harbour");
+        return new Response(
+          JSON.stringify({
+            results: [
+              {
+                url: "https://news.example/harbour",
+                raw_content: `Harbour vote\n\n${vote} ${fee} ${rhetoric} The notice was posted on the harbour gate for residents.`,
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.includes("api.tavily.com/search")) {
+        return new Response(JSON.stringify({ results: [] }), { status: 200 });
+      }
+      if (url.includes("news.example")) {
+        directCalls += 1;
+        return new Response("nope", { status: 503 });
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(classifyPayload(user, (text) => {
+          if (text.includes("betrayal")) return { claimType: "rhetorical", note: "Loaded language without a fact." };
+          return { claimType: "checkable_factual", note: "A recorded claim." };
+        }));
+      }
+      if (system.startsWith("TASK:queries")) return llmPayload({ queries: [] });
+      if (system.startsWith("TASK:verify")) {
+        const parsed = JSON.parse(user) as { claims: { id: string }[] };
+        return llmPayload({
+          results: parsed.claims.map((claim) => ({
+            id: claim.id,
+            label: "Unverifiable",
+            confidence: 0.3,
+            explanation: "The retrieved pages do not decide this claim.",
+            sourceUrls: [],
+          })),
+        });
+      }
+      if (system.startsWith("TASK:consistency")) return llmPayload({ contradictions: [] });
+      throw new Error(system.slice(0, 24));
+    };
+    const result = await analyze(
+      { url: "https://news.example/harbour", uiLanguage: "en" },
+      { env: { ...env, TAVILY_API_KEY: "tavily-test-key" }, fetchImpl },
+    );
+    expect(directCalls).toBe(1);
+    expect(extracts).toBe(1);
+    expect(result.meta.extraction).toBe("tavily");
+    expect(result.article.text).toContain("voted 7 to 2");
+    expect(result.article.title).toContain("Harbour vote");
+  });
 });
 
 describe("handleRequest", () => {
@@ -1119,13 +1332,19 @@ describe("handleRequest", () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
       ok: boolean;
-      probe: { llm: { ok: boolean; status: number; error: string }; search: { ok: boolean; status: number; error: string } };
+      probe: {
+        llm: { ok: boolean; status: number; error: string };
+        firecrawl: { ok: boolean; status: number; error: string };
+        tavily: { ok: boolean; error?: string };
+      };
     };
     expect(body.ok).toBe(false);
     expect(body.probe.llm).toMatchObject({ ok: false, status: 400 });
     expect(body.probe.llm.error).toContain("llm: HTTP 400");
-    expect(body.probe.search).toMatchObject({ ok: false, status: 401 });
-    expect(body.probe.search.error).toContain("search: HTTP 401");
+    expect(body.probe.firecrawl).toMatchObject({ ok: false, status: 401 });
+    expect(body.probe.firecrawl.error).toContain("HTTP 401");
+    expect(body.probe.tavily.ok).toBe(false);
+    expect(body.probe.tavily.error).toContain("TAVILY_API_KEY is not configured");
     expect(JSON.stringify(body)).not.toContain("test-key");
     expect(JSON.stringify(body)).not.toContain("firecrawl-test-key");
   });
@@ -1153,23 +1372,84 @@ describe("handleRequest", () => {
       expect(response.status).toBe(200);
       return (await response.json()) as {
         ok: boolean;
-        probe: { search: { ok: boolean; status: number; reason?: string; error?: string } };
+        probe: {
+          firecrawl: { ok: boolean; status: number; reason?: string; error?: string };
+          tavily: { ok: boolean; error?: string };
+        };
       };
     };
 
     const first = await probeAt(20_000);
     expect(first.ok).toBe(false);
-    expect(first.probe.search).toMatchObject({ ok: false, status: 402, reason: "out_of_credits" });
-    expect(first.probe.search.error).toMatch(/402|insufficient credits/i);
+    expect(first.probe.firecrawl).toMatchObject({ ok: false, status: 402, reason: "out_of_credits" });
+    expect(first.probe.firecrawl.error).toMatch(/402|insufficient credits/i);
+    expect(first.probe.tavily.ok).toBe(false);
     expect(searches).toBe(1);
 
     const cached = await probeAt(50_000);
-    expect(cached.probe.search.reason).toBe("out_of_credits");
+    expect(cached.probe.firecrawl.reason).toBe("out_of_credits");
     expect(searches).toBe(1);
 
     const again = await probeAt(20_000 + 61_000);
-    expect(again.probe.search.reason).toBe("out_of_credits");
+    expect(again.probe.firecrawl.reason).toBe("out_of_credits");
     expect(searches).toBe(2);
+  });
+
+  it("reports Firecrawl and Tavily probe status separately and reuses them", async () => {
+    let firecrawlCalls = 0;
+    let tavilyCalls = 0;
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        firecrawlCalls += 1;
+        return new Response(JSON.stringify({ error: "Insufficient credits" }), { status: 402 });
+      }
+      if (url.includes("api.tavily.com")) {
+        tavilyCalls += 1;
+        return new Response(
+          JSON.stringify({
+            results: [{ title: "Tower", url: "https://example.com/tower", content: "The tower stands in Paris." }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: '{"ok":true}' } }] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    const probeAt = async (now: number) => {
+      const response = await handleRequest(
+        new Request("https://worker.test/api/health?probe=1"),
+        { ...env, TAVILY_API_KEY: "tavily-test-key" },
+        {
+          fetchImpl,
+          rate: { buckets: new Map(), inFlight: { count: 0 } },
+          now: () => now,
+        },
+      );
+      expect(response.status).toBe(200);
+      return (await response.json()) as {
+        ok: boolean;
+        tavilyConfigured: boolean;
+        probe: {
+          firecrawl: { ok: boolean; status: number; reason?: string };
+          tavily: { ok: boolean; status: number };
+        };
+      };
+    };
+    const first = await probeAt(40_000);
+    expect(first.tavilyConfigured).toBe(true);
+    expect(first.ok).toBe(true);
+    expect(first.probe.firecrawl).toMatchObject({ ok: false, status: 402, reason: "out_of_credits" });
+    expect(first.probe.tavily).toMatchObject({ ok: true, status: 200 });
+    expect(firecrawlCalls).toBe(1);
+    expect(tavilyCalls).toBe(1);
+    const second = await probeAt(70_000);
+    expect(second.probe.tavily.ok).toBe(true);
+    expect(second.probe.firecrawl.ok).toBe(false);
+    expect(firecrawlCalls).toBe(1);
+    expect(tavilyCalls).toBe(1);
   });
 
   it("records a direct fetch on the error event when scrape and the page both fail", async () => {
