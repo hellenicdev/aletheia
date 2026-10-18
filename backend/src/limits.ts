@@ -12,7 +12,8 @@ export const LIMITS = {
   /** Every outbound fetch uses a native timeout no longer than this. */
   outboundTimeoutMs: 14_000,
   maxInFlight: 4,
-  maxPageBytes: 1_000_000,
+  /** Direct fetches keep at most this much HTML. Larger pages are truncated, not rejected. */
+  maxPageBytes: 4_000_000,
   maxRedirects: 4,
 } as const;
 

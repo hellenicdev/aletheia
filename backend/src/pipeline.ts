@@ -24,7 +24,7 @@ import {
   unverifiableExplanation,
 } from "../../shared/messages";
 import { claimImportance, compareClaims, pinHeadlineFirst, tokenOverlap } from "../../shared/rank";
-import { outletFromDomain, resolveOutlet } from "../../shared/reputation";
+import { evidenceSourceRank, outletFromDomain, resolveOutlet } from "../../shared/reputation";
 import { deterministicQuery, queryLanguage, stabilizeQuery, withoutOutletName } from "../../shared/query";
 import { aggregateScore, coverageOf, isProvisionalScore } from "../../shared/score";
 import { splitPastedTitle, splitSentences } from "../../shared/sentences";
@@ -367,7 +367,9 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
           articleTitle: ingested.title,
           claimText: segment.text,
         });
-        const relevant = independent.filter((item) => isRelevantEvidence(segment.text, item));
+        const relevant = independent
+          .filter((item) => isRelevantEvidence(segment.text, item))
+          .sort((left, right) => evidenceSourceRank(left.url) - evidenceSourceRank(right.url));
         if (hits.length > 0 && independent.length === 0) echoOnly.add(segment.id);
         evidence.set(segment.id, relevant);
       } catch (error) {

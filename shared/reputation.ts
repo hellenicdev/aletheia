@@ -99,6 +99,39 @@ export function bareHostname(url: string): string | null {
   }
 }
 
+const COMMERCIAL_HOST =
+  /(?:^|[.-])(?:vapes?|e-?cigs?|coupons?|promo-?codes?|retailmenot|slickdeals|groupon|addiction-?centers?|rehabs?|treatment-?centers?|casinos?|payday|affiliates?)(?:[.-]|$)|(?:^|\.)recovery\.com$/i;
+
+/** Lower sorts first. Official and academic hosts outrank news, which outranks shops and lead-gen. */
+export function evidenceSourceRank(url: string): number {
+  const host = bareHostname(url) ?? "";
+  if (isOfficialOrAcademic(host)) return 0;
+  let path = "";
+  try {
+    path = new URL(url).pathname;
+  } catch {
+    path = "";
+  }
+  if (COMMERCIAL_HOST.test(host) || /\/(?:coupons?|promo-codes?|affiliate)\b/i.test(path)) return 2;
+  return 1;
+}
+
+function isOfficialOrAcademic(host: string): boolean {
+  return (
+    host.endsWith(".gov") ||
+    host.endsWith(".mil") ||
+    host.endsWith(".edu") ||
+    host.endsWith(".ac.uk") ||
+    host.endsWith(".gov.uk") ||
+    host.endsWith(".edu.au") ||
+    host.endsWith(".gov.au") ||
+    host === "who.int" ||
+    host.endsWith(".who.int") ||
+    host === "europa.eu" ||
+    host.endsWith(".europa.eu")
+  );
+}
+
 export function isBlockedEvidenceHost(url: string): boolean {
   if (isUnreliableHost(url)) return true;
   const host = hostOf(url);
