@@ -13,8 +13,12 @@ export interface HandlerDeps {
   rate?: RateState;
   /** Test hook. Production uses the analysis deadline. */
   deadlineMs?: number;
-  /** Test hook. Production caps the segmentation call at 45 seconds. */
+  /** Test hook. Production caps the segmentation call at the outbound fetch timeout. */
   segmentTimeoutMs?: number;
+  /** Keeps the analysis alive after the response headers are sent. */
+  waitUntil?: (promise: Promise<unknown>) => void;
+  /** Test hook. Production pings every 10 seconds, on its own timer. */
+  pingMs?: number;
 }
 
 const isolateRate: RateState = {
@@ -119,7 +123,7 @@ export async function handleRequest(
   const deadlineMs = deps.deadlineMs ?? LIMITS.analysisDeadlineMs;
   const abort = new AbortController();
   const interruptedMessage = "The analysis was interrupted before a verdict could be sent.";
-  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let heartbeat: ReturnType<typeof setTimeout> | undefined;
   let hardStop: ReturnType<typeof setTimeout> | undefined;
   let grace: ReturnType<typeof setTimeout> | undefined;
   let closed = false;
@@ -147,7 +151,7 @@ export async function handleRequest(
       const finish = () => {
         if (closed) return;
         closed = true;
-        if (heartbeat) clearInterval(heartbeat);
+        if (heartbeat) clearTimeout(heartbeat);
         if (hardStop) clearTimeout(hardStop);
         if (grace) clearTimeout(grace);
         deadlineSignal?.removeEventListener("abort", onDeadline);
@@ -175,7 +179,7 @@ export async function handleRequest(
         try {
           controller.enqueue(encoder.encode(`: ping\n\n`));
         } catch {
-          if (heartbeat) clearInterval(heartbeat);
+          if (heartbeat) clearTimeout(heartbeat);
           abort.abort();
           sendTerminal("error", { message: interruptedMessage });
           finish();
@@ -188,9 +192,17 @@ export async function handleRequest(
       if (deadlineSignal.aborted) onDeadline();
       else deadlineSignal.addEventListener("abort", onDeadline, { once: true });
       hardStop = setTimeout(onDeadline, deadlineMs);
-      // Keepalive and the deadline are armed before ingest, scrape, or the segment call.
+      // The ping timer is armed before any await and rearms itself, so a hung
+      // fetch cannot starve the keepalive or the deadline.
+      const pingEvery = deps.pingMs ?? 10_000;
+      const armPing = () => {
+        heartbeat = setTimeout(() => {
+          ping();
+          if (!closed) armPing();
+        }, pingEvery);
+      };
       ping();
-      heartbeat = setInterval(ping, 10_000);
+      armPing();
       let resolveAbort: (value: "aborted") => void = () => {};
       const aborted = new Promise<"aborted">((resolve) => {
         resolveAbort = resolve;
@@ -208,7 +220,7 @@ export async function handleRequest(
         onTick: ping,
       });
 
-      void (async () => {
+      const task = (async () => {
         const timeoutMessage = "The analysis timed out before a verdict could be sent.";
         try {
           const winner = await Promise.race([work, deadline, aborted]);
@@ -247,6 +259,13 @@ export async function handleRequest(
           finish();
         }
       })();
+      // Tie the producer to the request context. Without this, a killed isolate
+      // can leave the stream open and the client waiting.
+      try {
+        deps.waitUntil?.(task);
+      } catch {
+        /* The stream's own deadline still closes the response. */
+      }
     },
     cancel() {
       abort.abort();
@@ -279,7 +298,9 @@ function clientKey(request: Request): string {
 }
 
 export default {
-  fetch(request: Request, env: Env): Promise<Response> {
-    return handleRequest(request, env);
+  fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    return handleRequest(request, env, {
+      waitUntil: (promise) => ctx.waitUntil(promise),
+    });
   },
 };

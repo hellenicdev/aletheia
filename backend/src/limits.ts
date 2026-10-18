@@ -5,7 +5,12 @@ export const LIMITS = {
   maxUrlChars: 2_000,
   maxSegments: 24,
   maxSearches: 12,
-  analysisDeadlineMs: 140_000,
+  /** The whole analysis, including a partial result, stays inside this wall clock. */
+  analysisDeadlineMs: 60_000,
+  /** Evidence searches stop here so verification can still emit a result. */
+  evidenceStageMs: 36_000,
+  /** Every outbound fetch uses a native timeout no longer than this. */
+  outboundTimeoutMs: 14_000,
   maxInFlight: 4,
   maxPageBytes: 1_000_000,
   maxRedirects: 4,

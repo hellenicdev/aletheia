@@ -3,14 +3,14 @@ import { looksLikeOpinionSection, opinionCueFromHtml } from "../../shared/classi
 import type { UiLanguage } from "../../shared/labels";
 import { pageUnreadMessage } from "../../shared/messages";
 import { isBudgetExhausted } from "./budget";
-import { isDeadline, raceAbort } from "./deadline";
+import { fetchSignal, isDeadline, raceAbort } from "./deadline";
 import { scrapeArticle, type CacheCharge, type ProviderGate } from "./firecrawl";
 import { LIMITS } from "./limits";
 import { HttpError } from "./errors";
 import { assertPublicHttpUrl } from "./ssrf";
 import { extractTavily, type TavilyGate } from "./tavily";
 
-const PAGE_TIMEOUT_MS = 10_000;
+const PAGE_TIMEOUT_MS = 14_000;
 const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
@@ -316,7 +316,7 @@ async function fetchArticleDirect(
   let response: Response | null = null;
 
   for (let hop = 0; hop <= LIMITS.maxRedirects; hop++) {
-    const timeoutSignal = AbortSignal.timeout(PAGE_TIMEOUT_MS);
+    const timeoutSignal = fetchSignal(PAGE_TIMEOUT_MS);
     response = await raceAbort(
       fetchImpl(current.toString(), {
         method: "GET",

@@ -3,7 +3,8 @@ import type { EvidenceItem } from "../../shared/citations";
 import { focusPassage, passageAddsFigure, passageMissesFigure } from "../../shared/passages";
 import { isRecord } from "../../shared/json";
 import { BudgetExhausted, isBudgetExhausted } from "./budget";
-import { deadlineReached, isDeadline, raceAbort } from "./deadline";
+import { capOutbound, deadlineReached, fetchSignal, isDeadline, raceAbort, readBody } from "./deadline";
+import { PIPELINE_VERSION } from "./version";
 import { UpstreamError, redactSecret } from "./errors";
 
 const TAVILY_API = "https://api.tavily.com";
@@ -12,7 +13,23 @@ export interface TavilyGate {
   block: { status: number; detail: string } | null;
 }
 
-const searchCache = new Map<string, { at: number; hits: EvidenceItem[] }>();
+const TAVILY_TTL_MS = 86_400_000;
+
+interface StoredHit {
+  url: string;
+  title: string;
+  content: string;
+  raw: string;
+  score: number;
+  index: number;
+  publishedAt?: string;
+}
+
+const searchCache = new Map<string, { at: number; hits: StoredHit[] }>();
+
+export function tavilyCacheKey(topic: string, query: string, version = PIPELINE_VERSION): string {
+  return `tavily:v${version}:${topic}:${query}`;
+}
 
 export function createTavilyGate(): TavilyGate {
   return { block: null };
@@ -46,6 +63,8 @@ export async function searchTavily(options: {
   claim?: string;
   gate?: TavilyGate;
   bypassCache?: boolean;
+  /** Cache API reads and writes count as subrequests. Omit when the budget cannot spare them. */
+  charge?: (op: "read" | "write") => boolean;
 }): Promise<EvidenceItem[]> {
   const query = options.query.trim().slice(0, 360);
   if (!query) return [];
@@ -55,20 +74,23 @@ export async function searchTavily(options: {
   }
   const topic = options.topic ?? "general";
   const includeRaw = options.includeRawContent === true;
-  const claimKey = options.claim?.replace(/\s+/g, " ").trim().slice(0, 180) ?? "";
-  const cacheKey = claimKey
-    ? `${topic}:${includeRaw ? "raw" : "snip"}:${query}:${claimKey}`
-    : `${topic}:${includeRaw ? "raw" : "snip"}:${query}`;
+  const cacheKey = tavilyCacheKey(topic, query);
   if (!options.bypassCache) {
-    const cached = searchCache.get(cacheKey);
-    if (cached && Date.now() - cached.at < 10 * 60_000) return cached.hits;
+    const cached = readMemory(cacheKey);
+    if (cached) return expandHits(cached, options.claim, options.apiKey);
+    const persisted = await readPersistedHits(cacheKey, options.charge);
+    if (persisted) {
+      searchCache.set(cacheKey, { at: Date.now(), hits: persisted });
+      return expandHits(persisted, options.claim, options.apiKey);
+    }
   }
 
+  const limit = Math.min(5, Math.max(1, options.limit ?? 5));
   const payload = {
     query,
     search_depth: "basic",
     topic,
-    max_results: Math.min(5, Math.max(1, options.limit ?? 5)),
+    max_results: limit,
     include_answer: false,
     include_raw_content: includeRaw,
   };
@@ -77,13 +99,16 @@ export async function searchTavily(options: {
     payload,
     options.apiKey,
     options.fetchImpl,
-    options.timeoutMs ?? 10_000,
+    capOutbound(options.timeoutMs),
     options.signal,
     options.gate,
   );
-  const hits = readSearchHits(text, options.apiKey, options.claim);
-  if (!options.bypassCache) searchCache.set(cacheKey, { at: Date.now(), hits });
-  return hits;
+  const stored = sortHits(readStoredHits(text)).slice(0, limit);
+  if (!options.bypassCache) {
+    searchCache.set(cacheKey, { at: Date.now(), hits: stored });
+    await writePersistedHits(cacheKey, stored, options.charge);
+  }
+  return expandHits(stored, options.claim, options.apiKey);
 }
 
 export async function extractTavily(options: {
@@ -103,7 +128,7 @@ export async function extractTavily(options: {
     { urls: [options.url], extract_depth: "basic" },
     options.apiKey,
     options.fetchImpl,
-    options.timeoutMs ?? 20_000,
+    capOutbound(options.timeoutMs),
     options.signal,
     options.gate,
   );
@@ -138,7 +163,7 @@ async function postTavily(
   gate: TavilyGate | undefined,
 ): Promise<string> {
   if (signal?.aborted) throw deadlineReached();
-  const timeoutSignal = AbortSignal.timeout(Math.max(1_000, timeoutMs));
+  const timeoutSignal = fetchSignal(timeoutMs);
   let response: Response;
   try {
     response = await raceAbort(
@@ -173,10 +198,10 @@ async function postTavily(
     console.error(failure.message);
     throw failure;
   }
-  return raceAbort(response.text(), signal);
+  return readBody(response, signal, timeoutMs);
 }
 
-function readSearchHits(text: string, apiKey: string, claim?: string): EvidenceItem[] {
+function readStoredHits(text: string): StoredHit[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -185,30 +210,121 @@ function readSearchHits(text: string, apiKey: string, claim?: string): EvidenceI
   }
   if (!isRecord(parsed)) throw new UpstreamError("tavily", 502, "Tavily search did not succeed.");
   const results = Array.isArray(parsed.results) ? parsed.results : [];
+  const hits: StoredHit[] = [];
+  results.forEach((item, index) => {
+    if (!isRecord(item) || typeof item.url !== "string" || !/^https?:\/\//i.test(item.url)) return;
+    const published = publishedAt(item.published_date);
+    hits.push({
+      url: item.url,
+      title: (cleanText(item.title) || item.url).slice(0, 180),
+      content: cleanText(item.content),
+      raw: cleanText(item.raw_content),
+      score: typeof item.score === "number" && Number.isFinite(item.score) ? item.score : 0,
+      index,
+      ...(published ? { publishedAt: published } : {}),
+    });
+  });
+  return hits;
+}
+
+/** Higher score first, then URL, then the provider's original position. */
+export function sortHits(items: StoredHit[]): StoredHit[] {
+  return [...items].sort((a, b) => {
+    if (a.score !== b.score) return b.score - a.score;
+    if (a.url !== b.url) return a.url < b.url ? -1 : 1;
+    return a.index - b.index;
+  });
+}
+
+function expandHits(items: StoredHit[], claim: string | undefined, apiKey: string): EvidenceItem[] {
   const hits: EvidenceItem[] = [];
   let expanded = 0;
-  for (const item of results) {
-    if (!isRecord(item) || typeof item.url !== "string" || !/^https?:\/\//i.test(item.url)) continue;
-    const content = cleanText(item.content);
-    const raw = cleanText(item.raw_content);
-    const shortSource = content.length >= 40 ? content : raw || content;
+  for (const item of items) {
+    const shortSource = item.content.length >= 40 ? item.content : item.raw || item.content;
     let snippet = shortSource.slice(0, 400);
     if (claim && expanded < 2 && passageMissesFigure(claim, snippet)) {
-      const focused = focusPassage(claim, raw.length > snippet.length ? raw : shortSource);
+      const focused = focusPassage(claim, item.raw.length > snippet.length ? item.raw : shortSource);
       if (focused && passageAddsFigure(claim, snippet, focused)) {
         snippet = focused.slice(0, 1500);
         expanded += 1;
       }
     }
-    const published = publishedAt(item.published_date);
     hits.push({
       url: item.url,
-      title: (cleanText(item.title) || item.url).slice(0, 180),
+      title: item.title,
       snippet: snippet.replaceAll(apiKey, "[redacted]"),
-      ...(published ? { publishedAt: published } : {}),
+      ...(item.publishedAt ? { publishedAt: item.publishedAt } : {}),
     });
   }
-  return hits.slice(0, 5);
+  return hits;
+}
+
+function readMemory(key: string): StoredHit[] | null {
+  const cached = searchCache.get(key);
+  if (!cached || Date.now() - cached.at >= TAVILY_TTL_MS) return null;
+  return cached.hits;
+}
+
+async function readPersistedHits(
+  key: string,
+  charge?: (op: "read" | "write") => boolean,
+): Promise<StoredHit[] | null> {
+  const cache = resultCache();
+  if (!cache || !charge) return null;
+  if (!charge("read")) return null;
+  try {
+    const hit = await cache.match(await cacheRequest(key));
+    if (!hit) return null;
+    const parsed = (await hit.json()) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    return parsed.filter(isStoredHit);
+  } catch {
+    return null;
+  }
+}
+
+async function writePersistedHits(
+  key: string,
+  hits: StoredHit[],
+  charge?: (op: "read" | "write") => boolean,
+): Promise<void> {
+  const cache = resultCache();
+  if (!cache || !charge) return;
+  if (!charge("write")) return;
+  try {
+    await cache.put(
+      await cacheRequest(key),
+      new Response(JSON.stringify(hits), {
+        headers: {
+          "Cache-Control": "public, max-age=86400",
+          "Content-Type": "application/json",
+        },
+      }),
+    );
+  } catch {
+    /* The Cache API is best-effort and is absent outside the worker. */
+  }
+}
+
+function isStoredHit(value: unknown): value is StoredHit {
+  if (!isRecord(value) || typeof value.url !== "string" || typeof value.title !== "string") return false;
+  return typeof value.content === "string" && typeof value.raw === "string";
+}
+
+interface ResultCache {
+  match(request: Request): Promise<Response | undefined>;
+  put(request: Request, response: Response): Promise<void>;
+}
+
+function resultCache(): ResultCache | null {
+  const host = globalThis as unknown as { caches?: { default?: ResultCache } };
+  return host.caches?.default ?? null;
+}
+
+async function cacheRequest(key: string): Promise<Request> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
+  const hex = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return new Request(`https://cache.aletheia.internal/v1/${hex}`);
 }
 
 function titleFromExtract(text: string): string | null {

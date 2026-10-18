@@ -1,7 +1,7 @@
 import { parseModelJson } from "../../shared/json";
 import { isBudgetExhausted } from "./budget";
 import type { AppConfig } from "./config";
-import { isDeadline, raceAbort } from "./deadline";
+import { fetchSignal, isDeadline, raceAbort, readBody } from "./deadline";
 import { HttpError, UpstreamError, redactSecret } from "./errors";
 
 export interface ChatMessage {
@@ -148,7 +148,7 @@ export async function requestChat(
 
   // Pass AbortSignal.timeout itself. A combined signal only aborts after a
   // JavaScript listener runs, which does not cancel a hung worker fetch.
-  const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? 22_000);
+  const timeoutSignal = fetchSignal(options.timeoutMs);
   let response: Response;
   try {
     response = await raceAbort(
@@ -168,7 +168,7 @@ export async function requestChat(
     throw loggedUpstream("llm", null, errorText(error), options.apiKey);
   }
 
-  const text = await response.text();
+  const text = await readBody(response, options.signal, options.timeoutMs);
   if (!response.ok) {
     const safe = redactSecret(text, options.apiKey);
     if (

@@ -3,6 +3,7 @@ import {
   clearSearchCache,
   markdownToText,
   PIPELINE_VERSION,
+  scrapeCacheKey,
   scrapeArticle,
   searchWeb,
   verificationCacheKey,
@@ -343,6 +344,15 @@ describe("deadline abort", () => {
       );
     const hits = await searchWeb({ apiKey: "k", query: "coast guard markdown credit", language: "en", fetchImpl });
     expect(hits[0]?.snippet).toMatch(/\(AP\)|Associated Press/i);
+  });
+});
+
+describe("scrape cache key", () => {
+  it("includes the pipeline version so an old extraction is not reused", () => {
+    const key = scrapeCacheKey("https://www.bbc.com/news/articles/vaping");
+    expect(key).toContain(`v${PIPELINE_VERSION}`);
+    expect(key).toBe(`scrape:v${PIPELINE_VERSION}:https://www.bbc.com/news/articles/vaping`);
+    expect(key).not.toBe("https://www.bbc.com/news/articles/vaping");
   });
 });
 

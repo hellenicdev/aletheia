@@ -66,7 +66,13 @@ export function isIndependent(
   if (isBlockedEvidenceHost(item.url)) return false;
   if (isWireCopy(item.url)) return false;
   if (
-    isSyndicatedCopy(item, options.articleTitle ?? null, options.articleText ?? "", options.articleDomain ?? null)
+    isSyndicatedCopy(
+      item,
+      options.articleTitle ?? null,
+      options.articleText ?? "",
+      options.articleDomain ?? null,
+      options.claimText,
+    )
   ) {
     return false;
   }
@@ -104,6 +110,7 @@ export function isSyndicatedCopy(
   articleTitle: string | null,
   articleText: string,
   articleDomain?: string | null,
+  claimText = "",
 ): boolean {
   const title = (item.title ?? "").replace(/\s+/g, " ").trim();
   const snippet = (item.snippet ?? "").replace(/\s+/g, " ").trim();
@@ -124,7 +131,87 @@ export function isSyndicatedCopy(
   }
   if (nearCopy(lead, snippet, 40, 40)) return true;
   if (looseReprint(lead, snippet)) return true;
+  if (repeatsArticle(snippet, articleText, 8, claimText)) return true;
+  if (repeatsArticle(title, articleText, 8, claimText)) return true;
+  if (
+    isKnownSyndicator(item.url) &&
+    (repeatsArticle(snippet, articleText, 5, claimText) ||
+      repeatsArticle(title, articleText, 5, claimText) ||
+      AP_CREDIT.test(surface) ||
+      creditsForeignWire(surface, item.url))
+  ) {
+    return true;
+  }
+  if (creditsSharedAgency(surface, articleDomain, articleText)) return true;
   return false;
+}
+
+const SYNDICATOR_HOSTS = ["mymotherlode.com", "alfavita.gr", "liberal.gr"];
+
+function isKnownSyndicator(url?: string): boolean {
+  if (!url) return false;
+  const host = hostOf(url) ?? "";
+  return SYNDICATOR_HOSTS.some((item) => host === item || host.endsWith(`.${item}`));
+}
+
+/**
+ * A long verbatim stretch of the snippet already appears in the source article.
+ * A short shared fact is not enough. A copied quote or paragraph is.
+ */
+export function repeatsArticle(
+  snippet: string,
+  articleText: string,
+  minWords = 8,
+  claimText = "",
+): boolean {
+  const article = normalizeCopy(articleText);
+  const source = normalizeCopy(snippet);
+  const claim = normalizeCopy(claimText);
+  if (!article || !source) return false;
+  const words = source.split(" ").filter(Boolean);
+  const need = Math.max(4, minWords);
+  const minChars = minWords >= 8 ? 36 : 24;
+  if (words.length < need) {
+    return source.length >= 42 && article.includes(source) && !coveredByClaim(claim, source);
+  }
+  for (let size = Math.min(words.length, 16); size >= need; size -= 1) {
+    for (let index = 0; index + size <= words.length; index += 1) {
+      const window = words.slice(index, index + size).join(" ");
+      if (window.length < minChars || !article.includes(window)) continue;
+      // The same sentence in an independent report is corroboration.
+      // A copy is a stretch of the article that is not just this claim.
+      if (coveredByClaim(claim, window)) continue;
+      return true;
+    }
+  }
+  return false;
+}
+
+function coveredByClaim(claim: string, window: string): boolean {
+  return claim.length > 0 && claim.includes(window);
+}
+
+const GREEK_AGENCY =
+  /απε[-\s]?μπε|ana[-\s]?mpa|αθηναϊκ\p{L}*\s+πρακτορε\p{L}*|καθημερινή|kathimerini/iu;
+
+function creditsSharedAgency(
+  surface: string,
+  articleDomain: string | null | undefined,
+  articleText: string,
+): boolean {
+  if (!GREEK_AGENCY.test(surface)) return false;
+  const host = (articleDomain ?? "").replace(/^www\./, "").toLowerCase();
+  if (host.includes("kathimerini") || host.includes("amna")) return true;
+  return GREEK_AGENCY.test(articleText.slice(0, 900));
+}
+
+function normalizeCopy(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[«»“”„"'’]/g, "")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function creditsForeignWire(surface: string, url?: string): boolean {

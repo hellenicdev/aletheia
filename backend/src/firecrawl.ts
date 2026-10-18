@@ -3,7 +3,8 @@ import type { EvidenceItem } from "../../shared/citations";
 import { focusPassage, passageAddsFigure, passageMissesFigure } from "../../shared/passages";
 import { queryCacheKey } from "../../shared/query";
 import { BudgetExhausted, isBudgetExhausted } from "./budget";
-import { combineSignals, deadlineReached, isDeadline, raceAbort } from "./deadline";
+import { capOutbound, combineSignals, deadlineReached, fetchSignal, isDeadline, raceAbort, readBody } from "./deadline";
+import { PIPELINE_VERSION } from "./version";
 import { HttpError, UpstreamError, redactSecret } from "./errors";
 import { LIMITS } from "./limits";
 import { assertPublicHttpUrl, isBlockedHost } from "./ssrf";
@@ -98,7 +99,7 @@ async function pause(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 function operationSignal(timeoutMs: number, parent?: AbortSignal): AbortSignal {
-  const timeout = AbortSignal.timeout(Math.max(1_000, timeoutMs));
+  const timeout = fetchSignal(timeoutMs);
   if (!parent) return timeout;
   return combineSignals([timeout, parent]);
 }
@@ -161,11 +162,12 @@ export async function searchWeb(options: {
     throw new UpstreamError("search", block.status, block.detail);
   }
 
+  const timeoutMs = capOutbound(options.timeoutMs);
   const payload: Record<string, unknown> = {
     query,
     limit: options.limit ?? 5,
     sources: ["web"],
-    timeout: 10_000,
+    timeout: timeoutMs,
     highlights: false,
   };
   if (options.language === "el") payload.country = "GR";
@@ -173,7 +175,6 @@ export async function searchWeb(options: {
   if (options.canSpend && !options.canSpend()) {
     throw new BudgetExhausted();
   }
-  const timeoutMs = options.timeoutMs ?? 10_000;
   const signal = operationSignal(timeoutMs, options.signal);
   const response = await enqueue(async () => {
     await acquireOutbound(pause, signal);
@@ -189,7 +190,7 @@ export async function searchWeb(options: {
     );
   }, signal);
   const text = response.ok
-    ? await raceAbort(response.text(), signal)
+    ? await readBody(response, signal, capOutbound(options.timeoutMs))
     : await readFailureBody(response, signal);
   if (!response.ok) {
     rememberProviderFailure(options.gate, response.status, text);
@@ -238,7 +239,7 @@ async function firecrawlPost(
       throw new BudgetExhausted();
     }
     try {
-      const timeoutSignal = AbortSignal.timeout(Math.max(1_000, timeoutMs));
+      const timeoutSignal = fetchSignal(timeoutMs);
       const response = await raceAbort(
         fetchImpl(url, {
           method: "POST",
@@ -293,10 +294,10 @@ export async function scrapeArticle(options: {
   gate?: ProviderGate;
 }): Promise<ScrapedPage> {
   const pageUrl = assertPublicHttpUrl(options.url);
-  const cacheKey = pageUrl.toString();
+  const cacheKey = scrapeCacheKey(pageUrl.toString());
   const memo = scrapeCache.get(cacheKey);
   if (memo && Date.now() - memo.at < 10 * 60_000) return memo.page;
-  const persisted = await readPersisted<ScrapedPage>(`scrape:${cacheKey}`, options.charge);
+  const persisted = await readPersisted<ScrapedPage>(cacheKey, options.charge);
   if (persisted && persisted.text) {
     const page = {
       ...persisted,
@@ -307,7 +308,7 @@ export async function scrapeArticle(options: {
     scrapeCache.set(cacheKey, { at: Date.now(), page });
     return page;
   }
-  const timeoutMs = options.timeoutMs ?? 20_000;
+  const timeoutMs = capOutbound(options.timeoutMs);
   const signal = operationSignal(timeoutMs, options.signal);
   const response = await enqueue(async () => {
     await acquireOutbound(pause, signal);
@@ -348,7 +349,7 @@ export async function scrapeArticle(options: {
     );
   }, signal);
   const text = response.ok
-    ? await raceAbort(response.text(), signal)
+    ? await readBody(response, signal, capOutbound(options.timeoutMs))
     : await readFailureBody(response, signal);
   if (!response.ok) {
     rememberProviderFailure(options.gate, response.status, text);
@@ -408,7 +409,7 @@ export async function scrapeArticle(options: {
     ignoredLines: cleaned.ignoredLines,
   };
   scrapeCache.set(cacheKey, { at: Date.now(), page });
-  await writePersisted(`scrape:${cacheKey}`, page, options.charge);
+  await writePersisted(cacheKey, page, options.charge);
   return page;
 }
 
@@ -441,8 +442,12 @@ async function readPersisted<T>(key: string, charge?: CacheCharge): Promise<T | 
   }
 }
 
-/** Bump when verification or the claim set changes so a cached verdict is not reused. */
-export const PIPELINE_VERSION = "11";
+export { PIPELINE_VERSION };
+
+/** The scrape cache includes the pipeline version so an extraction change is not served stale. */
+export function scrapeCacheKey(url: string): string {
+  return `scrape:v${PIPELINE_VERSION}:${url}`;
+}
 
 export function peekQuery(claim: string): string | null {
   const hit = queryMemory.get(queryCacheKey(claim, PIPELINE_VERSION));

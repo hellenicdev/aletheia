@@ -25,7 +25,7 @@ import {
 } from "../../shared/messages";
 import { claimImportance, compareClaims, pinHeadlineFirst, tokenOverlap } from "../../shared/rank";
 import { outletFromDomain, resolveOutlet } from "../../shared/reputation";
-import { deterministicQuery, queryLanguage, stabilizeQuery } from "../../shared/query";
+import { deterministicQuery, queryLanguage, stabilizeQuery, withoutOutletName } from "../../shared/query";
 import { aggregateScore, coverageOf, isProvisionalScore } from "../../shared/score";
 import { splitPastedTitle, splitSentences } from "../../shared/sentences";
 import { blendTone, combineTone, type Rhetoric } from "../../shared/tone";
@@ -99,7 +99,7 @@ export interface AnalyzeDeps {
   consistencyTimeoutMs?: number;
   /** Test hook. Production uses the worker subrequest ceiling. */
   subrequestLimit?: number;
-  /** Test hook. Production caps the segmentation call at 45 seconds. */
+  /** Test hook. Production caps the segmentation call at the outbound fetch timeout. */
   segmentTimeoutMs?: number;
 }
 
@@ -271,12 +271,13 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
           );
     llmHold = 1 + verifyGroups;
     let finishedSearches = planned < budgeted.length ? budgeted.length - planned : 0;
+    const evidenceDeadline = evidenceStageDeadline(deadline);
     for (let index = 0; index < selected.length; index++) {
       const segment = selected[index];
       tick();
-      if (signal.aborted || Date.now() > deadline - 3_000 || !budget.canSpend(searchCost)) {
+      if (signal.aborted || Date.now() > evidenceDeadline || Date.now() > deadline - 3_000 || !budget.canSpend(searchCost)) {
         const reason =
-          signal.aborted || Date.now() > deadline - 3_000
+          signal.aborted || Date.now() > evidenceDeadline || Date.now() > deadline - 3_000
             ? "analysis deadline reached before search finished"
             : "search stopped to stay within the worker subrequest limit";
         abandonSearches(selected, index, evidence, searchFailed, cutShort, warnings, reason);
@@ -302,27 +303,64 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
         segment.text,
         queryLanguageForClaim,
       );
-      const timeoutMs = Math.max(1_000, Math.min(10_000, deadline - Date.now() - 2_000));
+      const timeoutMs = Math.max(
+        1_000,
+        Math.min(LIMITS.outboundTimeoutMs, evidenceDeadline - Date.now() - 500, deadline - Date.now() - 1_500),
+      );
+      const queriesForClaim = [query];
+      if (titleMatchesSpan(segment.text, ingested.title)) {
+        const variant = withoutOutletName(query);
+        if (variant.toLowerCase() !== query.toLowerCase()) queriesForClaim.push(variant);
+      }
       try {
         searchAttempts += 1;
-        const found = await retrieveHits({
-          query,
-          claim: segment.text,
-          language: segmented.detectedLanguage,
-          firecrawlKey: searchKey,
-          tavilyKey,
-          fetchImpl,
-          timeoutMs,
-          canSpend: () => budget.canSpend(1),
-          signal,
-          charge: chargeCache,
-          firecrawlGate: providerGate,
-          tavilyGate,
-          deadline,
-        });
-        if (found.provider === "tavily") searchProvider = "tavily";
-        else if (searchProvider !== "tavily") searchProvider = "firecrawl";
-        const hits = dedupeEvidence(found.hits);
+        const collected: EvidenceItem[] = [];
+        let foundProvider: "firecrawl" | "tavily" | null = null;
+        let primaryError: unknown = null;
+        for (let variantIndex = 0; variantIndex < queriesForClaim.length; variantIndex += 1) {
+          if (
+            variantIndex > 0 &&
+            (signal.aborted || Date.now() > evidenceDeadline || !budget.canSpend(searchCost))
+          ) {
+            break;
+          }
+          const searchesLeft = selected.length - index;
+          // Cache reads during verification are one per claim, and a Tavily
+          // cache read plus write is extra on top of the search itself. Skip
+          // that I/O when it would leave the verifier without a subrequest.
+          const plannedLeft = searchesLeft * searchCost + selected.length + verifyGroups + 2;
+          const tavilyCharge =
+            tavilySearch && budget.remaining() >= plannedLeft + 2 ? chargeCache : undefined;
+          try {
+            const found = await retrieveHits({
+              query: queriesForClaim[variantIndex] ?? query,
+              claim: segment.text,
+              language: segmented.detectedLanguage,
+              firecrawlKey: searchKey,
+              tavilyKey,
+              fetchImpl,
+              timeoutMs,
+              canSpend: () => budget.canSpend(1),
+              signal,
+              charge: chargeCache,
+              tavilyCharge,
+              firecrawlGate: providerGate,
+              tavilyGate,
+              deadline: Math.min(deadline, evidenceDeadline),
+            });
+            if (found.provider === "tavily") foundProvider = "tavily";
+            else if (foundProvider !== "tavily") foundProvider = "firecrawl";
+            collected.push(...found.hits);
+          } catch (error) {
+            if (variantIndex === 0) primaryError = error;
+            else remember(warnings, error, "search");
+            if (isBudgetExhausted(error) || signal.aborted) throw error;
+          }
+        }
+        if (primaryError && collected.length === 0) throw primaryError;
+        if (foundProvider === "tavily") searchProvider = "tavily";
+        else if (searchProvider !== "tavily" && foundProvider) searchProvider = "firecrawl";
+        const hits = dedupeEvidence(collected);
         const independent = independentEvidence(hits, {
           articleDomain: ingested.sourceDomain,
           articleText: ingested.text,
@@ -415,7 +453,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       batch.map(async (group, index) => {
         stage("verify", cursor - batch.length + index === 0 ? "start" : "progress", cursor, groups.length);
         try {
-          const timeoutMs = remainingMs(deadline, 22_000);
+          const timeoutMs = remainingMs(deadline, LIMITS.outboundTimeoutMs);
           const judged = await withTimeout(
             judgeGroup({
               group,
@@ -805,7 +843,7 @@ async function segmentArticle(options: {
 
   let detected: DetectedLanguage = localLanguage;
   let genre: string | null = null;
-  const segmentCap = options.segmentTimeoutMs ?? 45_000;
+  const segmentCap = Math.min(options.segmentTimeoutMs ?? LIMITS.outboundTimeoutMs, LIMITS.outboundTimeoutMs);
   const segmentMs = Math.min(segmentCap, Math.max(300, options.deadline - Date.now()));
   if (Date.now() < options.deadline - 1_000) {
     try {
@@ -927,7 +965,7 @@ async function buildQueries(
         reasoningEffort: "low",
         maxTokens: 4096,
         attempts: 1,
-        timeoutMs: remainingMs(deadline, 16_000),
+        timeoutMs: remainingMs(deadline, LIMITS.outboundTimeoutMs),
         signal,
       });
       for (const item of parsed) {
@@ -1273,6 +1311,19 @@ function remainingMs(deadline: number, cap: number): number {
   return Math.max(1_000, Math.min(cap, deadline - Date.now()));
 }
 
+/**
+ * Evidence stops after its own stage, and early enough that scoring can
+ * still emit a result. A short test deadline keeps the stage open until
+ * just before the analysis deadline, so a search is started and then cut off.
+ */
+function evidenceStageDeadline(deadline: number): number {
+  const now = Date.now();
+  const stageEnd = now + LIMITS.evidenceStageMs;
+  const scoringReserve = 8_000;
+  if (deadline - now > scoringReserve + 2_000) return Math.min(deadline - scoringReserve, stageEnd);
+  return Math.min(deadline - 500, stageEnd);
+}
+
 function boundQuery(query: string): string {
   return query.replace(/\s+/g, " ").trim().split(/\s+/).slice(0, 12).join(" ").slice(0, 180);
 }
@@ -1312,6 +1363,8 @@ async function retrieveHits(options: {
   canSpend: () => boolean;
   signal?: AbortSignal;
   charge?: CacheCharge;
+  /** Separate from the Firecrawl cache charge so a full search run can skip Tavily cache I/O. */
+  tavilyCharge?: CacheCharge;
   firecrawlGate: ReturnType<typeof createProviderGate>;
   tavilyGate: ReturnType<typeof createTavilyGate>;
   deadline: number;
@@ -1365,6 +1418,7 @@ async function retrieveHits(options: {
       limit: 5,
       includeRawContent: true,
       gate: options.tavilyGate,
+      charge: options.tavilyCharge,
     }),
     options.timeoutMs + 750,
     "search timed out",
