@@ -8,6 +8,7 @@ import { scrapeArticle, type CacheCharge, type ProviderGate } from "./firecrawl"
 import { LIMITS } from "./limits";
 import { HttpError } from "./errors";
 import { assertPublicHttpUrl } from "./ssrf";
+import { extractTavily, type TavilyGate } from "./tavily";
 
 const PAGE_TIMEOUT_MS = 10_000;
 const BROWSER_UA =
@@ -22,7 +23,7 @@ export interface ExtractedArticle {
   /** Publisher name from og:site_name when present. */
   siteName: string | null;
   finalUrl: string;
-  via: "firecrawl" | "local" | "direct";
+  via: "firecrawl" | "local" | "direct" | "tavily";
   fromPreferred?: boolean;
   opinionSection?: boolean;
 }
@@ -148,7 +149,8 @@ export function extractArticle(
 /**
  * Prefer Firecrawl scrape (markdown, main content only). A failed or empty
  * scrape is read from the page itself. With no key, that direct read is the
- * only path and is marked local.
+ * only path and is marked local. If the direct read also fails and a Tavily
+ * key is set, Tavily Extract is the last try before the paste-text error.
  */
 export async function fetchArticle(
   rawUrl: string,
@@ -159,6 +161,8 @@ export async function fetchArticle(
   charge?: CacheCharge,
   uiLanguage: UiLanguage = "en",
   gate?: ProviderGate,
+  tavilyKey?: string,
+  tavilyGate?: TavilyGate,
 ): Promise<ExtractedArticle> {
   assertPublicHttpUrl(rawUrl);
   const key = apiKey?.trim();
@@ -208,17 +212,53 @@ export async function fetchArticle(
     }
   }
 
+  let directError: unknown = null;
   try {
     const direct = await fetchArticleDirect(rawUrl, fetchImpl, signal);
     return { ...direct, via: key ? "direct" : "local" };
   } catch (error) {
     if (isDeadline(error) || isBudgetExhausted(error)) throw error;
-    if (!key) throw error;
     if (error instanceof HttpError && (error.status === 400 || error.status === 413)) throw error;
-    const reason = directFailureReason(error, scrapeNote);
+    directError = error;
+  }
+
+  const tavily = tavilyKey?.trim();
+  if (tavily && !tavilyGate?.block && (!canSpend || canSpend())) {
+    try {
+      const extracted = await extractTavily({
+        apiKey: tavily,
+        url: rawUrl,
+        fetchImpl,
+        signal,
+        timeoutMs: 20_000,
+        gate: tavilyGate,
+      });
+      if (extracted.text.length >= LIMITS.minArticleChars) {
+        return {
+          title: extracted.title,
+          text: extracted.text.slice(0, LIMITS.maxArticleChars),
+          publishedAt: null,
+          byline: null,
+          siteName: null,
+          finalUrl: extracted.finalUrl,
+          via: "tavily",
+          opinionSection: looksLikeOpinionSection(extracted.finalUrl, extracted.title, extracted.text),
+        };
+      }
+      console.error("tavily extract returned no article text");
+    } catch (error) {
+      if (isDeadline(error) || isBudgetExhausted(error)) throw error;
+      console.error(error instanceof Error ? error.message : "tavily extract failed");
+    }
+  }
+
+  if (!key && !tavily && directError) throw directError;
+  if (directError) {
+    const reason = directFailureReason(directError, scrapeNote);
     console.error(JSON.stringify({ extraction: "direct", directAttempted: true, reason }));
     throw new HttpError(422, pageUnreadMessage(uiLanguage), { extraction: "direct", reason });
   }
+  throw new HttpError(422, pageUnreadMessage(uiLanguage));
 }
 
 function directFailureReason(error: unknown, scrapeNote: string): string {

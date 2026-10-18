@@ -228,7 +228,7 @@ export function buildSample(lang: UiLanguage): AnalysisResult {
     meta: {
       searchEnabled: true,
       searchDegraded: false,
-      searchStatus: { state: "ok", reason: null },
+      searchStatus: { state: "ok", reason: null, provider: null },
       model: "sample",
       uiLanguage: lang,
       requestId: "sample",

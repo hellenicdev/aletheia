@@ -9,6 +9,8 @@ export interface EvidenceItem {
   url: string;
   title: string;
   snippet: string;
+  /** Present when the search provider returned one. Citation checks ignore it. */
+  publishedAt?: string | null;
 }
 
 export function canonicalUrl(url: string): string {

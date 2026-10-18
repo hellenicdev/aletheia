@@ -641,6 +641,7 @@ textarea { min-height: 200px; resize: vertical; line-height: 1.5; }
 .legend-item p { margin: 2px 0 0; color: var(--muted); overflow-wrap: anywhere; }
 
 .method p { color: var(--muted); margin: 8px 0 0; }
+.method-provider { color: var(--faint); font-size: 13px; }
 
 .foot {
   margin-top: 32px;

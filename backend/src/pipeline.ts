@@ -28,6 +28,7 @@ import type { Env } from "./config";
 import { resolveConfig } from "./config";
 import { HttpError, UpstreamError } from "./errors";
 import { fetchArticle } from "./extract";
+import { createTavilyGate, searchTavily } from "./tavily";
 import { resolveFetch } from "./runtime";
 import { completeJson } from "./llm";
 import { LIMITS } from "./limits";
@@ -42,13 +43,14 @@ import {
   verifyUser,
 } from "./prompts";
 import {
+  BudgetExhausted,
   createSubrequestBudget,
   isBudgetExhausted,
   planEvidence,
   trackFetch,
   type SubrequestBudget,
 } from "./budget";
-import { raceAbort } from "./deadline";
+import { deadlineReached, isDeadline, raceAbort } from "./deadline";
 import {
   cacheCountsAsSubrequest,
   createProviderGate,
@@ -108,6 +110,8 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   const providerGate = createProviderGate();
   const llmKey = deps.env.OPENAI_API_KEY?.trim() ?? "";
   const searchKey = deps.env.FIRECRAWL_API_KEY?.trim() ?? "";
+  const tavilyKey = deps.env.TAVILY_API_KEY?.trim() ?? "";
+  const tavilyGate = createTavilyGate();
   const deadline = Date.now() + (deps.budgetMs ?? LIMITS.analysisDeadlineMs);
   const owned = new AbortController();
   const abortOwned = () => owned.abort();
@@ -136,6 +140,8 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     chargeCache,
     uiLanguage,
     providerGate,
+    tavilyKey,
+    tavilyGate,
   );
   stage("ingest", "done");
   deps.onPreview?.({
@@ -187,10 +193,12 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   let providerReason: SearchOutageReason | null = null;
   let searchAttempts = 0;
   let searchErrors = 0;
+  let searchProvider: "firecrawl" | "tavily" | null = null;
 
   if (providerGate.block) providerReason = providerReason ?? outageFromStatus(providerGate.block.status);
+  const tavilyAvailable = () => Boolean(tavilyKey) && tavilyGate.block === null;
 
-  if (searchEnabled && searchKey && budgeted.length > 0 && providerReason) {
+  if (searchEnabled && (searchKey || tavilyKey) && budgeted.length > 0 && providerReason && !tavilyAvailable()) {
     abandonSearches(
       budgeted,
       0,
@@ -201,7 +209,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       "search stopped after the provider rejected the request",
     );
     searchDegraded = true;
-  } else if (searchEnabled && searchKey && budgeted.length > 0) {
+  } else if (searchEnabled && (searchKey || tavilyKey) && budgeted.length > 0) {
     const searchCost = cacheOn ? 2 : 1;
     const verifyCost = cacheOn ? 2 : 1;
     const planned = planEvidence(budget.remaining(), budgeted.length, { search: searchCost, verify: verifyCost });
@@ -238,7 +246,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
         searchDegraded = true;
         break;
       }
-      if (providerReason) {
+      if (providerReason && !tavilyAvailable()) {
         abandonSearches(
           selected,
           index,
@@ -255,23 +263,23 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       const timeoutMs = Math.max(1_000, Math.min(10_000, deadline - Date.now() - 2_000));
       try {
         searchAttempts += 1;
-        const hits = dedupeEvidence(
-          await withTimeout(
-            searchWeb({
-              apiKey: searchKey,
-              query,
-              language: segmented.detectedLanguage,
-              fetchImpl,
-              timeoutMs,
-              canSpend: () => budget.canSpend(1),
-              signal,
-              charge: chargeCache,
-              gate: providerGate,
-            }),
-            timeoutMs + 750,
-            "search timed out",
-          ),
-        );
+        const found = await retrieveHits({
+          query,
+          language: segmented.detectedLanguage,
+          firecrawlKey: searchKey,
+          tavilyKey,
+          fetchImpl,
+          timeoutMs,
+          canSpend: () => budget.canSpend(1),
+          signal,
+          charge: chargeCache,
+          firecrawlGate: providerGate,
+          tavilyGate,
+          deadline,
+        });
+        if (found.provider === "tavily") searchProvider = "tavily";
+        else if (searchProvider !== "tavily") searchProvider = "firecrawl";
+        const hits = dedupeEvidence(found.hits);
         const independent = independentEvidence(hits, {
           articleDomain: ingested.sourceDomain,
           articleText: ingested.text,
@@ -476,6 +484,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   const consistencyMs =
     deps.consistencyTimeoutMs ?? Math.min(8_000, deadline - Date.now() - 500);
   const evidenceBacked = [...evidence.values()].filter((items) => items.length > 0).length;
+  if (searchProvider === "tavily" && searchErrors === 0) providerReason = null;
   let contradictions: Contradiction[] = [];
   const skipConsistency = providerReason !== null && evidenceBacked === 0;
   if (!signal.aborted && consistencyMs >= 200 && budget.canSpend(1) && !skipConsistency) {
@@ -510,6 +519,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     searchErrors,
     searchDegraded,
     evidenceBacked,
+    provider: searchProvider,
   });
   if (searchStatus.state !== "ok") {
     for (const segment of ordered) {
@@ -598,6 +608,8 @@ async function ingest(
   charge?: CacheCharge,
   uiLanguage: UiLanguage = "en",
   gate?: ReturnType<typeof createProviderGate>,
+  tavilyKey?: string,
+  tavilyGate?: ReturnType<typeof createTavilyGate>,
 ) {
   const hasText = typeof input.text === "string" && input.text.trim().length > 0;
   const hasUrl = typeof input.url === "string" && input.url.trim().length > 0;
@@ -622,6 +634,8 @@ async function ingest(
       charge,
       uiLanguage,
       gate,
+      tavilyKey,
+      tavilyGate,
     );
     let hostname: string | null = null;
     try {
@@ -908,6 +922,7 @@ async function judgeGroup(options: {
           url: item.url,
           title: item.title,
           snippet: item.snippet,
+          ...(item.publishedAt ? { publishedAt: item.publishedAt } : {}),
         })),
       })),
       options.publishedAt,
@@ -1129,7 +1144,7 @@ function boundQuery(query: string): string {
 }
 
 function outageFromStatus(status: number): SearchOutageReason | null {
-  if (status === 402) return "out_of_credits";
+  if (status === 402 || status === 432) return "out_of_credits";
   if (status === 401 || status === 403) return "unauthorized";
   if (status === 429) return "rate_limited";
   if (status >= 500) return "upstream_error";
@@ -1138,11 +1153,84 @@ function outageFromStatus(status: number): SearchOutageReason | null {
 
 function providerOutage(error: unknown): SearchOutageReason | null {
   const message = error instanceof Error ? error.message : "";
-  if (/HTTP\s*402\b|insufficient credits/i.test(message)) return "out_of_credits";
+  if (/HTTP\s*402\b|HTTP\s*432\b|insufficient credits|usage limit/i.test(message)) return "out_of_credits";
   if (/HTTP\s*401\b|HTTP\s*403\b/.test(message)) return "unauthorized";
   if (/HTTP\s*429\b/.test(message)) return "rate_limited";
   if (/HTTP\s*5\d\d\b/.test(message)) return "upstream_error";
   return null;
+}
+
+function tavilyCanCover(error: unknown): boolean {
+  if (isBudgetExhausted(error) || isDeadline(error)) return false;
+  const message = error instanceof Error ? error.message : "";
+  if (/timed out|timeout/i.test(message)) return true;
+  return providerOutage(error) !== null;
+}
+
+async function retrieveHits(options: {
+  query: string;
+  language: DetectedLanguage;
+  firecrawlKey: string;
+  tavilyKey: string;
+  fetchImpl: typeof fetch;
+  timeoutMs: number;
+  canSpend: () => boolean;
+  signal?: AbortSignal;
+  charge?: CacheCharge;
+  firecrawlGate: ReturnType<typeof createProviderGate>;
+  tavilyGate: ReturnType<typeof createTavilyGate>;
+  deadline: number;
+}): Promise<{ hits: EvidenceItem[]; provider: "firecrawl" | "tavily" }> {
+  let firecrawlError: unknown = null;
+  if (options.firecrawlKey && !options.firecrawlGate.block) {
+    try {
+      const hits = await withTimeout(
+        searchWeb({
+          apiKey: options.firecrawlKey,
+          query: options.query,
+          language: options.language,
+          fetchImpl: options.fetchImpl,
+          timeoutMs: options.timeoutMs,
+          canSpend: options.canSpend,
+          signal: options.signal,
+          charge: options.charge,
+          gate: options.firecrawlGate,
+        }),
+        options.timeoutMs + 750,
+        "search timed out",
+      );
+      return { hits, provider: "firecrawl" };
+    } catch (error) {
+      if (isBudgetExhausted(error) || isDeadline(error) || options.signal?.aborted) throw error;
+      firecrawlError = error;
+      if (!options.tavilyKey || options.tavilyGate.block || !tavilyCanCover(error)) throw error;
+    }
+  }
+  if (!options.tavilyKey || options.tavilyGate.block) {
+    if (firecrawlError) throw firecrawlError;
+    throw new Error("search failed");
+  }
+  if (!options.canSpend() || options.signal?.aborted || Date.now() > options.deadline - 3_000) {
+    if (firecrawlError) throw firecrawlError;
+    if (options.signal?.aborted || Date.now() > options.deadline - 3_000) throw deadlineReached();
+    throw new BudgetExhausted();
+  }
+  const hits = await withTimeout(
+    searchTavily({
+      apiKey: options.tavilyKey,
+      query: options.query,
+      fetchImpl: options.fetchImpl,
+      timeoutMs: options.timeoutMs,
+      signal: options.signal,
+      topic: "news",
+      limit: 5,
+      includeRawContent: true,
+      gate: options.tavilyGate,
+    }),
+    options.timeoutMs + 750,
+    "search timed out",
+  );
+  return { hits, provider: "tavily" };
 }
 
 function resolveSearchStatus(input: {
@@ -1152,25 +1240,28 @@ function resolveSearchStatus(input: {
   searchErrors: number;
   searchDegraded: boolean;
   evidenceBacked: number;
+  provider: "firecrawl" | "tavily" | null;
 }): SearchStatus {
-  if (!input.searchEnabled) return { state: "ok", reason: null };
+  if (!input.searchEnabled) return { state: "ok", reason: null, provider: null };
   const failedMost = input.searchAttempts > 0 && input.searchErrors > input.searchAttempts / 2;
   if (input.providerReason) {
     return {
       state: input.evidenceBacked === 0 ? "unavailable" : "partial",
       reason: input.providerReason,
+      provider: input.provider,
     };
   }
   if (failedMost) {
     return {
       state: input.evidenceBacked === 0 ? "unavailable" : "partial",
       reason: "failed",
+      provider: input.provider,
     };
   }
   if (input.searchDegraded && input.searchErrors > 0) {
-    return { state: "partial", reason: "failed" };
+    return { state: "partial", reason: "failed", provider: input.provider };
   }
-  return { state: "ok", reason: null };
+  return { state: "ok", reason: null, provider: input.provider };
 }
 
 function abandonSearches(

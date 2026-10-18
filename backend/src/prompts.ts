@@ -80,7 +80,7 @@ export function verifyUser(
     id: string;
     claim: string;
     context?: string;
-    evidence: { url: string; title: string; snippet: string }[];
+    evidence: { url: string; title: string; snippet: string; publishedAt?: string }[];
   }[],
   publishedAt: string | null,
 ): string {

@@ -5,6 +5,7 @@ compatibility_date = "2026-10-01"
 # Set secrets with:
 #   npx wrangler secret put OPENAI_API_KEY
 #   npx wrangler secret put FIRECRAWL_API_KEY
+#   npx wrangler secret put TAVILY_API_KEY
 [vars]
 OPENAI_BASE_URL = "https://api.reflection.ai/openai/v1"
 OPENAI_MODEL = "Beam-501B-A23B"

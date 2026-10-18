@@ -48,10 +48,12 @@ export async function handleRequest(
   const path = url.pathname.replace(/\/$/, "") || "/";
 
   if (request.method === "GET" && path === "/api/health") {
+    const tavilyConfigured = Boolean(env.TAVILY_API_KEY?.trim());
     const base = {
       searchConfigured: config.searchConfigured,
+      tavilyConfigured,
       model: config.llmModel,
-      searchProvider: "firecrawl",
+      searchProvider: tavilyConfigured && !env.FIRECRAWL_API_KEY?.trim() ? "tavily" : "firecrawl",
     };
     if (url.searchParams.get("probe") !== "1") {
       return jsonResponse({ ok: true, ...base }, 200, cors);
@@ -62,7 +64,8 @@ export async function handleRequest(
       return jsonResponse({ error: "Too many health probes from this network. Try again shortly." }, 429, cors);
     }
     const probe = await probeUpstreams(env, resolveFetch(deps.fetchImpl), deps.now?.());
-    return jsonResponse({ ok: probe.llm.ok && probe.search.ok, ...base, probe }, 200, cors);
+    const searchUp = probe.firecrawl.ok || probe.tavily.ok;
+    return jsonResponse({ ok: probe.llm.ok && searchUp, ...base, probe }, 200, cors);
   }
 
   if (path !== "/api/analyze") {

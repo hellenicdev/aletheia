@@ -4,6 +4,7 @@ import { resolveConfig } from "./config";
 import { HttpError, UpstreamError } from "./errors";
 import { searchWeb } from "./firecrawl";
 import { ModelOutputError, requestChat, sanitisePreview, type ChatMessage } from "./llm";
+import { searchTavily } from "./tavily";
 
 export interface ProbeCheck {
   ok: boolean;
@@ -18,19 +19,23 @@ export interface ProbeCheck {
 
 /** Long enough to stop a health poll from billing a search on every hit. */
 const PROBE_TTL_MS = 60_000;
-let searchProbe: { at: number; check: ProbeCheck } | null = null;
+const probeMemo = new Map<string, { at: number; check: ProbeCheck }>();
 
 export function clearProbeCache(): void {
-  searchProbe = null;
+  probeMemo.clear();
 }
 
 export async function probeUpstreams(
   env: Env,
   fetchImpl: typeof fetch,
   now = Date.now(),
-): Promise<{ llm: ProbeCheck; search: ProbeCheck }> {
-  const [llm, search] = await Promise.all([probeLlm(env, fetchImpl), probeSearch(env, fetchImpl, now)]);
-  return { llm, search };
+): Promise<{ llm: ProbeCheck; firecrawl: ProbeCheck; tavily: ProbeCheck }> {
+  const [llm, firecrawl, tavily] = await Promise.all([
+    probeLlm(env, fetchImpl),
+    probeFirecrawl(env, fetchImpl, now),
+    probeTavily(env, fetchImpl, now),
+  ]);
+  return { llm, firecrawl, tavily };
 }
 
 async function probeLlm(env: Env, fetchImpl: typeof fetch): Promise<ProbeCheck> {
@@ -88,36 +93,71 @@ async function probeLlm(env: Env, fetchImpl: typeof fetch): Promise<ProbeCheck> 
   }
 }
 
-async function probeSearch(env: Env, fetchImpl: typeof fetch, now: number): Promise<ProbeCheck> {
+async function probeFirecrawl(env: Env, fetchImpl: typeof fetch, now: number): Promise<ProbeCheck> {
   const apiKey = env.FIRECRAWL_API_KEY?.trim() ?? "";
-  if (!apiKey) return { ok: false, status: null, error: "search: FIRECRAWL_API_KEY is not configured" };
-  if (searchProbe && now - searchProbe.at < PROBE_TTL_MS) return searchProbe.check;
-  let check: ProbeCheck;
-  try {
-    await searchWeb({
-      apiKey,
-      query: "eiffel tower",
-      language: "en",
-      fetchImpl,
-      limit: 1,
-      bypassCache: true,
-    });
-    check = { ok: true, status: 200 };
-  } catch (error) {
-    check = asCheck("search", error);
-    if (isOutOfCredits(error)) check = { ...check, reason: "out_of_credits" };
-  }
-  searchProbe = { at: now, check };
+  if (!apiKey) return { ok: false, status: null, error: "firecrawl: FIRECRAWL_API_KEY is not configured" };
+  return cachedProbe("firecrawl", now, async () => {
+    try {
+      await searchWeb({
+        apiKey,
+        query: "eiffel tower",
+        language: "en",
+        fetchImpl,
+        limit: 1,
+        bypassCache: true,
+      });
+      return { ok: true, status: 200 };
+    } catch (error) {
+      return withCreditReason(asCheck("firecrawl", error), error);
+    }
+  });
+}
+
+async function probeTavily(env: Env, fetchImpl: typeof fetch, now: number): Promise<ProbeCheck> {
+  const apiKey = env.TAVILY_API_KEY?.trim() ?? "";
+  if (!apiKey) return { ok: false, status: null, error: "tavily: TAVILY_API_KEY is not configured" };
+  return cachedProbe("tavily", now, async () => {
+    try {
+      await searchTavily({
+        apiKey,
+        query: "eiffel tower",
+        fetchImpl,
+        limit: 1,
+        topic: "general",
+        includeRawContent: false,
+        bypassCache: true,
+      });
+      return { ok: true, status: 200 };
+    } catch (error) {
+      return withCreditReason(asCheck("tavily", error), error);
+    }
+  });
+}
+
+async function cachedProbe(
+  name: string,
+  now: number,
+  load: () => Promise<ProbeCheck>,
+): Promise<ProbeCheck> {
+  const hit = probeMemo.get(name);
+  if (hit && now - hit.at < PROBE_TTL_MS) return hit.check;
+  const check = await load();
+  probeMemo.set(name, { at: now, check });
   return check;
 }
 
-function isOutOfCredits(error: unknown): boolean {
-  if (error instanceof UpstreamError && error.status === 402) return true;
-  const message = error instanceof Error ? error.message : "";
-  return /HTTP\s*402\b|insufficient credits/i.test(message);
+function withCreditReason(check: ProbeCheck, error: unknown): ProbeCheck {
+  if (!isOutOfCredits(error)) return check;
+  return { ...check, reason: "out_of_credits" };
 }
 
-function asCheck(source: "llm" | "search", error: unknown): ProbeCheck {
+function isOutOfCredits(error: unknown): boolean {
+  if (error instanceof UpstreamError && (error.status === 402 || error.status === 432)) return true;
+  const message = error instanceof Error ? error.message : "";
+  return /HTTP\s*402\b|HTTP\s*432\b|insufficient credits|usage limit/i.test(message);
+}
+
+function asCheck(source: "llm" | "firecrawl" | "tavily", error: unknown): ProbeCheck {
   if (error instanceof ModelOutputError) {
     return {
       ok: false,

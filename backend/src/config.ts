@@ -1,6 +1,7 @@
 export interface Env {
   OPENAI_API_KEY?: string;
   FIRECRAWL_API_KEY?: string;
+  TAVILY_API_KEY?: string;
   OPENAI_BASE_URL?: string;
   OPENAI_MODEL?: string;
   ALLOWED_ORIGINS?: string;
@@ -43,7 +44,10 @@ export function resolveConfig(env: Env): AppConfig {
     allowedOrigins: origins,
     rateLimit: positiveInt(env.RATE_LIMIT_PER_IP, 30),
     rateWindowMs: positiveInt(env.RATE_LIMIT_WINDOW_SEC, 600) * 1000,
-    searchConfigured: Boolean(env.FIRECRAWL_API_KEY && env.FIRECRAWL_API_KEY.trim()),
+    searchConfigured: Boolean(
+      (env.FIRECRAWL_API_KEY && env.FIRECRAWL_API_KEY.trim()) ||
+        (env.TAVILY_API_KEY && env.TAVILY_API_KEY.trim()),
+    ),
   };
 }
 

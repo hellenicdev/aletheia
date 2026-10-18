@@ -18,7 +18,7 @@ export class UpstreamError extends Error {
   readonly name = "UpstreamError";
 
   constructor(
-    readonly source: "llm" | "search",
+    readonly source: "llm" | "search" | "tavily",
     readonly status: number | null,
     detail: string,
   ) {
@@ -27,7 +27,7 @@ export class UpstreamError extends Error {
 }
 
 export function formatUpstream(
-  source: "llm" | "search",
+  source: "llm" | "search" | "tavily",
   status: number | null,
   detail: string,
 ): string {
