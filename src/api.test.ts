@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { ANALYSIS_STALL_MS, analyzeArticle, STALL_MESSAGE } from "./api";
+import { ANALYSIS_STALL_MS, AnalysisError, analyzeArticle, STALL_MESSAGE } from "./api";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -7,6 +7,22 @@ afterEach(() => {
 });
 
 describe("analyzeArticle stall watchdog", () => {
+  it("keeps the retry wait from a 429", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ error: "limited", code: "ip_burst", retryAfter: 125 }), {
+          status: 429,
+          headers: { "Content-Type": "application/json", "Retry-After": "125" },
+        }),
+      ),
+    );
+    const error = await analyzeArticle({ text: "x".repeat(80), uiLanguage: "en" }, () => {}).catch((caught) => caught);
+    expect(error).toBeInstanceOf(AnalysisError);
+    expect(error.code).toBe("ip_burst");
+    expect(error.retryAfterSeconds).toBe(125);
+  });
+
   it("rejects when the stream sends nothing for 45 seconds", async () => {
     vi.useFakeTimers();
     const encoder = new TextEncoder();

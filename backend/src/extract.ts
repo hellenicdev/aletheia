@@ -221,8 +221,10 @@ export async function fetchArticle(
     const direct = await fetchArticleDirect(rawUrl, fetchImpl, signal);
     return { ...direct, via: key ? "direct" : "local" };
   } catch (error) {
+    // A direct-fetch failure, including a size cap, a block, a short page, or
+    // its own timeout, must still try Tavily. Only the analysis deadline and
+    // the subrequest budget stop the chain.
     if (isDeadline(error) || isBudgetExhausted(error)) throw error;
-    if (error instanceof HttpError && (error.status === 400 || error.status === 413)) throw error;
     directError = error;
   }
 
@@ -282,6 +284,7 @@ function directFailureReason(error: unknown, scrapeNote: string): string {
     const status = message.match(/status (\d+)/i);
     if (status) why = `HTTP ${status[1]}`;
     else if (/not enough article text|could not find enough/i.test(message)) why = "not enough article text";
+    else if (/too large/i.test(message)) why = "too large";
     else if (/timed out|aborted/i.test(message)) why = "timed out";
   }
   const scrapeStatus = scrapeNote.match(/\((\d{3})\)/)?.[1];
@@ -353,27 +356,41 @@ async function fetchArticleDirect(
     throw new HttpError(422, "Only HTML articles can be fetched. Paste the text instead.");
   }
 
-  const html = await readLimited(response, LIMITS.maxPageBytes);
+  const html = stripHeavyMarkup(await readLimited(response, LIMITS.maxPageBytes));
   const extracted = extractArticle(html, current.toString());
   return { ...extracted, finalUrl: current.toString() };
 }
 
+/** Drop script, style, and inline JSON before Readability so a large shell does not crowd out the article. */
+export function stripHeavyMarkup(html: string): string {
+  return html
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ");
+}
+
+/**
+ * Read at most `maxBytes`. A longer body is cut there and still returned:
+ * the article text sits near the top, ahead of the scripts and widgets.
+ */
 async function readLimited(response: Response, maxBytes: number): Promise<string> {
   const reader = response.body?.getReader();
   if (!reader) return "";
   const chunks: Uint8Array[] = [];
   let received = 0;
-  while (true) {
+  while (received < maxBytes) {
     const { done, value } = await reader.read();
     if (done) break;
-    if (!value) continue;
-    received += value.byteLength;
-    if (received > maxBytes) {
-      await reader.cancel();
-      throw new HttpError(413, "That page is too large to analyse.");
+    if (!value || value.byteLength === 0) continue;
+    const room = maxBytes - received;
+    if (value.byteLength > room) {
+      chunks.push(value.subarray(0, room));
+      received += room;
+      break;
     }
     chunks.push(value);
+    received += value.byteLength;
   }
+  await reader.cancel().catch(() => undefined);
   const merged = new Uint8Array(received);
   let offset = 0;
   for (const chunk of chunks) {

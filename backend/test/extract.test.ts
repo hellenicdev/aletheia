@@ -417,4 +417,102 @@ describe("fetchArticle", () => {
     expect(calls.filter((url) => url.includes("api.firecrawl.dev"))).toHaveLength(1);
     expect(calls.filter((url) => url.includes("apnews.com"))).toHaveLength(1);
   });
+
+  it("reads the article from a page larger than one megabyte", async () => {
+    const sentence =
+      "The council voted 7 to 2 and published the full minutes for residents of the harbour district.";
+    const html = `<!doctype html><html><head><title>Harbour vote</title></head><body><article><h1>Harbour vote</h1><p>${sentence}</p></article><script type="application/json">{"filler":"${"x".repeat(1_100_000)}"}</script></body></html>`;
+    expect(new TextEncoder().encode(html).byteLength).toBeGreaterThan(1_000_000);
+    const fetchImpl: typeof fetch = async () =>
+      new Response(html, { status: 200, headers: { "content-type": "text/html" } });
+    const page = await fetchArticle("https://www.kathimerini.gr/politics/story", fetchImpl);
+    expect(page.via).toBe("local");
+    expect(page.text).toContain("voted 7 to 2");
+    expect(page.text).not.toContain("filler");
+  });
+
+  it("keeps the first 4 MB of a larger page and still extracts the article", async () => {
+    const sentence =
+      "The council voted 7 to 2 and published the full minutes for residents of the harbour district.";
+    const prefix = `<!doctype html><html><body><article><h1>Harbour vote</h1><p>${sentence}</p></article>`;
+    const encoder = new TextEncoder();
+    const head = encoder.encode(prefix);
+    const filler = encoder.encode("y".repeat(256 * 1024));
+    let sent = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent === 0) {
+          controller.enqueue(head);
+          sent += head.byteLength;
+          return;
+        }
+        if (sent > 5_000_000) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(filler);
+        sent += filler.byteLength;
+      },
+    });
+    const fetchImpl: typeof fetch = async () =>
+      new Response(stream, { status: 200, headers: { "content-type": "text/html" } });
+    const page = await fetchArticle("https://www.kathimerini.gr/politics/long", fetchImpl);
+    expect(page.text).toContain("voted 7 to 2");
+    expect(sent).toBeLessThan(4_600_000);
+  });
+
+  it("tries Tavily after a direct fetch is blocked, short, oversized, or timed out", async () => {
+    const tavilyBody = JSON.stringify({
+      results: [
+        {
+          url: "https://www.kathimerini.gr/politics/story",
+          raw_content:
+            "Harbour vote\n\nThe council voted 7 to 2 on Monday and published the minutes for residents of the district.",
+        },
+      ],
+    });
+    const cases: { name: string; page: () => Response | Promise<Response> }[] = [
+      { name: "status", page: () => new Response("blocked", { status: 403 }) },
+      {
+        name: "short",
+        page: () => new Response("<html><body><p>Hi</p></body></html>", { status: 200, headers: { "content-type": "text/html" } }),
+      },
+      {
+        name: "challenge",
+        page: () =>
+          new Response(
+            "<html><head><title>Just a moment...</title></head><body><p>Just a moment...</p><p>Enable JavaScript and cookies to continue.</p></body></html>",
+            { status: 200, headers: { "content-type": "text/html" } },
+          ),
+      },
+      { name: "timeout", page: () => Promise.reject(new Error("The operation was aborted due to timeout")) },
+    ];
+    for (const item of cases) {
+      clearSearchCache();
+      const calls: string[] = [];
+      const fetchImpl: typeof fetch = async (input) => {
+        const url = String(input);
+        calls.push(url);
+        if (url.includes("api.firecrawl.dev")) {
+          return new Response(JSON.stringify({ error: "Insufficient credits" }), { status: 402 });
+        }
+        if (url.includes("api.tavily.com/extract")) return new Response(tavilyBody, { status: 200 });
+        return item.page();
+      };
+      const page = await fetchArticle(
+        `https://www.kathimerini.gr/politics/${item.name}`,
+        fetchImpl,
+        "fc-key",
+        undefined,
+        undefined,
+        undefined,
+        "en",
+        undefined,
+        "tavily-test-key",
+      );
+      expect(page.via, item.name).toBe("tavily");
+      expect(page.text, item.name).toContain("voted 7 to 2");
+      expect(calls.some((url) => url.includes("api.tavily.com/extract")), item.name).toBe(true);
+    }
+  });
 });

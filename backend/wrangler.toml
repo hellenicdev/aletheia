@@ -9,6 +9,19 @@ compatibility_date = "2026-10-01"
 [vars]
 OPENAI_BASE_URL = "https://api.reflection.ai/openai/v1"
 OPENAI_MODEL = "Beam-501B-A23B"
-ALLOWED_ORIGINS = "https://hellenicdev.eu,https://hellenicdev.github.io,http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173,http://localhost:8787,http://127.0.0.1:8787"
+ALLOWED_ORIGINS = "https://hellenicdev.eu,https://www.hellenicdev.eu,https://hellenicdev.github.io,http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173,http://localhost:8787,http://127.0.0.1:8787"
 RATE_LIMIT_PER_IP = "30"
 RATE_LIMIT_WINDOW_SEC = "600"
+# Each non-cached analysis reserves 12 Tavily credits. A new analysis is
+# refused when the next reservation would pass either cap.
+TAVILY_DAILY_CREDITS = "120"
+TAVILY_MONTHLY_CREDITS = "950"
+
+# The binding's period can only be 10 or 60 seconds, so this is a 3-per-minute
+# edge guard. The 10-minute, daily, in-flight, and credit caps live in the
+# Cache API. No Durable Object and no migration: a preview version upload can
+# apply this binding without a dashboard step.
+[[ratelimits]]
+name = "ANALYZE_IP"
+namespace_id = "1001"
+simple = { limit = 3, period = 60 }

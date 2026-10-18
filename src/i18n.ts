@@ -132,6 +132,11 @@ const en = {
   consentBody: "Aletheia counts visits only if you accept. It does not use advertising cookies.",
   consentAccept: "Accept",
   consentDecline: "Decline",
+  rateLimitBurst: "Too many analyses from this network. Try again in {time}.",
+  rateLimitDaily: "The daily analysis limit was reached. Try again in {time}.",
+  rateLimitConcurrent: "An analysis is already running from this network. Try again in {time}.",
+  rateLimitCredits: "Daily limit reached. Try again tomorrow ({time}).",
+  rateLimitCreditsMonth: "Monthly limit reached. Try again next month ({time}).",
 };
 
 const el: Record<keyof typeof en, string> = {
@@ -266,6 +271,11 @@ const el: Record<keyof typeof en, string> = {
   consentBody: "Η Αλήθεια μετρά τις επισκέψεις μόνο αν το αποδεχτείτε. Δεν χρησιμοποιεί διαφημιστικά cookies.",
   consentAccept: "Αποδοχή",
   consentDecline: "Απόρριψη",
+  rateLimitBurst: "Πάρα πολλές αναλύσεις από αυτό το δίκτυο. Δοκιμάστε ξανά σε {time}.",
+  rateLimitDaily: "Συμπληρώθηκε το ημερήσιο όριο αναλύσεων. Δοκιμάστε ξανά σε {time}.",
+  rateLimitConcurrent: "Μια ανάλυση εκτελείται ήδη από αυτό το δίκτυο. Δοκιμάστε ξανά σε {time}.",
+  rateLimitCredits: "Συμπληρώθηκε το ημερήσιο όριο. Δοκιμάστε ξανά αύριο ({time}).",
+  rateLimitCreditsMonth: "Συμπληρώθηκε το μηνιαίο όριο. Δοκιμάστε ξανά τον επόμενο μήνα ({time}).",
 };
 
 export const STRINGS = { en, el };

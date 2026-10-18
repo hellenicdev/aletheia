@@ -10,8 +10,16 @@ export function corsHeaders(origin: string | null, allowed: string[]): Headers {
   return headers;
 }
 
-export function jsonResponse(body: unknown, status: number, cors: Headers): Response {
+export function jsonResponse(
+  body: unknown,
+  status: number,
+  cors: Headers,
+  extra?: Record<string, string>,
+): Response {
   const headers = new Headers(cors);
   headers.set("Content-Type", "application/json; charset=utf-8");
+  if (extra) {
+    for (const [key, value] of Object.entries(extra)) headers.set(key, value);
+  }
   return new Response(JSON.stringify(body), { status, headers });
 }
