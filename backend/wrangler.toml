@@ -18,10 +18,27 @@ TAVILY_DAILY_CREDITS = "120"
 TAVILY_MONTHLY_CREDITS = "950"
 
 # The binding's period can only be 10 or 60 seconds, so this is a 3-per-minute
-# edge guard. The 10-minute, daily, in-flight, and credit caps live in the
-# Cache API. No Durable Object and no migration: a preview version upload can
-# apply this binding without a dashboard step.
+# edge guard. The 10-minute, daily, and in-flight limits are one Durable Object
+# per IP. Tavily credits are one global Durable Object. Both use SQLite.
 [[ratelimits]]
 name = "ANALYZE_IP"
 namespace_id = "1001"
 simple = { limit = 3, period = 60 }
+
+[[durable_objects.bindings]]
+name = "IP_LIMITER"
+class_name = "IpRateLimiter"
+
+[[durable_objects.bindings]]
+name = "TAVILY_CREDITS"
+class_name = "TavilyCredits"
+
+[[durable_objects.bindings]]
+name = "PIPELINE_CACHE"
+class_name = "PipelineCache"
+
+# `wrangler versions upload` cannot apply this first migration. `wrangler deploy`
+# can. Once tag v1 is on the deployed script, later uploads of the same tag succeed.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["IpRateLimiter", "TavilyCredits", "PipelineCache"]

@@ -10,6 +10,7 @@ import {
 } from "../src/firecrawl";
 import { fetchArticle } from "../src/extract";
 import { HttpError } from "../src/errors";
+import { bindPipelineCache } from "../src/persistentCache";
 
 describe("searchWeb", () => {
   it("reads Firecrawl web hits and never puts the key in the body", async () => {
@@ -245,18 +246,15 @@ describe("result cache", () => {
   it("reuses a cached search without calling Firecrawl again", async () => {
     clearSearchCache();
     const store = new Map<string, string>();
-    const previous = (globalThis as { caches?: unknown }).caches;
-    (globalThis as { caches?: unknown }).caches = {
-      default: {
-        async match(request: Request) {
-          const hit = store.get(request.url);
-          return hit ? new Response(hit) : undefined;
-        },
-        async put(request: Request, response: Response) {
-          store.set(request.url, await response.text());
-        },
+    bindPipelineCache({
+      async match(request: Request) {
+        const hit = store.get(request.url);
+        return hit ? new Response(hit) : undefined;
       },
-    };
+      async put(request: Request, response: Response) {
+        store.set(request.url, await response.text());
+      },
+    });
     let calls = 0;
     const fetchImpl: typeof fetch = async () => {
       calls += 1;
@@ -276,8 +274,7 @@ describe("result cache", () => {
       expect(calls).toBe(1);
       expect(store.size).toBe(1);
     } finally {
-      if (previous === undefined) delete (globalThis as { caches?: unknown }).caches;
-      else (globalThis as { caches?: unknown }).caches = previous;
+      bindPipelineCache(null);
       clearSearchCache();
     }
   });

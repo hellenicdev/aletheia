@@ -4,6 +4,7 @@ import { focusPassage, passageAddsFigure, passageMissesFigure } from "../../shar
 import { queryCacheKey } from "../../shared/query";
 import { BudgetExhausted, isBudgetExhausted } from "./budget";
 import { capOutbound, combineSignals, deadlineReached, fetchSignal, isDeadline, raceAbort, readBody } from "./deadline";
+import { currentPipelineCache, type ResultCache } from "./persistentCache";
 import { PIPELINE_VERSION } from "./version";
 import { HttpError, UpstreamError, redactSecret } from "./errors";
 import { LIMITS } from "./limits";
@@ -124,7 +125,7 @@ function retryAfterMs(response: Response, fallback: number): number {
 export type CacheCharge = (op: "read" | "write") => boolean;
 
 export function cacheCountsAsSubrequest(): boolean {
-  return resultCache() !== null;
+  return currentPipelineCache() !== null;
 }
 
 export async function searchWeb(options: {
@@ -413,14 +414,8 @@ export async function scrapeArticle(options: {
   return page;
 }
 
-interface ResultCache {
-  match(request: Request): Promise<Response | undefined>;
-  put(request: Request, response: Response): Promise<void>;
-}
-
 function resultCache(): ResultCache | null {
-  const host = globalThis as unknown as { caches?: { default?: ResultCache } };
-  return host.caches?.default ?? null;
+  return currentPipelineCache();
 }
 
 async function cacheRequest(key: string): Promise<Request> {

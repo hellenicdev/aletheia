@@ -1,5 +1,6 @@
 import { canonicalUrl } from "../../shared/citations";
 import type { AnalysisResult } from "../../shared/types";
+import { currentPipelineCache, type ResultCache } from "./persistentCache";
 import { PIPELINE_VERSION } from "./version";
 
 const TTL_SECONDS = 24 * 60 * 60;
@@ -18,9 +19,9 @@ export function cacheApiAnalysisCache(): AnalysisCache {
     async get(pageUrl) {
       const cache = workerCache();
       if (!cache) return null;
-      const hit = await cache.match(new Request(analysisCacheUrl(pageUrl)));
-      if (!hit) return null;
       try {
+        const hit = await cache.match(new Request(analysisCacheUrl(pageUrl)));
+        if (!hit) return null;
         return (await hit.json()) as AnalysisResult;
       } catch {
         return null;
@@ -39,12 +40,6 @@ export function cacheApiAnalysisCache(): AnalysisCache {
   };
 }
 
-interface ResultCache {
-  match(request: Request): Promise<Response | undefined>;
-  put(request: Request, response: Response): Promise<void>;
-}
-
 export function workerCache(): ResultCache | null {
-  const host = globalThis as unknown as { caches?: { default?: ResultCache } };
-  return host.caches?.default ?? null;
+  return currentPipelineCache();
 }

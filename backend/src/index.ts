@@ -6,7 +6,7 @@ import { HttpError } from "./errors";
 import { LIMITS, allowRequest, type RateState } from "./limits";
 import { probeUpstreams } from "./probe";
 import { analyze, type AnalyzeInput } from "./pipeline";
-import { cacheApiRateGate } from "./rateLimiter";
+import { bindDurableCaches, DurableRateGate, IpRateLimiter, PipelineCache, TavilyCredits } from "./rateLimiter";
 import {
   MemoryRateGate,
   TAVILY_CREDITS_PER_ANALYSIS,
@@ -18,6 +18,8 @@ import {
 } from "./rateLimit";
 import { resolveFetch } from "./runtime";
 import { assertPublicHttpUrl } from "./ssrf";
+
+export { IpRateLimiter, PipelineCache, TavilyCredits };
 
 export interface HandlerDeps {
   fetchImpl?: typeof fetch;
@@ -31,7 +33,7 @@ export interface HandlerDeps {
   waitUntil?: (promise: Promise<unknown>) => void;
   /** Test hook. Production pings every 10 seconds, on its own timer. */
   pingMs?: number;
-  /** Shared book. Tests pass one gate. Production uses the Cache API. */
+  /** Shared book. Tests pass one gate. Production uses the Durable Object gate. */
   gate?: RateGate;
   /** Test hook. Production uses the ANALYZE_IP binding (3 per 60 seconds). */
   ipLimit?: { limit(options: { key: string }): Promise<{ success: boolean }> };
@@ -134,6 +136,7 @@ export async function handleRequest(
   const rejection = rejectInput(input);
   if (rejection) return jsonResponse({ error: rejection.error }, rejection.status, cors);
 
+  if (env.PIPELINE_CACHE) bindDurableCaches(env.PIPELINE_CACHE);
   const analysisCache = deps.analysisCache ?? cacheApiAnalysisCache();
   if (input.url) {
     const cached = await analysisCache.get(input.url);
@@ -159,11 +162,17 @@ export async function handleRequest(
     if (!allowed) return limitResponse("ip_burst", 60, lang, cors);
   }
 
-  const gate = resolveGate(deps.gate);
+  const gate = resolveGate(env, deps.gate);
   const credits = env.TAVILY_API_KEY?.trim() ? TAVILY_CREDITS_PER_ANALYSIS : 0;
   const dailyCreditCap = positiveCap(env.TAVILY_DAILY_CREDITS, TAVILY_DAILY_CREDITS);
   const monthlyCreditCap = positiveCap(env.TAVILY_MONTHLY_CREDITS, TAVILY_MONTHLY_CREDITS);
-  const decision = await gate.reserve({ ip: key, now: now(), credits, dailyCreditCap, monthlyCreditCap });
+  let decision;
+  try {
+    decision = await gate.reserve({ ip: key, now: now(), credits, dailyCreditCap, monthlyCreditCap });
+  } catch (error) {
+    console.error(error);
+    return jsonResponse({ error: limitStoreMessage(lang) }, 503, cors);
+  }
   if (!decision.ok) return limitResponse(decision.code, decision.retryAfter, lang, cors);
 
   rate.inFlight.count += 1;
@@ -196,32 +205,44 @@ export async function handleRequest(
       };
       let deadlineSignal: AbortSignal | undefined;
       let onDeadline: () => void = () => {};
-      const finish = () => {
-        if (closed) return;
-        closed = true;
-        if (heartbeat) clearTimeout(heartbeat);
-        if (hardStop) clearTimeout(hardStop);
-        if (grace) clearTimeout(grace);
-        deadlineSignal?.removeEventListener("abort", onDeadline);
-        request.signal.removeEventListener("abort", onRequestAbort);
-        abort.abort();
-        if (!terminal) {
-          terminal = true;
-          try {
-            controller.enqueue(
-              encoder.encode(`event: error\ndata: ${JSON.stringify({ message: interruptedMessage })}\n\n`),
-            );
-          } catch {
-            /* The client is already gone. */
+      let finishing: Promise<void> | undefined;
+      const finish = (): Promise<void> => {
+        if (finishing) return finishing;
+        finishing = (async () => {
+          closed = true;
+          if (heartbeat) clearTimeout(heartbeat);
+          if (hardStop) clearTimeout(hardStop);
+          if (grace) clearTimeout(grace);
+          deadlineSignal?.removeEventListener("abort", onDeadline);
+          request.signal.removeEventListener("abort", onRequestAbort);
+          abort.abort();
+          if (!terminal) {
+            terminal = true;
+            try {
+              controller.enqueue(
+                encoder.encode(`event: error\ndata: ${JSON.stringify({ message: interruptedMessage })}\n\n`),
+              );
+            } catch {
+              /* The client is already gone. */
+            }
           }
-        }
-        rate.inFlight.count = Math.max(0, rate.inFlight.count - 1);
-        void Promise.resolve(gate.release(key, now())).catch(() => undefined);
-        try {
-          controller.close();
-        } catch {
-          /* The stream is already closed. */
-        }
+          rate.inFlight.count = Math.max(0, rate.inFlight.count - 1);
+          const release = Promise.resolve(gate.release(key, now())).catch((error) => {
+            console.error(error);
+          });
+          try {
+            deps.waitUntil?.(release);
+          } catch {
+            /* The stream task also awaits finish, so the release still runs. */
+          }
+          await release;
+          try {
+            controller.close();
+          } catch {
+            /* The stream is already closed. */
+          }
+        })();
+        return finishing;
       };
       const ping = () => {
         if (closed) return;
@@ -287,11 +308,11 @@ export async function handleRequest(
             ]);
             if (late) {
               sendTerminal("result", late);
-              if (input.url) void analysisCache.put(input.url, late).catch(() => undefined);
+              if (input.url) track(deps, analysisCache.put(input.url, late));
             } else sendTerminal("error", { message: timeoutMessage });
           } else {
             sendTerminal("result", winner);
-            if (input.url) void analysisCache.put(input.url, winner).catch(() => undefined);
+            if (input.url) track(deps, analysisCache.put(input.url, winner));
           }
         } catch (error) {
           const timedOut =
@@ -308,7 +329,7 @@ export async function handleRequest(
           if (late) sendTerminal("result", late);
           else sendTerminal("error", errorEvent(error, message));
         } finally {
-          finish();
+          await finish();
         }
       })();
       // Tie the producer to the request context. Without this, a killed isolate
@@ -403,9 +424,37 @@ function streamResponse(
   return new Response(encoder.encode(chunks.join("")), { status: 200, headers });
 }
 
-function resolveGate(gate?: RateGate): RateGate {
+function resolveGate(env: Env, gate?: RateGate): RateGate {
   if (gate) return gate;
-  return cacheApiRateGate() ?? new MemoryRateGate();
+  if (env.IP_LIMITER && env.TAVILY_CREDITS) return new DurableRateGate(env.IP_LIMITER, env.TAVILY_CREDITS);
+  if (env.IP_LIMITER || env.TAVILY_CREDITS) {
+    return {
+      async reserve() {
+        throw new Error("The limiter bindings are incomplete.");
+      },
+      async release() {
+        /* Nothing was reserved. */
+      },
+    };
+  }
+  return new MemoryRateGate();
+}
+
+function track(deps: HandlerDeps, promise: Promise<unknown>): void {
+  const settled = promise.catch((error) => {
+    console.error(error);
+  });
+  try {
+    deps.waitUntil?.(settled);
+  } catch {
+    /* Tests omit waitUntil. The write still runs. */
+  }
+}
+
+function limitStoreMessage(lang: "en" | "el"): string {
+  return lang === "el"
+    ? "Ο αναλυτής δεν μπόρεσε να καταγράψει το αίτημα. Δοκιμάστε ξανά σε λίγο."
+    : "The analyser could not record this request. Try again shortly.";
 }
 
 function positiveCap(value: string | undefined, fallback: number): number {
