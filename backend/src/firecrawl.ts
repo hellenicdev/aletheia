@@ -407,7 +407,7 @@ async function readPersisted<T>(key: string, charge?: CacheCharge): Promise<T | 
 }
 
 /** Bump when verification rules change so a cached verdict is not reused. */
-export const PIPELINE_VERSION = "8";
+export const PIPELINE_VERSION = "9";
 
 export function verificationCacheKey(claim: string, urls: string[], language: string): string {
   const list = [...urls]

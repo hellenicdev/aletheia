@@ -1,6 +1,6 @@
 import type { EvidenceMode, Label, UiLanguage } from "./labels";
-import { inferClaimType, isAttributedClaim } from "./classify";
-import { opinionExplanation, rhetoricalExplanation, unverifiableExplanation } from "./messages";
+import { inferClaimType, isAttributedClaim, isPersonalAccount } from "./classify";
+import { anecdoteExplanation, opinionExplanation, rhetoricalExplanation, unverifiableExplanation } from "./messages";
 import { tokenOverlap } from "./rank";
 import { hostOf, isBlockedEvidenceHost, isSocialHost, sameOutlet } from "./reputation";
 import type { SourceCitation } from "./types";
@@ -358,6 +358,30 @@ function quantityTokens(text: string): Set<string> {
   return found;
 }
 
+const MATERIAL_CONDITION =
+  /\b(?:critical|died|dead|killed|injured|wounded|hospitali[sz]ed|arrested|missing|drowned)\b|κρίσιμ\p{L}*|πέθαν\p{L}*|νεκρ\p{L}*|σκοτώ\p{L}*|τραυματ\p{L}*|νοσηλεύ\p{L}*|συνελήφ\p{L}*|αγνοούμ\p{L}*|πνίγηκ\p{L}*/giu;
+
+/**
+ * True needs the cited pages to carry the claim's own quantity and any material
+ * condition. A related event, such as a shark bite without "critical condition",
+ * is not enough. A statistical claim may still match a rate for the same population.
+ */
+export function missingSpecificDetail(
+  claim: string,
+  sources: { title?: string; snippet?: string }[],
+): boolean {
+  const surface = sources.map((source) => `${source.title ?? ""} ${source.snippet ?? ""}`).join("\n");
+  const surfaceQty = quantityTokens(surface);
+  const missingQty = [...quantityTokens(claim)].some((quantity) => !surfaceQty.has(quantity));
+  const rateBacked = isStatisticalClaim(claim) && /(?:%|percent|per cent)/i.test(surface);
+  if (missingQty && !rateBacked) return true;
+  const surfaceLower = surface.toLowerCase();
+  for (const match of claim.matchAll(MATERIAL_CONDITION)) {
+    if (!surfaceLower.includes(match[0].toLowerCase())) return true;
+  }
+  return false;
+}
+
 function spanContradicts(claim: string, span: string): boolean {
   if (NEGATION.test(span)) return true;
   const claimQuantities = quantityTokens(claim);
@@ -430,6 +454,15 @@ export function applyEvidence(input: {
 }): AppliedEvidence {
   const confidence = clampConfidence(input.confidence);
   const local = inferClaimType(input.claimText);
+  if (local === "personal" || isPersonalAccount(input.claimText)) {
+    return {
+      label: "Personal",
+      confidence: Math.min(confidence, 0.75),
+      explanation: anecdoteExplanation(input.uiLanguage),
+      sources: [],
+      evidenceMode: "not-applicable",
+    };
+  }
   const label = isAttributedClaim(input.claimText) && input.label === "Opinion" ? "Unverifiable" : input.label;
   if (!isAttributedClaim(input.claimText) && (local === "opinion" || local === "rhetorical")) {
     const opinion = local === "opinion";
@@ -534,6 +567,16 @@ export function applyEvidence(input: {
       confidence: Math.min(confidence, 0.45),
       explanation: unverifiableExplanation(input.uiLanguage, reason),
       sources: [],
+      evidenceMode: "web-search",
+    };
+  }
+
+  if (label === "True" && sources.length > 0 && missingSpecificDetail(input.claimText, sources)) {
+    return {
+      label: "Unverifiable",
+      confidence: Math.min(confidence, 0.45),
+      explanation: unverifiableExplanation(input.uiLanguage, "detail-missing"),
+      sources,
       evidenceMode: "web-search",
     };
   }

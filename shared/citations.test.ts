@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyEvidence,
+  missingSpecificDetail,
   canonicalUrl,
   hasContradictingSpan,
   isRelevantEvidence,
@@ -203,7 +204,7 @@ describe("wire reprints and entity match", () => {
         {
           url: "https://www.reuters.com/world/energy",
           title: "Energy loan",
-          snippet: "Officials described a federal loan for the coastal plant after a separate review.",
+          snippet: "Officials described a one billion dollar federal loan for the coastal plant after a separate review.",
         },
       ],
       searchEnabled: true,
@@ -602,6 +603,56 @@ describe("relevance and contradiction", () => {
     });
     expect(applied.label).toBe("True");
     expect(applied.sources.map((source) => source.url)).toEqual([page.url]);
+  });
+
+  it("does not mark True when the citation misses the claim's specific condition", () => {
+    const claim = "Two people were bitten and two were in critical condition.";
+    const page = {
+      url: "https://apnews.com/article/shark-bite",
+      title: "Shark bite",
+      snippet: "A shark bit two people near the beach.",
+    };
+    expect(missingSpecificDetail(claim, [page])).toBe(true);
+    const applied = applyEvidence({
+      label: "True",
+      confidence: 0.86,
+      explanation: "Reports confirm the shark bite.",
+      claimText: claim,
+      sourceUrls: [page.url],
+      evidence: [page],
+      searchEnabled: true,
+      uiLanguage: "en",
+    });
+    expect(applied.label).toBe("Unverifiable");
+    expect(applied.explanation.toLowerCase()).toContain("specific detail");
+    expect(applied.sources.map((source) => source.url)).toEqual([page.url]);
+    const greek = applyEvidence({
+      ...{
+        label: "True" as const,
+        confidence: 0.86,
+        explanation: "Reports confirm the shark bite.",
+        claimText: claim,
+        sourceUrls: [page.url],
+        evidence: [page],
+        searchEnabled: true,
+        uiLanguage: "el" as const,
+      },
+    });
+    expect(greek.explanation).toContain("συγκεκριμένη λεπτομέρεια");
+  });
+
+  it("keeps True when the cited snippet contains the council figures", () => {
+    const applied = applyEvidence({
+      label: "True",
+      confidence: 0.9,
+      explanation: "The minutes record the vote.",
+      claimText: "The council voted 7 to 2 on Monday.",
+      sourceUrls: [minutes.url],
+      evidence: [minutes],
+      searchEnabled: true,
+      uiLanguage: "en",
+    });
+    expect(applied.label).toBe("True");
   });
 });
 

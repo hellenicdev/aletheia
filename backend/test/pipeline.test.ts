@@ -484,7 +484,7 @@ describe("analyze", () => {
     expect(result.score.factualAccuracy).toBeNull();
     expect(result.score.sourcing).toBeNull();
     expect(result.provisional).toBe(true);
-    expect(result.score.overall).toBe(50);
+    expect(result.score.overall).toBe(57);
     expect(result.score.verdict).toContain("Only 0 of 3 claims could be verified (");
     expect(result.score.verdict).not.toContain("factual claims were checked");
     expect(result.meta.subrequests.total).toBeLessThanOrEqual(3);
@@ -735,6 +735,7 @@ describe("analyze", () => {
     const result = await analyze({ text: facts, uiLanguage: "en" }, { env, fetchImpl });
     expect(searches).toBe(2);
     expect(result.claimsVerified).toBe(1);
+    expect(result.claimsCovered).toBe(1);
     expect(result.claimsTotal).toBe(3);
     expect(result.meta.searchStatus).toEqual({
       state: "partial",
@@ -746,15 +747,15 @@ describe("analyze", () => {
       isProvisionalScore({
         searchEnabled: true,
         searchState: result.meta.searchStatus.state,
-        claimsVerified: result.claimsVerified,
+        claimsCovered: result.claimsCovered,
         claimsTotal: result.claimsTotal,
       }),
     );
     expect(result.provisional).toBe(true);
     expect(result.score.factualAccuracy).toBeNull();
     expect(result.score.sourcing).toBeNull();
-    expect(result.score.overall).toBe(67);
-    expect(result.score.verdict).toContain("67/100");
+    expect(result.score.overall).toBe(87);
+    expect(result.score.verdict).toContain("87/100");
   });
 
   it("does not cite an AP reprint that lacks a byline", async () => {
@@ -2098,14 +2099,74 @@ describe("handleRequest", () => {
       { env, fetchImpl },
     );
     const personal = result.segments.find((segment) => segment.text.includes("Maria"));
-    expect(personal?.label).toBe("Opinion");
+    expect(personal?.label).toBe("Personal");
     expect(personal?.explanation.toLowerCase()).toContain("not selected");
     expect(personal?.sources).toEqual([]);
     expect(queries.some((query) => /maria|vaping/i.test(query))).toBe(false);
     expect(result.claimsVerified).toBe(1);
+    expect(result.claimsCovered).toBe(1);
     expect(result.claimsTotal).toBe(1);
     expect(result.score.verdict).toContain("1 of 1");
     expect(result.provisional).toBe(false);
+  });
+
+  it("searches a Greek claim in Greek and keeps a dropped figure", async () => {
+    const searches: string[] = [];
+    const greek = "4,9 εκατομμύρια ενήλικες στην Ελλάδα καπνίζουν σύμφωνα με την έρευνα υγείας του υπουργείου.";
+    const english = "BBC reported that 4.9 million adults in the UK smoke according to the health survey.";
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev")) {
+        const body = JSON.parse(String(init?.body)) as { query?: string };
+        searches.push(body.query ?? "");
+        return new Response(JSON.stringify({ success: true, data: { web: [] } }), { status: 200 });
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        const start = user.indexOf("[");
+        const sentences = JSON.parse(user.slice(start)) as { id: string; text: string }[];
+        const greekArticle = sentences.some((sentence) => /[\u0370-\u03FF]/.test(sentence.text));
+        return llmPayload({
+          detectedLanguage: greekArticle ? "el" : "en",
+          genre: "news",
+          segments: sentences.map((sentence) => ({
+            id: sentence.id,
+            claimType: "checkable_factual",
+            note: greekArticle ? "Καταγεγραμμένος ισχυρισμός." : "A recorded claim.",
+          })),
+        });
+      }
+      if (system.startsWith("TASK:queries")) {
+        const payload = JSON.parse(user) as { claims: { id: string; text: string }[] };
+        return llmPayload({
+          queries: payload.claims.map((claim) => ({
+            id: claim.id,
+            query: /[\u0370-\u03FF]/.test(claim.text) ? "adult smoking habits" : "smoking habits survey",
+          })),
+        });
+      }
+      if (system.startsWith("TASK:verify")) {
+        const payload = JSON.parse(user) as { claims: { id: string }[] };
+        return llmPayload({
+          results: payload.claims.map((claim) => ({
+            id: claim.id,
+            label: "Unverifiable",
+            confidence: 0.4,
+            explanation: "No pages were retrieved.",
+            sourceUrls: [],
+          })),
+        });
+      }
+      if (system.startsWith("TASK:consistency")) return llmPayload({ contradictions: [] });
+      throw new Error(system.slice(0, 24));
+    };
+    await analyze({ text: greek, uiLanguage: "en" }, { env, fetchImpl });
+    expect(searches.some((query) => /[\u0370-\u03FF]/.test(query) && /4[,.]9/.test(query))).toBe(true);
+    searches.length = 0;
+    await analyze({ text: english, uiLanguage: "en" }, { env, fetchImpl });
+    expect(searches.some((query) => /4\.9/.test(query) && /BBC/i.test(query))).toBe(true);
   });
 
   it("says an unselected claim was not selected for checking", async () => {

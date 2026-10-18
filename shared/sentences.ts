@@ -76,6 +76,11 @@ export function splitSentences(text: string): TextSpan[] {
 
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
+    if (ch === "\n" && isLineBoundary(text, i, start)) {
+      pushSpan(text, spans, start, i);
+      start = i + 1;
+      continue;
+    }
     if (ch === "." && text[i + 1] === ".") {
       while (text[i + 1] === ".") i += 1;
       if (!followedByBreak(text, i)) continue;
@@ -91,6 +96,28 @@ export function splitSentences(text: string): TextSpan[] {
 
   pushSpan(text, spans, start, text.length);
   return mergeFragments(text, spans.filter((span) => span.text.trim().length > 0));
+}
+
+/**
+ * A blank line always starts a new span. A single newline does too when the
+ * line above has no sentence ending and the next line opens with a capital,
+ * so a standfirst is not glued to the anecdote under it. A lowercase
+ * continuation, or a line that starts with a digit, stays in the same span.
+ */
+function isLineBoundary(text: string, index: number, spanStart: number): boolean {
+  if (index > 0 && text[index - 1] === "\n") return true;
+  let after = index + 1;
+  while (after < text.length && (text[after] === " " || text[after] === "\t" || text[after] === "\r")) after += 1;
+  if (after < text.length && text[after] === "\n") return true;
+
+  const line = text.slice(spanStart, index).trim();
+  if (!line || /[.!?…\u037E]$/.test(line)) return false;
+  let next = index + 1;
+  while (next < text.length && (text[next] === " " || text[next] === "\t" || text[next] === "\r")) next += 1;
+  if (next >= text.length || text[next] === "\n") return false;
+  const nextCh = text[next];
+  if (/\d/.test(nextCh)) return false;
+  return /\p{Lu}/u.test(nextCh);
 }
 
 function isBoundary(text: string, index: number): boolean {
