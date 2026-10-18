@@ -1,5 +1,8 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { clearSearchCache } from "../src/firecrawl";
+import { pageUnreadMessage } from "../../shared/messages";
+import { createSubrequestBudget, trackFetch } from "../src/budget";
+import { clearSearchCache, createProviderGate } from "../src/firecrawl";
 import { extractArticle, fetchArticle } from "../src/extract";
 import { HttpError } from "../src/errors";
 
@@ -91,7 +94,127 @@ describe("extractArticle", () => {
     expect(page.text).toContain("Antalya");
     expect(page.text).not.toContain("Sicily");
   });
+
+  it("reads saved BBC, Onion, Guardian, and AP fixtures", () => {
+    const bbc = extractArticle(fixture("bbc-vaping.html"), "https://www.bbc.com/news/articles/ck62y33489zqo");
+    expect(bbc.title).toBe("Vaping: Why people who have never smoked are getting hooked");
+    expect(bbc.publishedAt).toBe("2026-10-16T23:49:16.051Z");
+    expect(bbc.text).toContain("Gracey Mungulu");
+    expect(bbc.text).toContain("never smoked");
+    expect(bbc.text).not.toContain("vape shop");
+    expect(bbc.text).not.toContain("another health story");
+    expect(bbc.text).not.toContain("cookies");
+
+    const onion = extractArticle(
+      fixture("onion-monarch.html"),
+      "https://theonion.com/epa-to-monarch-butterflies-count-your-fucking-days/",
+    );
+    expect(onion.title).toBe("EPA To Monarch Butterflies: ‘Count Your Fucking Days’");
+    expect(onion.siteName).toBe("The Onion");
+    expect(onion.byline).toBe("The Onion Staff");
+    expect(onion.publishedAt).toBe("2025-11-10T14:00:00.000Z");
+    expect(onion.text).toContain("count your fucking days");
+    expect(onion.text).toContain("moth pricks");
+    expect(onion.text).not.toContain("traffic");
+    expect(onion.text).not.toContain("Subscribe");
+
+    const guardian = extractArticle(
+      fixture("guardian-scrounger.html"),
+      "https://www.theguardian.com/commentisfree/2026/oct/16/right-scrounger-rhetoric-benefits-labour-compassion-welfare",
+    );
+    expect(guardian.title).toContain("scrounger rhetoric");
+    expect(guardian.siteName).toBe("the Guardian");
+    expect(guardian.byline).toBe("Frances Ryan");
+    expect(guardian.publishedAt).toBe("2026-10-16T05:00:52.000Z");
+    expect(guardian.text).toContain("Back in 2009");
+    expect(guardian.text).not.toContain("housing");
+    expect(guardian.text).not.toContain("cookies");
+
+    const ap = extractArticle(fixture("ap-loan.html"), "https://apnews.com/article/coastal-loan");
+    expect(ap.title).toBe("Coastal plant receives federal loan to restart operations");
+    expect(ap.siteName).toBe("AP News");
+    expect(ap.byline).toBe("Jane Reporter");
+    expect(ap.publishedAt).toBe("2026-10-16T12:00:00.000Z");
+    expect(ap.text).toContain("federal loan");
+    expect(ap.text).not.toContain("politics desk");
+    expect(ap.text).not.toContain("San Diego");
+    expect(ap.text).not.toContain("promo");
+    expect(ap.text).not.toContain("File photo");
+  });
+
+  it("reads a byline and site name from JSON-LD when the meta author is a URL", () => {
+    const guardian = extractArticle(
+      `<head>
+        <meta property="og:site_name" content="the Guardian" />
+        <meta property="article:author" content="https://www.theguardian.com/profile/frances-ryan" />
+        <script type="application/ld+json">{"@type":"NewsArticle","headline":"A column","author":[{"@type":"Person","name":"Frances Ryan"}],"publisher":{"@type":"Organization","name":"The Guardian"}}</script>
+      </head>
+      <body><article><p>Back in 2009, months before the coalition government unleashed sweeping austerity, the debate had already turned on people who claimed benefits.</p></article></body>`,
+      "https://www.theguardian.com/commentisfree/example",
+    );
+    expect(guardian.byline).toBe("Frances Ryan");
+    expect(guardian.siteName).toBe("the Guardian");
+
+    const bbc = extractArticle(
+      `<head>
+        <meta property="cXenseParse:author" content="Amy Walker" />
+        <script type="application/ld+json">{"@type":"ReportageNewsArticle","headline":"Vaping","author":[{"@type":"Person","name":"Amy Walker"}],"publisher":{"@type":"NewsMediaOrganization","name":"BBC News"},"datePublished":"2026-10-16T23:49:16.051Z"}</script>
+      </head>
+      <body><article><p>When vaping first took off at Gracey Mungulu's school, the habit looked like a fad that would pass by the summer.</p></article></body>`,
+      "https://www.bbc.com/news/articles/example",
+    );
+    expect(bbc.byline).toBe("Amy Walker");
+    expect(bbc.siteName).toBe("BBC News");
+  });
+
+  it("uses the document title when og:title is missing", () => {
+    const page = extractArticle(
+      `<head><title>Document title wins</title>
+        <script type="application/ld+json">{"@type":"NewsArticle","headline":"JSON headline"}</script>
+      </head>
+      <body><h1>H1 headline</h1>
+        <article><p>The council voted 7 to 2 and published the full minutes for residents of the harbour district.</p></article>
+      </body>`,
+      "https://news.example/story",
+    );
+    expect(page.title).toBe("Document title wins");
+  });
+
+  it("keeps the largest paragraph cluster when the page has no article body", () => {
+    const page = extractArticle(
+      `<body>
+        <p>The council voted 7 to 2 and published the full minutes for residents of the harbour district.</p>
+        <p>Fees and fines rose by a small amount, according to the schedule released on Monday morning.</p>
+        <nav><p>Home world politics business sport and the rest of the menu today.</p></nav>
+        <p>The evening concert was cancelled after the stage lights failed and the crowd went home.</p>
+        <div class="related-stories"><p>A different story about a festival should not be included in this cluster at all.</p></div>
+        <div class="subscribe"><p>Subscribe to the morning newsletter for more headlines and alerts every day.</p></div>
+        <figcaption>A photo of the harbour wall at dusk should stay out of the text.</figcaption>
+      </body>`,
+      "https://news.example/cluster",
+    );
+    expect(page.text).toContain("voted 7 to 2");
+    expect(page.text).toContain("Fees and fines");
+    expect(page.text).not.toContain("evening concert");
+    expect(page.text).not.toContain("festival");
+    expect(page.text).not.toContain("newsletter");
+    expect(page.text).not.toContain("harbour wall");
+    expect(page.text).not.toContain("politics");
+  });
+
+  it("rejects a Cloudflare challenge page", () => {
+    expect(() =>
+      extractArticle(
+        `<html><head><title>Just a moment...</title></head><body><p>Just a moment...</p><p>Enable JavaScript and cookies to continue.</p></body></html>`,
+        "https://apnews.com/",
+      ),
+    ).toThrow(/Paste the text instead/);
+  });
 });
+
+function fixture(name: string): string {
+  return readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
+}
 
 describe("fetchArticle", () => {
   it("prefers the AP HTML story when markdown is a longer menu", async () => {
@@ -131,5 +254,117 @@ describe("fetchArticle", () => {
       HttpError,
     );
     expect(calls).toBe(1);
+  });
+
+  it("reads the page directly when Firecrawl scrape fails", async () => {
+    clearSearchCache();
+    const gate = createProviderGate();
+    const calls: { url: string; headers: HeadersInit | undefined; signal: AbortSignal | null | undefined }[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      calls.push({ url: String(input), headers: init?.headers, signal: init?.signal });
+      if (String(input).includes("api.firecrawl.dev")) {
+        return new Response(JSON.stringify({ error: "Insufficient credits" }), { status: 402 });
+      }
+      return new Response(fixture("bbc-vaping.html"), {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
+    };
+    const page = await fetchArticle(
+      "https://www.bbc.com/news/articles/ck62y33489zqo",
+      fetchImpl,
+      "fc-key",
+      undefined,
+      undefined,
+      undefined,
+      "en",
+      gate,
+    );
+    expect(page.via).toBe("direct");
+    expect(page.text).toContain("Gracey Mungulu");
+    expect(page.title).toContain("Vaping");
+    expect(calls.some((call) => call.url.startsWith("GET") || call.url.includes("bbc.com"))).toBe(true);
+    const direct = calls.find((call) => call.url.includes("bbc.com"));
+    const headers = new Headers(direct?.headers);
+    expect(headers.get("user-agent")).toMatch(/Mozilla\/5\.0/);
+    expect(headers.get("accept")).toContain("text/html");
+    expect(direct?.signal).toBeInstanceOf(AbortSignal);
+    expect(gate.block?.status).toBe(402);
+    expect(calls.filter((call) => call.url.includes("bbc.com"))).toHaveLength(1);
+  });
+
+  it("counts the direct fetch and each redirect hop", async () => {
+    clearSearchCache();
+    const budget = createSubrequestBudget();
+    let hops = 0;
+    const raw: typeof fetch = async () => {
+      hops += 1;
+      if (hops === 1) {
+        return new Response(JSON.stringify({ error: "Insufficient credits" }), { status: 402 });
+      }
+      if (hops === 2) {
+        return new Response("", { status: 302, headers: { location: "https://www.bbc.com/news/articles/final" } });
+      }
+      return new Response(fixture("bbc-vaping.html"), {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
+    };
+    const page = await fetchArticle("https://www.bbc.com/news/articles/start", trackFetch(raw, budget), "fc-key");
+    expect(page.via).toBe("direct");
+    expect(page.finalUrl).toBe("https://www.bbc.com/news/articles/final");
+    expect(budget.snapshot().ingest).toBe(3);
+    expect(budget.snapshot().total).toBe(3);
+  });
+
+  it("falls back when the scrape is empty or times out", async () => {
+    clearSearchCache();
+    const fetchImpl: typeof fetch = async (input) => {
+      if (String(input).includes("api.firecrawl.dev")) {
+        return new Response(
+          JSON.stringify({ success: true, data: { markdown: "short", metadata: { title: "Empty" } } }),
+          { status: 200 },
+        );
+      }
+      return new Response(fixture("ap-loan.html"), { status: 200, headers: { "content-type": "text/html" } });
+    };
+    const empty = await fetchArticle("https://apnews.com/article/coastal-loan", fetchImpl, "fc-key");
+    expect(empty.via).toBe("direct");
+    expect(empty.text).toContain("federal loan");
+
+    clearSearchCache();
+    const timingOut: typeof fetch = async (input) => {
+      if (String(input).includes("api.firecrawl.dev")) throw new Error("The operation was aborted due to timeout");
+      return new Response(fixture("onion-monarch.html"), { status: 200, headers: { "content-type": "text/html" } });
+    };
+    const timed = await fetchArticle(
+      "https://theonion.com/epa-to-monarch-butterflies-count-your-fucking-days/",
+      timingOut,
+      "fc-key",
+    );
+    expect(timed.via).toBe("direct");
+    expect(timed.byline).toBe("The Onion Staff");
+  });
+
+  it("asks the reader to paste the text when both reads fail", async () => {
+    clearSearchCache();
+    const fetchImpl: typeof fetch = async (input) => {
+      if (String(input).includes("api.firecrawl.dev")) {
+        return new Response("Insufficient credits", { status: 402 });
+      }
+      return new Response("nope", { status: 503 });
+    };
+    await expect(
+      fetchArticle("https://news.example/story", fetchImpl, "fc-key"),
+    ).rejects.toThrow(pageUnreadMessage("en"));
+    await expect(
+      fetchArticle("https://news.example/story", fetchImpl, "fc-key", undefined, undefined, undefined, "el"),
+    ).rejects.toThrow(pageUnreadMessage("el"));
+    try {
+      await fetchArticle("https://news.example/story", fetchImpl, "fc-key");
+    } catch (error) {
+      expect(error).toBeInstanceOf(HttpError);
+      expect((error as Error).message).not.toMatch(/Firecrawl scrape failed/);
+    }
   });
 });

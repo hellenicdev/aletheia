@@ -257,7 +257,14 @@ function setMode(mode: "paste" | "url") {
 
 function showError(message: string | null) {
   errorBox.hidden = !message;
-  errorBox.textContent = message ?? "";
+  errorBox.textContent = message ? presentError(message) : "";
+}
+
+function presentError(message: string): string {
+  if (/firecrawl scrape failed|could not be read|επικολλήστε το κείμενο του άρθρου/i.test(message)) {
+    return t(state.lang, "scrapeFailed");
+  }
+  return message;
 }
 
 function currentStages(): Record<StageName, StageState> {

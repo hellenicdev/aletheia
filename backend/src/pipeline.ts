@@ -51,6 +51,7 @@ import {
 import { raceAbort } from "./deadline";
 import {
   cacheCountsAsSubrequest,
+  createProviderGate,
   readVerification,
   searchWeb,
   verificationCacheKey,
@@ -104,6 +105,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   const tick = () => deps.onTick?.();
   const requestId = deps.requestId ?? crypto.randomUUID();
   const warnings: string[] = [];
+  const providerGate = createProviderGate();
   const llmKey = deps.env.OPENAI_API_KEY?.trim() ?? "";
   const searchKey = deps.env.FIRECRAWL_API_KEY?.trim() ?? "";
   const deadline = Date.now() + (deps.budgetMs ?? LIMITS.analysisDeadlineMs);
@@ -124,7 +126,17 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
 
   budget.setStage("ingest");
   stage("ingest", "start");
-  const ingested = await ingest(input, fetchImpl, searchKey, warnings, signal, () => budget.canSpend(1), chargeCache);
+  const ingested = await ingest(
+    input,
+    fetchImpl,
+    searchKey,
+    warnings,
+    signal,
+    () => budget.canSpend(1),
+    chargeCache,
+    uiLanguage,
+    providerGate,
+  );
   stage("ingest", "done");
   deps.onPreview?.({
     title: ingested.title,
@@ -176,7 +188,20 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   let searchAttempts = 0;
   let searchErrors = 0;
 
-  if (searchEnabled && searchKey && budgeted.length > 0) {
+  if (providerGate.block) providerReason = providerReason ?? outageFromStatus(providerGate.block.status);
+
+  if (searchEnabled && searchKey && budgeted.length > 0 && providerReason) {
+    abandonSearches(
+      budgeted,
+      0,
+      evidence,
+      searchFailed,
+      cutShort,
+      warnings,
+      "search stopped after the provider rejected the request",
+    );
+    searchDegraded = true;
+  } else if (searchEnabled && searchKey && budgeted.length > 0) {
     const searchCost = cacheOn ? 2 : 1;
     const verifyCost = cacheOn ? 2 : 1;
     const planned = planEvidence(budget.remaining(), budgeted.length, { search: searchCost, verify: verifyCost });
@@ -241,6 +266,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
               canSpend: () => budget.canSpend(1),
               signal,
               charge: chargeCache,
+              gate: providerGate,
             }),
             timeoutMs + 750,
             "search timed out",
@@ -449,8 +475,10 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
 
   const consistencyMs =
     deps.consistencyTimeoutMs ?? Math.min(8_000, deadline - Date.now() - 500);
+  const evidenceBacked = [...evidence.values()].filter((items) => items.length > 0).length;
   let contradictions: Contradiction[] = [];
-  if (!signal.aborted && consistencyMs >= 200 && budget.canSpend(1)) {
+  const skipConsistency = providerReason !== null && evidenceBacked === 0;
+  if (!signal.aborted && consistencyMs >= 200 && budget.canSpend(1) && !skipConsistency) {
     try {
       contradictions = await withTimeout(
         findContradictions({
@@ -481,7 +509,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     searchAttempts,
     searchErrors,
     searchDegraded,
-    evidenceBacked: [...evidence.values()].filter((items) => items.length > 0).length,
+    evidenceBacked,
   });
   if (searchStatus.state !== "ok") {
     for (const segment of ordered) {
@@ -562,6 +590,8 @@ async function ingest(
   signal?: AbortSignal,
   canSpend?: () => boolean,
   charge?: CacheCharge,
+  uiLanguage: UiLanguage = "en",
+  gate?: ReturnType<typeof createProviderGate>,
 ) {
   const hasText = typeof input.text === "string" && input.text.trim().length > 0;
   const hasUrl = typeof input.url === "string" && input.url.trim().length > 0;
@@ -577,7 +607,16 @@ async function ingest(
     if (url.length > LIMITS.maxUrlChars) {
       throw new HttpError(400, "That URL is too long.");
     }
-    const extracted = await fetchArticle(url, fetchImpl, firecrawlKey, signal, canSpend, charge);
+    const extracted = await fetchArticle(
+      url,
+      fetchImpl,
+      firecrawlKey,
+      signal,
+      canSpend,
+      charge,
+      uiLanguage,
+      gate,
+    );
     let hostname: string | null = null;
     try {
       hostname = new URL(extracted.finalUrl).hostname.replace(/^www\./, "");
@@ -1081,6 +1120,14 @@ function remainingMs(deadline: number, cap: number): number {
 
 function boundQuery(query: string): string {
   return query.replace(/\s+/g, " ").trim().split(" ").slice(0, 8).join(" ").slice(0, 120);
+}
+
+function outageFromStatus(status: number): SearchOutageReason | null {
+  if (status === 402) return "out_of_credits";
+  if (status === 401 || status === 403) return "unauthorized";
+  if (status === 429) return "rate_limited";
+  if (status >= 500) return "upstream_error";
+  return null;
 }
 
 function providerOutage(error: unknown): SearchOutageReason | null {

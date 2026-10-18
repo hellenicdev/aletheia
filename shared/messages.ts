@@ -1,5 +1,13 @@
 import type { UiLanguage } from "./labels";
 
+/** Shown when the page could not be scraped or fetched. Never names the provider status. */
+export function pageUnreadMessage(lang: UiLanguage): string {
+  if (lang === "el") {
+    return "Δεν ήταν δυνατή η ανάγνωση της σελίδας. Επικολλήστε το κείμενο του άρθρου.";
+  }
+  return "This page could not be read. Paste the article text instead.";
+}
+
 /** Short banner when the run stopped early but search itself was not down. */
 export function partialClaimsNotice(lang: UiLanguage, verified: number, total: number): string {
   if (lang === "el") return `Επαληθεύτηκαν μόνο ${verified} από ${total} ισχυρισμούς.`;

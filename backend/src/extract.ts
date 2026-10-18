@@ -1,17 +1,28 @@
 import { cleanArticleText, proseScore } from "../../shared/articleText";
 import { looksLikeOpinionSection, opinionCueFromHtml } from "../../shared/classify";
-import { combineSignals, raceAbort } from "./deadline";
-import { scrapeArticle, type CacheCharge } from "./firecrawl";
+import type { UiLanguage } from "../../shared/labels";
+import { pageUnreadMessage } from "../../shared/messages";
+import { isBudgetExhausted } from "./budget";
+import { isDeadline, raceAbort } from "./deadline";
+import { scrapeArticle, type CacheCharge, type ProviderGate } from "./firecrawl";
 import { LIMITS } from "./limits";
 import { HttpError } from "./errors";
 import { assertPublicHttpUrl } from "./ssrf";
+
+const PAGE_TIMEOUT_MS = 10_000;
+const BROWSER_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 export interface ExtractedArticle {
   title: string | null;
   text: string;
   publishedAt: string | null;
+  /** Author or byline when the page states one. */
+  byline: string | null;
+  /** Publisher name from og:site_name when present. */
+  siteName: string | null;
   finalUrl: string;
-  via: "firecrawl" | "local";
+  via: "firecrawl" | "local" | "direct";
   fromPreferred?: boolean;
   opinionSection?: boolean;
 }
@@ -25,10 +36,12 @@ const SKIP_TAGS = new Set([
   "canvas",
   "template",
   "nav",
+  "header",
   "footer",
   "form",
   "button",
   "aside",
+  "figcaption",
 ]);
 
 const VOID_TAGS = new Set([
@@ -71,7 +84,7 @@ const ARTICLE_CLASS =
   /article|story-body|post-content|entry-content|article-body|post-body|RichTextStoryBody|text-block/i;
 
 const JUNK_REGION =
-  /(?:^|[\s_-])(?:cookie|consent|newsletter|paywall|modal|sharebar|share-bar|related(?:-stories|-articles|-content|-posts)?|read-more|k-read-more|also-read|more-items|more-stories|sidebar|nx-sidebar|nx-popular|popular|nav|menu|banner)(?:$|[\s_-])/i;
+  /(?:^|[\s_-])(?:cookie|consent|newsletter|subscribe|paywall|modal|sharebar|share-bar|promo|related(?:-stories|-articles|-content|-posts)?|read-more|k-read-more|also-read|more-items|more-stories|sidebar|nx-sidebar|nx-popular|popular|nav|menu|banner)(?:$|[\s_-])/i;
 
 export function extractArticle(
   html: string,
@@ -83,10 +96,12 @@ export function extractArticle(
 
   const title =
     cleanInline(metas["og:title"] || "") ||
-    cleanInline(jsonLd.headline || "") ||
     cleanInline(walked.title || "") ||
+    cleanInline(jsonLd.headline || "") ||
     cleanInline(walked.h1 || "") ||
     null;
+  const byline = readableName(metaAuthor(metas)) || readableName(jsonLd.author || "") || null;
+  const siteName = readableName(metas["og:site_name"] || "") || readableName(jsonLd.publisher || "") || null;
 
   const publishedAt =
     normalizeDate(metas["article:published_time"]) ||
@@ -97,15 +112,19 @@ export function extractArticle(
 
   const preferredText = cleanArticleText(cleanupText(walked.preferred));
   const articleText = cleanArticleText(cleanupText(walked.article));
+  const clusterText = cleanArticleText(cleanupText(walked.cluster));
   const bodyText = cleanArticleText(cleanupText(walked.body));
-  const fromPreferred = preferredText.length >= LIMITS.minArticleChars && proseScore(preferredText) >= 12;
+  const usable = (value: string) => value.length >= LIMITS.minArticleChars && proseScore(value) >= 12;
+  const fromPreferred = usable(preferredText);
   const text = fromPreferred
     ? preferredText
-    : proseScore(articleText) >= 12
+    : usable(articleText)
       ? articleText
-      : bodyText;
+      : usable(clusterText)
+        ? clusterText
+        : bodyText;
 
-  if (text.length < LIMITS.minArticleChars) {
+  if (isInterstitial(html) || text.length < LIMITS.minArticleChars) {
     throw new HttpError(
       422,
       "Could not find enough article text on that page. Paste the text instead.",
@@ -116,14 +135,17 @@ export function extractArticle(
     title,
     text: text.slice(0, LIMITS.maxArticleChars),
     publishedAt,
+    byline,
+    siteName,
     fromPreferred,
     opinionSection: looksLikeOpinionSection(pageUrl, title, text) || opinionCueFromHtml(html),
   };
 }
 
 /**
- * Prefer Firecrawl scrape (markdown, main content only). With no key, read the
- * public page directly so a URL still works.
+ * Prefer Firecrawl scrape (markdown, main content only). A failed or empty
+ * scrape is read from the page itself. With no key, that direct read is the
+ * only path and is marked local.
  */
 export async function fetchArticle(
   rawUrl: string,
@@ -132,46 +154,64 @@ export async function fetchArticle(
   signal?: AbortSignal,
   canSpend?: () => boolean,
   charge?: CacheCharge,
+  uiLanguage: UiLanguage = "en",
+  gate?: ProviderGate,
 ): Promise<ExtractedArticle> {
   assertPublicHttpUrl(rawUrl);
-  if (apiKey?.trim()) {
-    const scraped = await scrapeArticle({
-      url: rawUrl,
-      apiKey: apiKey.trim(),
-      fetchImpl,
-      signal,
-      timeoutMs: 20_000,
-      canSpend,
-      charge,
-    });
-    const fromHtml = htmlBody(scraped.rawHtml, scraped.finalUrl);
-    const text =
-      fromHtml?.fromPreferred
-        ? fromHtml.text
-        : fromHtml &&
-            proseScore(fromHtml.text) > proseScore(scraped.text) * 1.25 &&
-            proseScore(fromHtml.text) > proseScore(scraped.text) + 40
+  const key = apiKey?.trim();
+  if (key) {
+    try {
+      const scraped = await scrapeArticle({
+        url: rawUrl,
+        apiKey: key,
+        fetchImpl,
+        signal,
+        timeoutMs: 20_000,
+        canSpend,
+        charge,
+        gate,
+      });
+      const fromHtml = htmlBody(scraped.rawHtml, scraped.finalUrl);
+      const text =
+        fromHtml?.fromPreferred
           ? fromHtml.text
-          : scraped.text;
-    if (text.length < LIMITS.minArticleChars) {
-      throw new HttpError(
-        422,
-        "Could not find enough article text on that page. Paste the text instead.",
-      );
+          : fromHtml &&
+              proseScore(fromHtml.text) > proseScore(scraped.text) * 1.25 &&
+              proseScore(fromHtml.text) > proseScore(scraped.text) + 40
+            ? fromHtml.text
+            : scraped.text;
+      if (text.length >= LIMITS.minArticleChars) {
+        return {
+          title: scraped.title,
+          text: text.slice(0, LIMITS.maxArticleChars),
+          publishedAt: scraped.publishedAt,
+          byline: scraped.byline,
+          siteName: scraped.siteName,
+          finalUrl: scraped.finalUrl,
+          via: "firecrawl",
+          fromPreferred: fromHtml?.fromPreferred,
+          opinionSection:
+            looksLikeOpinionSection(scraped.finalUrl, scraped.title, text) ||
+            opinionCueFromHtml(scraped.rawHtml ?? ""),
+        };
+      }
+      console.error("scrape returned no article text");
+    } catch (error) {
+      if (isDeadline(error) || isBudgetExhausted(error)) throw error;
+      console.error(error instanceof Error ? error.message : "scrape failed");
     }
-    return {
-      title: scraped.title,
-      text: text.slice(0, LIMITS.maxArticleChars),
-      publishedAt: scraped.publishedAt,
-      finalUrl: scraped.finalUrl,
-      via: "firecrawl",
-      opinionSection:
-        looksLikeOpinionSection(scraped.finalUrl, scraped.title, text) ||
-        opinionCueFromHtml(scraped.rawHtml ?? ""),
-    };
   }
-  const direct = await fetchArticleDirect(rawUrl, fetchImpl, signal);
-  return { ...direct, via: "local" };
+
+  try {
+    const direct = await fetchArticleDirect(rawUrl, fetchImpl, signal);
+    return { ...direct, via: key ? "direct" : "local" };
+  } catch (error) {
+    if (isDeadline(error) || isBudgetExhausted(error)) throw error;
+    if (!key) throw error;
+    if (error instanceof HttpError && (error.status === 400 || error.status === 413)) throw error;
+    console.error(error instanceof Error ? error.message : "direct fetch failed");
+    throw new HttpError(422, pageUnreadMessage(uiLanguage));
+  }
 }
 
 function htmlBody(
@@ -196,20 +236,19 @@ async function fetchArticleDirect(
   let response: Response | null = null;
 
   for (let hop = 0; hop <= LIMITS.maxRedirects; hop++) {
-    const hopSignal = signal
-      ? combineSignals([signal, AbortSignal.timeout(15_000)])
-      : AbortSignal.timeout(15_000);
+    const timeoutSignal = AbortSignal.timeout(PAGE_TIMEOUT_MS);
     response = await raceAbort(
       fetchImpl(current.toString(), {
         method: "GET",
         redirect: "manual",
         headers: {
-          Accept: "text/html,application/xhtml+xml",
-          "User-Agent": "AletheiaBot/1.0 (+https://hellenicdev.github.io/aletheia)",
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "en,el;q=0.8",
+          "User-Agent": BROWSER_UA,
         },
-        signal: hopSignal,
+        signal: timeoutSignal,
       }),
-      hopSignal,
+      signal,
     );
 
     if (response.status >= 300 && response.status < 400) {
@@ -268,6 +307,7 @@ interface Walked {
   article: string;
   body: string;
   preferred: string;
+  cluster: string;
   title: string;
   h1: string;
   time: string;
@@ -281,6 +321,7 @@ interface Frame {
   title: boolean;
   h1: boolean;
   time: boolean;
+  paragraph: boolean;
 }
 
 function walkHtml(html: string, pageUrl: string): Walked {
@@ -291,6 +332,18 @@ function walkHtml(html: string, pageUrl: string): Walked {
   let article = "";
   let body = "";
   let preferred = "";
+  let paragraphBuf = "";
+  let currentCluster: string[] = [];
+  const clusters: string[] = [];
+
+  const closeCluster = () => {
+    const pending = paragraphBuf.replace(/\s+/g, " ").trim();
+    paragraphBuf = "";
+    if (pending) currentCluster.push(pending);
+    if (currentCluster.length === 0) return;
+    clusters.push(currentCluster.join("\n"));
+    currentCluster = [];
+  };
 
   const token = /<!--[\s\S]*?-->|<\/?([a-zA-Z][\w:-]*)\b([^>]*)>|[^<]+/g;
   let match: RegExpExecArray | null;
@@ -308,6 +361,11 @@ function walkHtml(html: string, pageUrl: string): Walked {
       }
 
       if (closing || selfClosing) {
+        if (name === "p" && !inSkip(stack)) {
+          const line = paragraphBuf.replace(/\s+/g, " ").trim();
+          paragraphBuf = "";
+          if (line) currentCluster.push(line);
+        }
         if (BLOCK_TAGS.has(name) && !inSkip(stack)) {
           if (inPreferred(stack)) preferred += "\n";
           if (inArticle(stack)) article += "\n";
@@ -325,10 +383,12 @@ function walkHtml(html: string, pageUrl: string): Walked {
         attributes.role === "navigation" ||
         attributes.role === "banner" ||
         JUNK_REGION.test(marker);
+      if (skip && !parent?.skip) closeCluster();
       const articleRegion =
         !skip &&
         (name === "article" ||
           name === "main" ||
+          /articleBody/i.test(attributes.itemprop || "") ||
           isArticleContainer(name, attributes) ||
           parent?.article === true);
       const preferredRegion = !skip && (sitePrefers(pageUrl, name, attributes) || parent?.preferred === true);
@@ -340,7 +400,9 @@ function walkHtml(html: string, pageUrl: string): Walked {
         title: name === "title" && !skip,
         h1: name === "h1" && !skip,
         time: name === "time" && !skip,
+        paragraph: name === "p" && !skip,
       });
+      if (name === "p" && !skip) paragraphBuf = "";
       if (BLOCK_TAGS.has(name) && !skip) {
         if (preferredRegion) preferred += "\n";
         if (articleRegion) article += "\n";
@@ -352,6 +414,7 @@ function walkHtml(html: string, pageUrl: string): Walked {
     if (inSkip(stack)) continue;
     const text = decodeEntities(raw);
     if (!text.trim()) continue;
+    if (stack.some((frame) => frame.paragraph)) paragraphBuf += text;
     if (stack.some((frame) => frame.title)) title += text;
     if (stack.some((frame) => frame.h1)) h1 += text;
     if (!time && stack.some((frame) => frame.time)) time += text;
@@ -360,7 +423,13 @@ function walkHtml(html: string, pageUrl: string): Walked {
     body += text;
   }
 
-  return { article, body, preferred, title, h1, time };
+  closeCluster();
+  const cluster = clusters.reduce((best, item) => (item.length > best.length ? item : best), "");
+  return { article, body, preferred, cluster, title, h1, time };
+}
+
+function isInterstitial(html: string): boolean {
+  return /just a moment/i.test(html) && /enable javascript|cf-browser-verification|challenge-platform|cf-challenge/i.test(html);
 }
 
 function inPreferred(stack: Frame[]): boolean {
@@ -444,7 +513,12 @@ function collectMeta(html: string): Record<string, string> {
   return found;
 }
 
-function collectJsonLd(html: string): { headline?: string; datePublished?: string } {
+function collectJsonLd(html: string): {
+  headline?: string;
+  datePublished?: string;
+  author?: string;
+  publisher?: string;
+} {
   const pattern = /<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(html))) {
@@ -459,7 +533,9 @@ function collectJsonLd(html: string): { headline?: string; datePublished?: strin
   return {};
 }
 
-function findNewsNode(value: unknown): { headline?: string; datePublished?: string } | null {
+function findNewsNode(
+  value: unknown,
+): { headline?: string; datePublished?: string; author?: string; publisher?: string } | null {
   if (!value || typeof value !== "object") return null;
   if (Array.isArray(value)) {
     for (const item of value) {
@@ -475,6 +551,8 @@ function findNewsNode(value: unknown): { headline?: string; datePublished?: stri
     return {
       headline: typeof record.headline === "string" ? record.headline : undefined,
       datePublished: typeof record.datePublished === "string" ? record.datePublished : undefined,
+      author: personName(record.author),
+      publisher: personName(record.publisher),
     };
   }
   if (record["@graph"]) return findNewsNode(record["@graph"]);
@@ -500,6 +578,36 @@ function safeCodePoint(code: number): string {
   } catch {
     return "";
   }
+}
+
+function metaAuthor(metas: Record<string, string>): string {
+  const direct = metas.author || metas["article:author"] || "";
+  if (readableName(direct)) return direct;
+  for (const [key, value] of Object.entries(metas)) {
+    if (/author$/i.test(key) && readableName(value)) return value;
+  }
+  return "";
+}
+
+function personName(value: unknown): string | undefined {
+  if (typeof value === "string") return readableName(value) ?? undefined;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const name = personName(item);
+      if (name) return name;
+    }
+    return undefined;
+  }
+  if (value && typeof value === "object" && "name" in value) {
+    return personName((value as { name?: unknown }).name);
+  }
+  return undefined;
+}
+
+function readableName(value: string): string | null {
+  const cleaned = cleanInline(value);
+  if (!cleaned || /^https?:\/\//i.test(cleaned)) return null;
+  return cleaned;
 }
 
 function cleanInline(value: string): string {

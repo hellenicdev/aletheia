@@ -23,5 +23,9 @@ describe("i18n", () => {
     expect(t("el", "searchOutageCredits")).toContain("εξαντλήθηκαν οι μονάδες του παρόχου");
     expect(t("en", "provisional")).toBe("provisional");
     expect(t("el", "provisional")).toBe("προσωρινό");
+    expect(t("en", "scrapeFailed")).toBe(
+      "This page could not be read. Paste the article text instead.",
+    );
+    expect(t("el", "scrapeFailed")).toContain("Επικολλήστε το κείμενο του άρθρου");
   });
 });
