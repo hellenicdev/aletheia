@@ -19,7 +19,9 @@ TAVILY_MONTHLY_CREDITS = "950"
 
 # The binding's period can only be 10 or 60 seconds, so this is a 3-per-minute
 # edge guard. The 10-minute, daily, and in-flight limits are one Durable Object
-# per IP. Tavily credits are one global Durable Object. Both use SQLite.
+# per IP. Tavily credits are one global Durable Object. The result cache is a
+# third. All three are top-level: this worker has no [env.*] target, and
+# Workers Builds deploys the top-level config.
 [[ratelimits]]
 name = "ANALYZE_IP"
 namespace_id = "1001"

@@ -313,6 +313,7 @@ const ENTITY_STOP = new Set([
   "mayor", "president", "minister", "governor", "senator", "representative", "secretary", "chief", "officer", "director",
   "said", "says", "according", "mister", "after", "before", "during", "however", "meanwhile",
   "new", "north", "south", "east", "west",
+  "mount", "lake", "river", "city", "island", "gulf", "ocean", "sea",
 ]);
 
 /** Capitalised names that identify a person, place, or event. Empty means there is nothing to mismatch. */
@@ -386,10 +387,27 @@ function statisticTokens(text: string): Set<string> {
   return found;
 }
 
+function containsWord(haystack: string, token: string): boolean {
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|[^\\p{L}\\p{N}])${escaped}(?:$|[^\\p{L}\\p{N}])`, "iu").test(haystack);
+}
+
+/** The most specific proper name in the claim. Empty when the claim names nobody. */
+function keyEntityTokens(claim: string): string[] {
+  const tokens = namedEntities(claim)
+    .flatMap((entity) => entity.split(" "))
+    .filter((token) => token.length >= 4 && !WORD_NUMBER[token]);
+  if (tokens.length === 0) return [];
+  const longest = Math.max(...tokens.map((token) => token.length));
+  return tokens.filter((token) => token.length === longest);
+}
+
 /**
- * A page is relevant when it shares a distinctive word or a named entity with
- * the claim. A shared year, or the word "calendar", is not enough. A statistical
- * claim also matches a page that states a rate for the same subject.
+ * A page is relevant when it shares a distinctive word with the claim.
+ * A claim that names a person, place, or event must share that name; two
+ * generic words are not enough. A shared year, or the word "calendar", is not
+ * enough. A statistical claim also matches a page that states a rate for the
+ * same subject.
  */
 export function isRelevantEvidence(
   claim: string,
@@ -400,11 +418,13 @@ export function isRelevantEvidence(
   const evidenceTokens = contentTokens(surface);
   if (claimTokens.size === 0) return false;
   const shared = [...claimTokens].filter((token) => tokenOverlaps(token, evidenceTokens));
+  const keys = keyEntityTokens(claim);
+  if (keys.length > 0 && !keys.some((token) => containsWord(surface.toLowerCase(), token))) return false;
   const entities = namedEntities(claim);
   if (entities.length > 0) {
     const haystack = surface.toLowerCase();
     const entityHit = entities.some((entity) =>
-      entity.split(" ").some((token) => token.length >= 4 && haystack.includes(token)),
+      entity.split(" ").some((token) => token.length >= 4 && containsWord(haystack, token)),
     );
     if (entityHit && shared.length > 0) return true;
     if (!entityHit && shared.length === 0 && !statisticalOverlap(claim, surface, shared)) return false;

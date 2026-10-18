@@ -1,12 +1,21 @@
 import type { AnalysisResult, ArticlePreview, StageName } from "../../shared/types";
 import { cacheApiAnalysisCache, type AnalysisCache } from "./analysisCache";
+import { PIPELINE_VERSION } from "./version";
 import { resolveConfig, type Env } from "./config";
 import { corsHeaders, jsonResponse } from "./cors";
 import { HttpError } from "./errors";
 import { LIMITS, allowRequest, type RateState } from "./limits";
 import { probeUpstreams } from "./probe";
 import { analyze, type AnalyzeInput } from "./pipeline";
-import { bindDurableCaches, DurableRateGate, IpRateLimiter, PipelineCache, TavilyCredits } from "./rateLimiter";
+import {
+  bindDurableCaches,
+  durableBindingsPresent,
+  DurableRateGate,
+  IpRateLimiter,
+  PipelineCache,
+  probeDurableObjects,
+  TavilyCredits,
+} from "./rateLimiter";
 import {
   MemoryRateGate,
   TAVILY_CREDITS_PER_ANALYSIS,
@@ -78,6 +87,13 @@ export async function handleRequest(
       tavilyConfigured,
       model: config.llmModel,
       searchProvider: tavilyConfigured && !env.FIRECRAWL_API_KEY?.trim() ? "tavily" : "firecrawl",
+      limiter: durableBindingsPresent(env) ? "durable-object" : "missing",
+      bindings: {
+        ipLimiter: Boolean(env.IP_LIMITER),
+        tavilyCredits: Boolean(env.TAVILY_CREDITS),
+        pipelineCache: Boolean(env.PIPELINE_CACHE),
+      },
+      pipelineVersion: PIPELINE_VERSION,
     };
     if (url.searchParams.get("probe") !== "1") {
       return jsonResponse({ ok: true, ...base }, 200, cors);
@@ -88,8 +104,9 @@ export async function handleRequest(
       return jsonResponse({ error: "Too many health probes from this network. Try again shortly." }, 429, cors);
     }
     const probe = await probeUpstreams(env, resolveFetch(deps.fetchImpl), deps.now?.());
+    const limiter = await probeDurableObjects(env);
     const searchUp = probe.firecrawl.ok || probe.tavily.ok;
-    return jsonResponse({ ok: probe.llm.ok && searchUp, ...base, probe }, 200, cors);
+    return jsonResponse({ ok: probe.llm.ok && searchUp, ...base, probe: { ...probe, limiter } }, 200, cors);
   }
 
   if (path !== "/api/analyze") {
@@ -141,6 +158,13 @@ export async function handleRequest(
   if (input.url) {
     const cached = await analysisCache.get(input.url);
     if (cached) return streamResponse(cors, (send) => send("result", cached));
+  } else if (input.text && analysisCache.getText) {
+    const cached = await analysisCache.getText(input.text, lang);
+    if (cached) return streamResponse(cors, (send) => send("result", cached));
+  }
+
+  if (!limiterReady(env, deps.gate)) {
+    return jsonResponse({ error: limitStoreMessage(lang) }, 503, cors);
   }
 
   if (!env.OPENAI_API_KEY?.trim()) {
@@ -308,11 +332,11 @@ export async function handleRequest(
             ]);
             if (late) {
               sendTerminal("result", late);
-              if (input.url) track(deps, analysisCache.put(input.url, late));
+              rememberAnalysis(deps, analysisCache, input, lang, late);
             } else sendTerminal("error", { message: timeoutMessage });
           } else {
             sendTerminal("result", winner);
-            if (input.url) track(deps, analysisCache.put(input.url, winner));
+            rememberAnalysis(deps, analysisCache, input, lang, winner);
           }
         } catch (error) {
           const timedOut =
@@ -326,8 +350,10 @@ export async function handleRequest(
                 : "The analysis could not be completed.";
           if (!(error instanceof HttpError) && !timedOut && !request.signal.aborted) console.error(error);
           const late = request.signal.aborted ? null : await work.catch(() => null);
-          if (late) sendTerminal("result", late);
-          else sendTerminal("error", errorEvent(error, message));
+          if (late) {
+            sendTerminal("result", late);
+            rememberAnalysis(deps, analysisCache, input, lang, late);
+          } else sendTerminal("error", errorEvent(error, message));
         } finally {
           await finish();
         }
@@ -424,20 +450,40 @@ function streamResponse(
   return new Response(encoder.encode(chunks.join("")), { status: 200, headers });
 }
 
+function limiterReady(env: Env, gate?: RateGate): boolean {
+  if (gate) return true;
+  if (durableBindingsPresent(env)) return true;
+  return env.ALLOW_MEMORY_LIMITER === "1";
+}
+
 function resolveGate(env: Env, gate?: RateGate): RateGate {
   if (gate) return gate;
-  if (env.IP_LIMITER && env.TAVILY_CREDITS) return new DurableRateGate(env.IP_LIMITER, env.TAVILY_CREDITS);
-  if (env.IP_LIMITER || env.TAVILY_CREDITS) {
-    return {
-      async reserve() {
-        throw new Error("The limiter bindings are incomplete.");
-      },
-      async release() {
-        /* Nothing was reserved. */
-      },
-    };
+  if (env.IP_LIMITER && env.TAVILY_CREDITS && env.PIPELINE_CACHE) {
+    return new DurableRateGate(env.IP_LIMITER, env.TAVILY_CREDITS);
   }
-  return new MemoryRateGate();
+  if (env.ALLOW_MEMORY_LIMITER === "1") return new MemoryRateGate();
+  return {
+    async reserve() {
+      throw new Error("The limiter bindings are missing.");
+    },
+    async release() {
+      /* Nothing was reserved. */
+    },
+  };
+}
+
+function rememberAnalysis(
+  deps: HandlerDeps,
+  analysisCache: AnalysisCache,
+  input: AnalyzeInput,
+  language: "en" | "el",
+  result: AnalysisResult,
+): void {
+  if (input.url) {
+    track(deps, analysisCache.put(input.url, result));
+    return;
+  }
+  if (input.text && analysisCache.putText) track(deps, analysisCache.putText(input.text, language, result));
 }
 
 function track(deps: HandlerDeps, promise: Promise<unknown>): void {

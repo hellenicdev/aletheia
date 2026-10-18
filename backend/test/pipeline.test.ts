@@ -5,7 +5,10 @@ import { clearProbeCache } from "../src/probe";
 import { handleRequest } from "../src/index";
 import type { RateState } from "../src/limits";
 import { analyze } from "../src/pipeline";
+import { normaliseCachedText, type AnalysisCache } from "../src/analysisCache";
 import { bindPipelineCache, type ResultCache } from "../src/persistentCache";
+import { MemoryRateGate } from "../src/rateLimit";
+import type { AnalysisResult } from "../../shared/types";
 import { isProvisionalScore } from "../../shared/score";
 
 function bindMapCache(store = new Map<string, string>()): Map<string, string> {
@@ -187,6 +190,7 @@ const env = {
   FIRECRAWL_API_KEY: "firecrawl-test-key",
   OPENAI_MODEL: "Beam-501B-A23B",
   OPENAI_BASE_URL: "https://api.reflection.ai/openai/v1",
+  ALLOW_MEMORY_LIMITER: "1",
 };
 
 describe("analyze", () => {
@@ -2111,6 +2115,48 @@ describe("handleRequest", () => {
     });
     expect(response.status).toBe(413);
     expect(await response.json()).toEqual({ error: "Request body is too large." });
+  });
+
+  it("caches a repeated paste and does not reserve the second analysis", async () => {
+    const { fetchImpl } = scriptedFetch();
+    const gate = new MemoryRateGate();
+    const saved = new Map<string, AnalysisResult>();
+    const analysisCache: AnalysisCache = {
+      async get() {
+        return null;
+      },
+      async put() {
+        /* URL cache is unused for a paste. */
+      },
+      async getText(text, language) {
+        return saved.get(`${language}:${normaliseCachedText(text)}`) ?? null;
+      },
+      async putText(text, language, result) {
+        saved.set(`${language}:${normaliseCachedText(text)}`, result);
+      },
+    };
+    const now = 1_700_000_000_000;
+    const first = await handleRequest(post(article), env, {
+      gate,
+      fetchImpl,
+      analysisCache,
+      now: () => now,
+      rate: { buckets: new Map(), inFlight: { count: 0 } },
+    });
+    expect(first.status).toBe(200);
+    expect(await first.text()).toContain("event: result");
+    expect(gate.book.ips.anonymous?.recent).toHaveLength(1);
+    const second = await handleRequest(post(article.replace(/ /g, "  ")), env, {
+      gate,
+      fetchImpl,
+      analysisCache,
+      now: () => now + 1_000,
+      rate: { buckets: new Map(), inFlight: { count: 0 } },
+    });
+    expect(second.status).toBe(200);
+    expect(await second.text()).toContain("event: result");
+    expect(gate.book.ips.anonymous?.recent).toHaveLength(1);
+    expect(saved.size).toBe(1);
   });
 
   it("does not search a personal anecdote and keeps an echo-only claim in coverage", async () => {

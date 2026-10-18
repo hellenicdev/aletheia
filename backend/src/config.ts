@@ -16,6 +16,11 @@ export interface Env {
   IP_LIMITER?: DurableObjectNamespace;
   TAVILY_CREDITS?: DurableObjectNamespace;
   PIPELINE_CACHE?: DurableObjectNamespace;
+  /**
+   * Set to "1" only for local wrangler dev and tests. Production must leave
+   * this unset so a missing Durable Object binding is a 503, not an in-memory limit.
+   */
+  ALLOW_MEMORY_LIMITER?: string;
 }
 
 export interface AppConfig {

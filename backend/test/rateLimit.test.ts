@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { AnalysisResult } from "../../shared/types";
-import { analysisCacheUrl } from "../src/analysisCache";
+import { analysisCacheUrl, normaliseCachedText, textAnalysisCacheUrl } from "../src/analysisCache";
 import { handleRequest } from "../src/index";
 import { LIMITS } from "../src/limits";
 import { bindPipelineCache, cacheStorageKey } from "../src/persistentCache";
+import { clearProbeCache } from "../src/probe";
 import { DurableRateGate, IpRateLimiter, PipelineCache, TavilyCredits } from "../src/rateLimiter";
+import { PIPELINE_VERSION } from "../src/version";
 import {
   IN_FLIGHT_MS,
   IP_BURST_LIMIT,
@@ -301,12 +303,18 @@ describe("analyze guards", () => {
 
   it("returns 429 ip_burst for a fourth request inside 10 minutes", async () => {
     const { IP_LIMITER, TAVILY_CREDITS } = durableNamespaces();
+    const limited = {
+      ...env,
+      IP_LIMITER,
+      TAVILY_CREDITS,
+      PIPELINE_CACHE: singleNamespace(new PipelineCache({ storage: sqliteStore() })),
+    };
     const rate = { buckets: new Map(), inFlight: { count: 0 } };
     const fetchImpl: typeof fetch = async () => {
       throw new Error("stop");
     };
     for (let i = 0; i < 3; i += 1) {
-      const response = await handleRequest(post({ text: "a".repeat(80) }), { ...env, IP_LIMITER, TAVILY_CREDITS }, {
+      const response = await handleRequest(post({ text: "a".repeat(80) }), limited, {
         rate,
         now: () => 1_700_000_000_000 + i,
         fetchImpl,
@@ -315,7 +323,7 @@ describe("analyze guards", () => {
       expect(response.status).toBe(200);
       await response.text();
     }
-    const blocked = await handleRequest(post({ text: "a".repeat(80) }), { ...env, IP_LIMITER, TAVILY_CREDITS }, {
+    const blocked = await handleRequest(post({ text: "a".repeat(80) }), limited, {
       rate,
       now: () => 1_700_000_000_000 + 3_000,
       fetchImpl,
@@ -326,11 +334,26 @@ describe("analyze guards", () => {
     expect(blocked.headers.get("retry-after")).toBeTruthy();
     const other = await handleRequest(
       post({ text: "a".repeat(80) }, "http://127.0.0.1:5173", "203.0.113.9"),
-      { ...env, IP_LIMITER, TAVILY_CREDITS },
+      limited,
       { rate, now: () => 1_700_000_000_000 + 4_000, fetchImpl, deadlineMs: 1_000 },
     );
     expect(other.status).toBe(200);
     await other.text();
+  });
+
+  it("returns 503 when the durable object bindings are missing", async () => {
+    let calls = 0;
+    const response = await handleRequest(post({ text: "a".repeat(80) }), { OPENAI_API_KEY: "test-key" }, {
+      now: () => 1_700_000_000_000,
+      fetchImpl: async () => {
+        calls += 1;
+        return new Response("nope");
+      },
+    });
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toContain("could not record");
+    expect(calls).toBe(0);
   });
 
   it("returns 503 and does not start an analysis when the limiter storage throws", async () => {
@@ -339,6 +362,7 @@ describe("analyze guards", () => {
       ...env,
       IP_LIMITER: throwingNamespace(),
       TAVILY_CREDITS: throwingNamespace(),
+      PIPELINE_CACHE: singleNamespace(new PipelineCache({ storage: sqliteStore() })),
     }, {
       now: () => 1_700_000_000_000,
       fetchImpl: async () => {
@@ -387,6 +411,86 @@ describe("analyze guards", () => {
       }, { now: () => 1_700_000_000_000 });
       expect(response.status).toBe(200);
       expect(await response.text()).toContain("Cached");
+      expect(reserves).toBe(0);
+    } finally {
+      bindPipelineCache(null);
+    }
+  });
+
+  it("reports durable object bindings on the health check", async () => {
+    clearProbeCache();
+    const plain = await handleRequest(new Request("https://worker.test/api/health"), { OPENAI_API_KEY: "test-key" });
+    const missing = (await plain.json()) as {
+      limiter: string;
+      pipelineVersion: string;
+      bindings: { ipLimiter: boolean; tavilyCredits: boolean; pipelineCache: boolean };
+    };
+    expect(missing.limiter).toBe("missing");
+    expect(missing.pipelineVersion).toBe(PIPELINE_VERSION);
+    expect(missing.bindings).toEqual({ ipLimiter: false, tavilyCredits: false, pipelineCache: false });
+
+    const { IP_LIMITER, TAVILY_CREDITS } = durableNamespaces();
+    const PIPELINE_CACHE = singleNamespace(new PipelineCache({ storage: sqliteStore() }));
+    const probed = await handleRequest(new Request("https://worker.test/api/health?probe=1"), {
+      OPENAI_API_KEY: "test-key",
+      IP_LIMITER,
+      TAVILY_CREDITS,
+      PIPELINE_CACHE,
+    }, {
+      now: () => 90_000,
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ choices: [{ message: { content: "{\"ok\":true}" } }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    });
+    const body = (await probed.json()) as {
+      limiter: string;
+      bindings: { ipLimiter: boolean };
+      probe: { limiter: { ok: boolean; error?: string } };
+    };
+    expect(body.limiter).toBe("durable-object");
+    expect(body.bindings.ipLimiter).toBe(true);
+    expect(body.probe.limiter.ok).toBe(true);
+  });
+
+  it("does not count a repeated paste against the limit", async () => {
+    const cacheObject = new PipelineCache({ storage: sqliteStore() });
+    const pageText = "The council voted 7 to 2 on Monday and published the minutes.";
+    const key = await cacheStorageKey(new Request(await textAnalysisCacheUrl(pageText, "en")));
+    await cacheObject.fetch(
+      new Request("https://pipeline-cache.internal/put", {
+        method: "POST",
+        body: JSON.stringify({
+          key,
+          body: JSON.stringify({ article: { title: "Cached paste", text: pageText } }),
+          ttl: 3_600,
+        }),
+      }),
+    );
+    let reserves = 0;
+    const limiter = {
+      idFromName: (name: string) => ({ toString: () => name }) as DurableObjectId,
+      get() {
+        return {
+          fetch: async () => {
+            reserves += 1;
+            return Response.json({ ok: true, code: "ok", retryAfter: 0 });
+          },
+        };
+      },
+    } as unknown as DurableObjectNamespace;
+    const spaced = pageText.replace(" ", "   ");
+    expect(normaliseCachedText(spaced)).toBe(normaliseCachedText(pageText));
+    try {
+      const response = await handleRequest(post({ text: spaced }), {
+        ...env,
+        IP_LIMITER: limiter,
+        TAVILY_CREDITS: limiter,
+        PIPELINE_CACHE: singleNamespace(cacheObject),
+      }, { now: () => 1_700_000_000_000 });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain("Cached paste");
       expect(reserves).toBe(0);
     } finally {
       bindPipelineCache(null);
