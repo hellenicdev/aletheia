@@ -466,7 +466,8 @@ describe("wire reprints and entity match", () => {
       uiLanguage: "en",
     });
     expect(mismatch.label).toBe("Unverifiable");
-    expect(mismatch.explanation).toContain("different person");
+    expect(mismatch.sources).toEqual([]);
+    expect(mismatch.explanation.toLowerCase()).toContain("unverified");
 
     const samePlant = applyEvidence({
       label: "False",
@@ -544,6 +545,34 @@ describe("relevance and contradiction", () => {
     expect(applied.label).toBe("Unverifiable");
     expect(applied.explanation.toLowerCase()).toContain("does not");
     expect(applied.sources).toEqual([]);
+  });
+
+  it("drops a source that does not share the claim's key name", () => {
+    const claim = "A guide reached the summit of Kilimanjaro at dawn.";
+    const crash = {
+      url: "https://www.dw.com/en/helicopter-crash",
+      title: "Helicopter crash",
+      snippet: "A rescue helicopter crashed in the Alps during a training flight, DW reported.",
+    };
+    expect(isRelevantEvidence(claim, crash)).toBe(false);
+    const applied = applyEvidence({
+      label: "True",
+      confidence: 0.9,
+      explanation: "Reports confirm the climb.",
+      claimText: claim,
+      sourceUrls: [crash.url],
+      evidence: [crash],
+      searchEnabled: true,
+      uiLanguage: "en",
+    });
+    expect(applied.label).toBe("Unverifiable");
+    expect(applied.sources).toEqual([]);
+    expect(
+      isRelevantEvidence(claim, {
+        title: "Kilimanjaro summit",
+        snippet: "A guide reached the summit of Kilimanjaro at dawn, park staff said.",
+      }),
+    ).toBe(true);
   });
 
   it("drops an off-topic page and a page the verifier marked irrelevant", () => {
