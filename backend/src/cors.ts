@@ -5,6 +5,7 @@ export function corsHeaders(origin: string | null, allowed: string[]): Headers {
     headers.set("Vary", "Origin");
     headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     headers.set("Access-Control-Allow-Headers", "Content-Type");
+    headers.set("Access-Control-Expose-Headers", "x-aletheia-cache");
     headers.set("Access-Control-Max-Age", "86400");
   }
   return headers;

@@ -20,6 +20,7 @@ describe("analyzeArticle stall watchdog", () => {
     const error = await analyzeArticle({ text: "x".repeat(80), uiLanguage: "en" }, () => {}).catch((caught) => caught);
     expect(error).toBeInstanceOf(AnalysisError);
     expect(error.code).toBe("ip_burst");
+    expect(error.status).toBe(429);
     expect(error.retryAfterSeconds).toBe(125);
   });
 

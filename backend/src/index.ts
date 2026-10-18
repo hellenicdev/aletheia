@@ -21,6 +21,7 @@ import {
   TAVILY_CREDITS_PER_ANALYSIS,
   TAVILY_DAILY_CREDITS,
   TAVILY_MONTHLY_CREDITS,
+  clientLimitKey,
   rateLimitMessage,
   type RateDecision,
   type RateGate,
@@ -157,14 +158,14 @@ export async function handleRequest(
   const analysisCache = deps.analysisCache ?? cacheApiAnalysisCache();
   if (input.url) {
     const cached = await analysisCache.get(input.url);
-    if (cached) return streamResponse(cors, (send) => send("result", cached));
+    if (cached) return streamResponse(cors, (send) => send("result", cached), "hit");
   } else if (input.text && analysisCache.getText) {
     const cached = await analysisCache.getText(input.text, lang);
-    if (cached) return streamResponse(cors, (send) => send("result", cached));
+    if (cached) return streamResponse(cors, (send) => send("result", cached), "hit");
   }
 
   if (!limiterReady(env, deps.gate)) {
-    return jsonResponse({ error: limitStoreMessage(lang) }, 503, cors);
+    return jsonResponse({ error: limitStoreMessage(lang), code: "limiter_unavailable" }, 503, cors);
   }
 
   if (!env.OPENAI_API_KEY?.trim()) {
@@ -195,7 +196,7 @@ export async function handleRequest(
     decision = await gate.reserve({ ip: key, now: now(), credits, dailyCreditCap, monthlyCreditCap });
   } catch (error) {
     console.error(error);
-    return jsonResponse({ error: limitStoreMessage(lang) }, 503, cors);
+    return jsonResponse({ error: limitStoreMessage(lang), code: "limiter_unavailable" }, 503, cors);
   }
   if (!decision.ok) return limitResponse(decision.code, decision.retryAfter, lang, cors);
 
@@ -374,6 +375,7 @@ export async function handleRequest(
   const headers = new Headers(cors);
   headers.set("Content-Type", "text/event-stream; charset=utf-8");
   headers.set("Cache-Control", "no-cache, no-store");
+  headers.set("x-aletheia-cache", "miss");
   return new Response(stream, { status: 200, headers });
 }
 
@@ -438,6 +440,7 @@ function limitResponse(
 function streamResponse(
   cors: Headers,
   write: (send: (event: string, data: unknown) => void) => void,
+  cache: "hit" | "miss",
 ): Response {
   const encoder = new TextEncoder();
   const chunks: string[] = [];
@@ -447,6 +450,7 @@ function streamResponse(
   const headers = new Headers(cors);
   headers.set("Content-Type", "text/event-stream; charset=utf-8");
   headers.set("Cache-Control", "no-cache, no-store");
+  headers.set("x-aletheia-cache", cache);
   return new Response(encoder.encode(chunks.join("")), { status: 200, headers });
 }
 
@@ -511,10 +515,10 @@ function positiveCap(value: string | undefined, fallback: number): number {
 }
 
 function clientKey(request: Request): string {
-  return (
+  return clientLimitKey(
     request.headers.get("CF-Connecting-IP") ||
-    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    "anonymous"
+      request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+      "",
   );
 }
 

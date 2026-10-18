@@ -8,6 +8,8 @@ import { clearProbeCache } from "../src/probe";
 import { DurableRateGate, IpRateLimiter, PipelineCache, TavilyCredits } from "../src/rateLimiter";
 import { PIPELINE_VERSION } from "../src/version";
 import {
+  GLOBAL_IN_FLIGHT,
+  GLOBAL_PER_MINUTE,
   IN_FLIGHT_MS,
   IP_BURST_LIMIT,
   IP_DAILY_LIMIT,
@@ -15,6 +17,7 @@ import {
   TAVILY_CREDITS_PER_ANALYSIS,
   TAVILY_DAILY_CREDITS,
   TAVILY_MONTHLY_CREDITS,
+  clientLimitKey,
   utcDate,
   utcMonth,
 } from "../src/rateLimit";
@@ -176,8 +179,9 @@ describe("analysis rate gate", () => {
   it("returns the IP slot when the credit cap refuses the analysis", async () => {
     const namespaces = durableNamespaces();
     const gate = new DurableRateGate(namespaces.IP_LIMITER, namespaces.TAVILY_CREDITS);
-    const now = Date.UTC(2026, 9, 18, 12, 0, 0);
+    const start = Date.UTC(2026, 9, 18, 12, 0, 0);
     for (let i = 0; i < 10; i += 1) {
+      const now = start + i * 61_000;
       const decision = await gate.reserve({
         ip: `credit-${i}`,
         now,
@@ -188,9 +192,10 @@ describe("analysis rate gate", () => {
       expect(decision.ok).toBe(true);
       await gate.release(`credit-${i}`, now);
     }
+    const blockedAt = start + 10 * 61_000;
     const blocked = await gate.reserve({
       ip: "203.0.113.8",
-      now,
+      now: blockedAt,
       credits: TAVILY_CREDITS_PER_ANALYSIS,
       dailyCreditCap: TAVILY_DAILY_CREDITS,
       monthlyCreditCap: TAVILY_MONTHLY_CREDITS,
@@ -199,12 +204,12 @@ describe("analysis rate gate", () => {
     for (let i = 0; i < IP_BURST_LIMIT; i += 1) {
       const decision = await gate.reserve({
         ip: "203.0.113.8",
-        now: now + 1_000 + i,
+        now: blockedAt + 61_000 + i,
         credits: 0,
         dailyCreditCap: TAVILY_DAILY_CREDITS,
       });
       expect(decision.ok).toBe(true);
-      await gate.release("203.0.113.8", now + 1_000 + i);
+      await gate.release("203.0.113.8", blockedAt + 61_000 + i);
     }
   });
 
@@ -279,6 +284,8 @@ describe("analyze guards", () => {
       },
     });
     expect(response.status).toBe(200);
+    expect(response.headers.get("x-aletheia-cache")).toBe("hit");
+    expect(response.headers.get("access-control-expose-headers")).toContain("x-aletheia-cache");
     expect(await response.text()).toContain("Cached");
     expect(gate.book.ips["203.0.113.8"]?.recent).toHaveLength(1);
   });
@@ -321,6 +328,7 @@ describe("analyze guards", () => {
         deadlineMs: 1_000,
       });
       expect(response.status).toBe(200);
+      expect(response.headers.get("x-aletheia-cache")).toBe("miss");
       await response.text();
     }
     const blocked = await handleRequest(post({ text: "a".repeat(80) }), limited, {
@@ -490,6 +498,7 @@ describe("analyze guards", () => {
         PIPELINE_CACHE: singleNamespace(cacheObject),
       }, { now: () => 1_700_000_000_000 });
       expect(response.status).toBe(200);
+      expect(response.headers.get("x-aletheia-cache")).toBe("hit");
       expect(await response.text()).toContain("Cached paste");
       expect(reserves).toBe(0);
     } finally {
@@ -513,6 +522,154 @@ describe("analyze guards", () => {
     const body = (await response.json()) as { code: string };
     expect(body.code).toBe("ip_burst");
     expect(gate.book.creditsUsed).toBe(0);
+  });
+
+  it("shares burst, daily, and in-flight limits across one IPv6 /64", async () => {
+    const prefix = clientLimitKey("2a04:4e41:80:edd9::b9a4:edd9");
+    expect(prefix).toBe(clientLimitKey("2a04:4e41:80:edd9::1"));
+    expect(prefix).toBe(clientLimitKey("2A04:4E41:80:EDD9:0:0:0:1"));
+    expect(prefix).toBe("2a04:4e41:0080:edd9/64");
+    expect(clientLimitKey("2a04:4e41:80:c73a::7cd7:c73a")).toBe("2a04:4e41:0080:c73a/64");
+    expect(clientLimitKey("203.0.113.8")).toBe("203.0.113.8");
+    expect(clientLimitKey("203.000.113.008")).toBe("203.0.113.8");
+    expect(clientLimitKey("::ffff:203.0.113.8")).toBe("203.0.113.8");
+    expect(clientLimitKey("::ffff:cb00:7108")).toBe("203.0.113.8");
+
+    const keyA = clientLimitKey("2a04:4e41:80:edd9::aa");
+    const keyB = clientLimitKey("2a04:4e41:80:edd9::bb");
+    expect(keyA).toBe(keyB);
+    const flightNs = durableNamespaces();
+    const left = new DurableRateGate(flightNs.IP_LIMITER, flightNs.TAVILY_CREDITS);
+    const right = new DurableRateGate(flightNs.IP_LIMITER, flightNs.TAVILY_CREDITS);
+    const now = 1_800_000_000_000;
+    expect((await left.reserve({ ip: keyA, now, credits: 0, dailyCreditCap: 30 })).ok).toBe(true);
+    expect((await right.reserve({ ip: keyB, now: now + 1_000, credits: 0, dailyCreditCap: 30 })).code).toBe(
+      "ip_concurrent",
+    );
+
+    const dailyNs = durableNamespaces();
+    const daily = new DurableRateGate(dailyNs.IP_LIMITER, dailyNs.TAVILY_CREDITS);
+    let at = now;
+    for (let i = 0; i < IP_DAILY_LIMIT; i += 1) {
+      at += 11 * 60 * 1000;
+      const decision = await daily.reserve({ ip: i % 2 === 0 ? keyA : keyB, now: at, credits: 0, dailyCreditCap: 30 });
+      expect(decision.ok, String(i)).toBe(true);
+      await daily.release(i % 2 === 0 ? keyA : keyB, at);
+    }
+    expect(
+      (await daily.reserve({ ip: keyA, now: at + 11 * 60 * 1000, credits: 0, dailyCreditCap: 30 })).code,
+    ).toBe("ip_daily");
+
+    const { IP_LIMITER, TAVILY_CREDITS } = durableNamespaces();
+    const limited = {
+      ...env,
+      IP_LIMITER,
+      TAVILY_CREDITS,
+      PIPELINE_CACHE: singleNamespace(new PipelineCache({ storage: sqliteStore() })),
+    };
+    const rate = { buckets: new Map(), inFlight: { count: 0 } };
+    const fetchImpl: typeof fetch = async () => {
+      throw new Error("stop");
+    };
+    const same = ["2a04:4e41:80:edd9::1", "2a04:4e41:80:edd9::2", "2a04:4e41:80:edd9::3"];
+    for (const ip of same) {
+      const response = await handleRequest(post({ text: `reef ${ip}` }, "http://127.0.0.1:5173", ip), limited, {
+        rate,
+        now: () => 1_700_000_000_000,
+        fetchImpl,
+        deadlineMs: 1_000,
+      });
+      expect(response.status).toBe(200);
+      await response.text();
+    }
+    const shared = await handleRequest(
+      post({ text: "reef four" }, "http://127.0.0.1:5173", "2a04:4e41:80:edd9::4"),
+      limited,
+      { rate, now: () => 1_700_000_000_000 + 1_000, fetchImpl },
+    );
+    expect(shared.status).toBe(429);
+    expect(((await shared.json()) as { code: string }).code).toBe("ip_burst");
+    const other = await handleRequest(
+      post({ text: "other prefix" }, "http://127.0.0.1:5173", "2a04:4e41:80:c73a::1"),
+      limited,
+      { rate, now: () => 1_700_000_000_000 + 2_000, fetchImpl, deadlineMs: 1_000 },
+    );
+    expect(other.status).toBe(200);
+    await other.text();
+  });
+
+  it("caps fresh analyses at 6 per minute and 2 in flight for every client", async () => {
+    const namespaces = durableNamespaces();
+    const now = 1_700_000_000_000;
+    const input = { credits: 0, dailyCreditCap: 30 };
+    const first = new DurableRateGate(namespaces.IP_LIMITER, namespaces.TAVILY_CREDITS);
+    const second = new DurableRateGate(namespaces.IP_LIMITER, namespaces.TAVILY_CREDITS);
+    const thirdGate = new DurableRateGate(namespaces.IP_LIMITER, namespaces.TAVILY_CREDITS);
+    expect((await first.reserve({ ip: "203.0.113.1", now, ...input })).ok).toBe(true);
+    expect((await second.reserve({ ip: "203.0.113.2", now, ...input })).ok).toBe(true);
+    const third = await thirdGate.reserve({ ip: "203.0.113.3", now: now + 500, ...input });
+    expect(third.code).toBe("global_busy");
+    expect(third.retryAfter).toBe(90);
+    await first.release("203.0.113.1", now + 500);
+    await second.release("203.0.113.2", now + 500);
+
+    const returned = new DurableRateGate(namespaces.IP_LIMITER, namespaces.TAVILY_CREDITS);
+    for (let i = 0; i < IP_BURST_LIMIT; i += 1) {
+      const decision = await returned.reserve({ ip: "203.0.113.3", now: now + 1_000 + i, ...input });
+      expect(decision.ok).toBe(true);
+      await returned.release("203.0.113.3", now + 1_000 + i);
+    }
+    const burst = await returned.reserve({ ip: "203.0.113.3", now: now + 2_000, ...input });
+    expect(burst.code).toBe("ip_burst");
+
+    const minuteNs = durableNamespaces();
+    const minute = new DurableRateGate(minuteNs.IP_LIMITER, minuteNs.TAVILY_CREDITS);
+    for (let i = 0; i < GLOBAL_PER_MINUTE; i += 1) {
+      const decision = await minute.reserve({ ip: `198.51.100.${i + 1}`, now, ...input });
+      expect(decision.ok, String(i)).toBe(true);
+      await minute.release(`198.51.100.${i + 1}`, now);
+    }
+    const busy = await minute.reserve({ ip: "198.51.100.20", now: now + 1_000, ...input });
+    expect(busy.code).toBe("global_busy");
+    expect(busy.retryAfter).toBeGreaterThanOrEqual(59);
+    const later = await minute.reserve({
+      ip: "198.51.100.20",
+      now: now + 60_000,
+      ...input,
+    });
+    expect(later.ok).toBe(true);
+    expect(GLOBAL_IN_FLIGHT).toBe(2);
+
+    const freshGate = durableNamespaces();
+    const worker = {
+      ...env,
+      IP_LIMITER: freshGate.IP_LIMITER,
+      TAVILY_CREDITS: freshGate.TAVILY_CREDITS,
+      PIPELINE_CACHE: singleNamespace(new PipelineCache({ storage: sqliteStore() })),
+    };
+    const fetchImpl: typeof fetch = async () => {
+      throw new Error("stop");
+    };
+    for (let i = 0; i < GLOBAL_PER_MINUTE; i += 1) {
+      const response = await handleRequest(post({ text: `fresh ${i}` }, "http://127.0.0.1:5173", `198.51.100.${i + 1}`), worker, {
+        rate: { buckets: new Map(), inFlight: { count: 0 } },
+        now: () => now,
+        fetchImpl,
+        deadlineMs: 1_000,
+      });
+      expect(response.status).toBe(200);
+      await response.text();
+    }
+    const refused = await handleRequest(
+      post({ text: "fresh over", uiLanguage: "el" }, "http://127.0.0.1:5173", "198.51.100.30"),
+      worker,
+      { rate: { buckets: new Map(), inFlight: { count: 0 } }, now: () => now + 1_000, fetchImpl },
+    );
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get("retry-after")).toBeTruthy();
+    const body = (await refused.json()) as { code: string; error: string };
+    expect(body.code).toBe("global_busy");
+    expect(body.error).toContain("απασχολημένη");
   });
 });
 

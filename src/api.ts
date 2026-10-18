@@ -25,12 +25,14 @@ export const STALL_MESSAGE = "The analysis stopped sending updates.";
 
 export class AnalysisError extends Error {
   readonly code?: string;
+  readonly status?: number;
   readonly retryAfterSeconds?: number;
 
-  constructor(message: string, detail?: { code?: string; retryAfterSeconds?: number }) {
+  constructor(message: string, detail?: { code?: string; status?: number; retryAfterSeconds?: number }) {
     super(message);
     this.name = "AnalysisError";
     this.code = detail?.code;
+    this.status = detail?.status;
     this.retryAfterSeconds = detail?.retryAfterSeconds;
   }
 }
@@ -64,6 +66,7 @@ export async function analyzeArticle(
     }
     throw new AnalysisError(message, {
       code,
+      status: response.status,
       retryAfterSeconds: Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : undefined,
     });
   }

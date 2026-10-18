@@ -137,6 +137,8 @@ const en = {
   rateLimitConcurrent: "An analysis is already running from this network. Try again in {time}.",
   rateLimitCredits: "Daily limit reached. Try again tomorrow ({time}).",
   rateLimitCreditsMonth: "Monthly limit reached. Try again next month ({time}).",
+  rateLimitGlobal: "Aletheia is busy with other analyses. Try again in {time}.",
+  rateLimitUnavailable: "The analyser could not record this request. Try again shortly.",
 };
 
 const el: Record<keyof typeof en, string> = {
@@ -276,6 +278,8 @@ const el: Record<keyof typeof en, string> = {
   rateLimitConcurrent: "Μια ανάλυση εκτελείται ήδη από αυτό το δίκτυο. Δοκιμάστε ξανά σε {time}.",
   rateLimitCredits: "Συμπληρώθηκε το ημερήσιο όριο. Δοκιμάστε ξανά αύριο ({time}).",
   rateLimitCreditsMonth: "Συμπληρώθηκε το μηνιαίο όριο. Δοκιμάστε ξανά τον επόμενο μήνα ({time}).",
+  rateLimitGlobal: "Η Αλήθεια είναι απασχολημένη με άλλες αναλύσεις. Δοκιμάστε ξανά σε {time}.",
+  rateLimitUnavailable: "Ο αναλυτής δεν μπόρεσε να καταγράψει το αίτημα. Δοκιμάστε ξανά σε λίγο.",
 };
 
 export const STRINGS = { en, el };

@@ -8,7 +8,19 @@ export const TAVILY_MONTHLY_CREDITS = 950;
 /** A crashed isolate must not hold the per-IP lock forever. */
 export const IN_FLIGHT_MS = 90_000;
 
-export type RateCode = "ok" | "ip_burst" | "ip_daily" | "ip_concurrent" | "tavily_daily" | "tavily_monthly";
+export type RateCode =
+  | "ok"
+  | "ip_burst"
+  | "ip_daily"
+  | "ip_concurrent"
+  | "tavily_daily"
+  | "tavily_monthly"
+  | "global_busy";
+
+/** Fresh analyses across every client. Cache hits never reach this gate. */
+export const GLOBAL_PER_MINUTE = 6;
+export const GLOBAL_WINDOW_MS = 60_000;
+export const GLOBAL_IN_FLIGHT = 2;
 
 export interface RateDecision {
   ok: boolean;
@@ -166,8 +178,139 @@ export class MemoryRateGate implements RateGate {
   }
 }
 
+export interface GlobalLedger {
+  recent: number[];
+  inFlightUntil: number[];
+}
+
+export function emptyGlobal(): GlobalLedger {
+  return { recent: [], inFlightUntil: [] };
+}
+
+/**
+ * Site-wide cap: 6 fresh analyses per minute and 2 in flight. A refusal does
+ * not add a timestamp. Callers revert this reservation when a later check fails.
+ */
+export function reserveGlobal(ledger: GlobalLedger, now: number): { ledger: GlobalLedger; decision: RateDecision } {
+  const next = pruneGlobal(structuredClone(ledger), now);
+  const flying = next.inFlightUntil.filter((until) => until > now);
+  if (flying.length >= GLOBAL_IN_FLIGHT) {
+    const retryAt = Math.min(...flying);
+    return {
+      ledger: next,
+      decision: { ok: false, code: "global_busy", retryAfter: secondsUntil(retryAt, now) },
+    };
+  }
+  if (next.recent.length >= GLOBAL_PER_MINUTE) {
+    const retryAt = (next.recent[0] ?? now) + GLOBAL_WINDOW_MS;
+    return {
+      ledger: next,
+      decision: { ok: false, code: "global_busy", retryAfter: secondsUntil(retryAt, now) },
+    };
+  }
+  next.recent.push(now);
+  next.inFlightUntil.push(now + IN_FLIGHT_MS);
+  return { ledger: next, decision: { ok: true, code: "ok", retryAfter: 0 } };
+}
+
+/** Drop the in-flight stamp taken at reservedAt. An expired stamp is already gone. */
+export function releaseGlobal(ledger: GlobalLedger, reservedAt: number, now: number): GlobalLedger {
+  const next = pruneGlobal(structuredClone(ledger), now);
+  removeOnce(next.inFlightUntil, reservedAt + IN_FLIGHT_MS);
+  return next;
+}
+
+/** Undo a reservation that a later per-IP or credit check refused. */
+export function revertGlobal(ledger: GlobalLedger, reservedAt: number): GlobalLedger {
+  const next = structuredClone(ledger);
+  removeOnce(next.recent, reservedAt);
+  removeOnce(next.inFlightUntil, reservedAt + IN_FLIGHT_MS);
+  return next;
+}
+
+/**
+ * Per-IP limiter key. IPv4 stays the full address. IPv6 shares one bucket per
+ * /64, which is the network a privacy address rotates inside. IPv4-mapped
+ * addresses use the embedded IPv4 so they share that client's bucket.
+ */
+export function clientLimitKey(ip: string): string {
+  let value = ip.trim().toLowerCase();
+  if (value.startsWith("[") && value.endsWith("]")) value = value.slice(1, -1);
+  const zone = value.indexOf("%");
+  if (zone >= 0) value = value.slice(0, zone);
+  if (!value) return "anonymous";
+  if (isIpv4(value)) return normaliseIpv4(value);
+  const groups = expandIpv6(value);
+  if (!groups) return value;
+  const mapped = ipv4FromMapped(groups);
+  if (mapped) return mapped;
+  return `${groups.slice(0, 4).join(":")}/64`;
+}
+
+function isIpv4(value: string): boolean {
+  const parts = value.split(".");
+  if (parts.length !== 4) return false;
+  return parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
+}
+
+function normaliseIpv4(value: string): string {
+  return value.split(".").map((part) => String(Number(part))).join(".");
+}
+
+function ipv4FromMapped(groups: string[]): string | null {
+  const mapped = groups.slice(0, 5).every((group) => group === "0000") && groups[5] === "ffff";
+  if (!mapped) return null;
+  const hi = Number.parseInt(groups[6] ?? "", 16);
+  const lo = Number.parseInt(groups[7] ?? "", 16);
+  if (!Number.isFinite(hi) || !Number.isFinite(lo)) return null;
+  return `${(hi >> 8) & 255}.${hi & 255}.${(lo >> 8) & 255}.${lo & 255}`;
+}
+
+function expandIpv6(value: string): string[] | null {
+  if (!value.includes(":")) return null;
+  const halves = value.split("::");
+  if (halves.length > 2) return null;
+  const head = parseIpv6Section(halves[0] ?? "");
+  if (!head) return null;
+  if (halves.length === 1) return head.length === 8 ? head : null;
+  const tail = parseIpv6Section(halves[1] ?? "");
+  if (!tail || head.length + tail.length > 8) return null;
+  const zeros = Array.from({ length: 8 - head.length - tail.length }, () => "0000");
+  return [...head, ...zeros, ...tail];
+}
+
+function parseIpv6Section(section: string): string[] | null {
+  if (!section) return [];
+  const parts = section.split(":");
+  const groups: string[] = [];
+  for (let i = 0; i < parts.length; i += 1) {
+    const part = parts[i] ?? "";
+    if (part.includes(".")) {
+      if (i !== parts.length - 1 || !isIpv4(part)) return null;
+      const [a, b, c, d] = part.split(".").map(Number);
+      groups.push(((a << 8) | b).toString(16).padStart(4, "0"));
+      groups.push(((c << 8) | d).toString(16).padStart(4, "0"));
+      continue;
+    }
+    if (!/^[0-9a-f]{1,4}$/.test(part)) return null;
+    groups.push(part.padStart(4, "0"));
+  }
+  return groups;
+}
+
+function pruneGlobal(ledger: GlobalLedger, now: number): GlobalLedger {
+  ledger.recent = ledger.recent.filter((hit) => now - hit < GLOBAL_WINDOW_MS);
+  ledger.inFlightUntil = ledger.inFlightUntil.filter((until) => until > now);
+  return ledger;
+}
+
 export function rateLimitMessage(code: RateCode, retryAfter: number, lang: "en" | "el"): string {
   const time = formatWait(retryAfter, lang);
+  if (code === "global_busy") {
+    return lang === "el"
+      ? `Η Αλήθεια είναι απασχολημένη με άλλες αναλύσεις. Δοκιμάστε ξανά σε ${time}.`
+      : `Aletheia is busy with other analyses. Try again in ${time}.`;
+  }
   if (code === "tavily_monthly") {
     return lang === "el"
       ? `Συμπληρώθηκε το μηνιαίο όριο. Δοκιμάστε ξανά τον επόμενο μήνα (${time}).`
