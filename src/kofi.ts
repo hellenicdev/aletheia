@@ -9,8 +9,21 @@ type KofiOverlay = {
 };
 
 export function kofiButtonText(lang: "en" | "el"): string {
-  return lang === "el" ? "Υποστήριξέ με" : "Support me";
+  // "Υποστήριξέ με" is wider than the widget's fixed iframe and paints a scrollbar.
+  return lang === "el" ? "Στήριξέ με" : "Support me";
 }
+
+/** Keeps the donate label on one line inside the widget iframe, without a scrollbar. */
+export const KOFI_BUTTON_FIT_CSS = [
+  "html, body { overflow: hidden !important; }",
+  ".floatingchat-donate-button {",
+  "  align-items: center !important;",
+  "  white-space: nowrap !important;",
+  "  max-width: 100% !important;",
+  "  box-sizing: border-box !important;",
+  "}",
+  ".floatingchat-donate-button span { white-space: nowrap !important; }",
+].join("\n");
 
 export function kofiFrameTitle(lang: "en" | "el"): string {
   return lang === "el" ? "Υποστήριξέ με στο Ko-fi" : "Support me on Ko-fi";
@@ -41,6 +54,16 @@ export function mountKofi(doc: Document = document, lang: "en" | "el" = "en"): v
   doc.body.append(script);
 }
 
+export function fitKofiFrame(frame: HTMLIFrameElement): void {
+  const inner = frame.contentDocument;
+  if (!inner?.head || inner.getElementById("aletheia-kofi-fit")) return;
+  const style = inner.createElement("style");
+  style.id = "aletheia-kofi-fit";
+  style.textContent = KOFI_BUTTON_FIT_CSS;
+  inner.head.append(style);
+  frame.setAttribute("scrolling", "no");
+}
+
 export function labelKofiFrames(doc: Document, lang: "en" | "el" = "en"): void {
   for (const frame of doc.querySelectorAll("iframe")) {
     if (!(frame instanceof HTMLIFrameElement)) continue;
@@ -50,8 +73,8 @@ export function labelKofiFrames(doc: Document, lang: "en" | "el" = "en"): void {
       frame.closest("[id^='kofi-widget-overlay']") !== null;
     if (!owned) continue;
     const title = kofiFrameTitle(lang);
-    if (frame.title === title) continue;
-    frame.title = title;
+    if (frame.title !== title) frame.title = title;
+    fitKofiFrame(frame);
   }
 }
 
