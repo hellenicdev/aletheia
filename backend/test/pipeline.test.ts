@@ -1539,6 +1539,62 @@ describe("analyze", () => {
     expect(queries.some((query) => /associated press/i.test(query))).toBe(true);
     expect(queries.some((query) => !/associated press/i.test(query) && /ensenada/i.test(query))).toBe(true);
   });
+
+  it("keeps True when the retrieved page uses the surname and a death synonym", async () => {
+    clearSearchCache();
+    const claim = "Emmanuel Macron said the driver was killed in the crash.";
+    const page = "https://www.reuters.com/world/europe/macron-crash";
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev/v2/search")) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            data: {
+              web: [
+                {
+                  url: page,
+                  title: "Macron on the crash",
+                  description: "Macron said the driver died in the crash outside Paris.",
+                },
+              ],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(classifyPayload(user, () => ({ claimType: "checkable_factual", note: "A recorded claim." })));
+      }
+      if (system.startsWith("TASK:queries")) {
+        return llmPayload({ queries: [{ id: "s1", query: "Macron driver killed crash" }] });
+      }
+      if (system.startsWith("TASK:verify")) {
+        const payload = JSON.parse(user) as { claims: { evidence: { url: string }[] }[] };
+        expect(payload.claims[0]?.evidence.map((item) => item.url)).toContain(page);
+        return llmPayload({
+          results: [
+            {
+              id: "s1",
+              label: "True",
+              confidence: 0.9,
+              explanation: "Reuters reports that Macron said the driver died in the crash.",
+              sourceUrls: [page],
+              sources: [{ url: page, relevant: true }],
+            },
+          ],
+        });
+      }
+      if (system.startsWith("TASK:consistency")) return llmPayload({ contradictions: [] });
+      throw new Error(system.slice(0, 24));
+    };
+    const result = await analyze({ text: claim, uiLanguage: "en" }, { env, fetchImpl });
+    expect(result.segments[0]?.label).toBe("True");
+    expect(result.segments[0]?.sources.map((source) => source.url)).toEqual([page]);
+  });
 });
 
 describe("handleRequest", () => {

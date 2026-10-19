@@ -121,18 +121,22 @@ export function isSyndicatedCopy(
   const lead = articleText.replace(/\s+/g, " ").trim().slice(0, 500);
   if (nearlyIdenticalTitle(ours, title)) return true;
   if (looseReprint(ours, title)) return true;
-  if (nearCopy(ours, snippet, 24, 40)) return true;
-  if (looseReprint(ours, snippet)) return true;
-  if (nearCopy(lead, title, 40, 24)) return true;
-  if (looseReprint(lead, title)) return true;
-  if (snippet.length >= 48 && lead.length >= 48) {
-    const window = snippet.slice(0, 64).toLowerCase();
-    if (lead.toLowerCase().includes(window.slice(0, 48))) return true;
+  // A one-sentence paste has no surrounding article to reprint. A page that
+  // restates that sentence is the evidence, not a syndicated copy.
+  if (!articleIsTheClaim(articleText, claimText)) {
+    if (nearCopy(ours, snippet, 24, 40)) return true;
+    if (looseReprint(ours, snippet)) return true;
+    if (nearCopy(lead, title, 40, 24)) return true;
+    if (looseReprint(lead, title)) return true;
+    if (snippet.length >= 48 && lead.length >= 48) {
+      const window = snippet.slice(0, 64).toLowerCase();
+      if (lead.toLowerCase().includes(window.slice(0, 48))) return true;
+    }
+    if (nearCopy(lead, snippet, 40, 40)) return true;
+    if (looseReprint(lead, snippet)) return true;
+    if (repeatsArticle(snippet, articleText, 8, claimText)) return true;
+    if (repeatsArticle(title, articleText, 8, claimText)) return true;
   }
-  if (nearCopy(lead, snippet, 40, 40)) return true;
-  if (looseReprint(lead, snippet)) return true;
-  if (repeatsArticle(snippet, articleText, 8, claimText)) return true;
-  if (repeatsArticle(title, articleText, 8, claimText)) return true;
   if (
     isKnownSyndicator(item.url) &&
     (repeatsArticle(snippet, articleText, 5, claimText) ||
@@ -203,6 +207,15 @@ function creditsSharedAgency(
   const host = (articleDomain ?? "").replace(/^www\./, "").toLowerCase();
   if (host.includes("kathimerini") || host.includes("amna")) return true;
   return GREEK_AGENCY.test(articleText.slice(0, 900));
+}
+
+function articleIsTheClaim(articleText: string, claimText: string): boolean {
+  const article = normalizeCopy(articleText);
+  const claim = normalizeCopy(claimText);
+  if (!article || !claim || claim.length < 24) return false;
+  if (!article.includes(claim) && tokenOverlap(article, claim) < 0.8) return false;
+  const outside = article.replace(claim, " ").replace(/\s+/g, " ").trim();
+  return outside.length < 48;
 }
 
 function normalizeCopy(text: string): string {
@@ -392,14 +405,52 @@ function containsWord(haystack: string, token: string): boolean {
   return new RegExp(`(?:^|[^\\p{L}\\p{N}])${escaped}(?:$|[^\\p{L}\\p{N}])`, "iu").test(haystack);
 }
 
-/** The most specific proper name in the claim. Empty when the claim names nobody. */
+/**
+ * Given names that are often longer than the surname. A page that says "Macron"
+ * or "Trump" is about that person even when it omits "Emmanuel" or "Donald".
+ */
+const GIVEN_NAMES = new Set([
+  "donald", "emmanuel", "volodymyr", "volodimir", "joseph", "christopher", "alexander",
+  "alexandra", "nicholas", "elizabeth", "jonathan", "sebastian", "theodore", "victoria",
+  "margaret", "patricia", "catherine", "christine", "stephanie", "jennifer", "rodrigo",
+  "vladimir", "benjamin", "αλέξανδρος", "βλαντίμιρ", "εμμανουήλ", "νικόλαος",
+]);
+
+/**
+ * A word matches a name token, including one extra letter such as a plural or
+ * Zelensky / Zelenskyy. Shorter tokens stay exact so "trump" is not "trumpet".
+ */
+function entityTokenIn(surface: string, token: string): boolean {
+  const haystack = surface.toLowerCase();
+  const needle = token.toLowerCase();
+  if (containsWord(haystack, needle)) return true;
+  if (needle.length < 6) return false;
+  const words = haystack.match(/[\p{L}\p{N}]+/gu) ?? [];
+  return words.some((word) => {
+    if (word === needle) return true;
+    const extra = Math.abs(word.length - needle.length);
+    if (extra < 1 || extra > 2) return false;
+    return word.startsWith(needle) || needle.startsWith(word);
+  });
+}
+
+/**
+ * Names the evidence must share. When the longest token is only a given name
+ * and a shorter surname or place remains, that shorter name is the key.
+ * Otherwise the longest token stays the key, so an off-topic page still drops.
+ */
 function keyEntityTokens(claim: string): string[] {
   const tokens = namedEntities(claim)
     .flatMap((entity) => entity.split(" "))
     .filter((token) => token.length >= 4 && !WORD_NUMBER[token]);
   if (tokens.length === 0) return [];
   const longest = Math.max(...tokens.map((token) => token.length));
-  return tokens.filter((token) => token.length === longest);
+  const longestTokens = tokens.filter((token) => token.length === longest);
+  const shorterDistinctive = tokens.filter((token) => token.length >= 5 && !GIVEN_NAMES.has(token) && token.length < longest);
+  if (longestTokens.every((token) => GIVEN_NAMES.has(token)) && shorterDistinctive.length > 0) {
+    return shorterDistinctive;
+  }
+  return longestTokens;
 }
 
 /**
@@ -419,12 +470,12 @@ export function isRelevantEvidence(
   if (claimTokens.size === 0) return false;
   const shared = [...claimTokens].filter((token) => tokenOverlaps(token, evidenceTokens));
   const keys = keyEntityTokens(claim);
-  if (keys.length > 0 && !keys.some((token) => containsWord(surface.toLowerCase(), token))) return false;
+  if (keys.length > 0 && !keys.some((token) => entityTokenIn(surface, token))) return false;
   const entities = namedEntities(claim);
   if (entities.length > 0) {
     const haystack = surface.toLowerCase();
     const entityHit = entities.some((entity) =>
-      entity.split(" ").some((token) => token.length >= 4 && containsWord(haystack, token)),
+      entity.split(" ").some((token) => token.length >= 4 && entityTokenIn(haystack, token)),
     );
     if (entityHit && shared.length > 0) return true;
     if (!entityHit && shared.length === 0 && !statisticalOverlap(claim, surface, shared)) return false;
@@ -502,9 +553,36 @@ export function missingSpecificDetail(
   if (contradictedCore(claim, surface)) return true;
   const surfaceLower = surface.toLowerCase();
   for (const match of claim.matchAll(MATERIAL_CONDITION)) {
-    if (!surfaceLower.includes(match[0].toLowerCase())) return true;
+    if (!conditionCovered(match[0], surfaceLower)) return true;
   }
   return false;
+}
+
+/** Same condition in different words. "Died" covers "killed"; "died" does not cover "drowned". */
+const CONDITION_GROUPS: string[][] = [
+  ["killed", "died", "dead", "death", "fatal"],
+  ["injured", "wounded", "injury", "injuries"],
+  ["hospitalized", "hospitalised", "in hospital", "to hospital"],
+  ["arrested", "in custody", "into custody"],
+  ["critical", "critically"],
+  ["drowned", "drowning"],
+  ["πέθαν", "νεκρ", "σκοτώ"],
+  ["τραυματ"],
+  ["κρίσιμ"],
+  ["πνίγηκ"],
+];
+
+function sameConditionWord(needle: string, word: string): boolean {
+  if (needle === word) return true;
+  return /[^\u0000-\u007f]/.test(word) && needle.startsWith(word);
+}
+
+function conditionCovered(match: string, surfaceLower: string): boolean {
+  const needle = match.toLowerCase();
+  if (surfaceLower.includes(needle)) return true;
+  const group = CONDITION_GROUPS.find((words) => words.some((word) => sameConditionWord(needle, word)));
+  if (!group) return false;
+  return group.some((word) => (word.length <= 5 ? containsWord(surfaceLower, word) : surfaceLower.includes(word)));
 }
 
 function quantitySpans(text: string): QuantitySpan[] {
@@ -701,10 +779,12 @@ export function applyEvidence(input: {
     const key = canonicalUrl(url);
     const item = byUrl.get(key);
     if (!item || seen.has(key)) continue;
+    const statesCore = isRelevantEvidence(input.claimText, item) && !missingSpecificDetail(input.claimText, [item]);
     if (
       input.relevance &&
       input.relevance[key] === false &&
-      !(isStatisticalClaim(input.claimText) && isRelevantEvidence(input.claimText, item))
+      !(isStatisticalClaim(input.claimText) && isRelevantEvidence(input.claimText, item)) &&
+      !statesCore
     ) {
       continue;
     }
