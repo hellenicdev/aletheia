@@ -575,6 +575,97 @@ describe("relevance and contradiction", () => {
     ).toBe(true);
   });
 
+  it("accepts a surname when the claim's longest token is a given name", () => {
+    const macron = "Emmanuel Macron signed the defence bill.";
+    const page = {
+      url: "https://www.reuters.com/world/europe/macron-bill",
+      title: "Macron signs defence bill",
+      snippet: "Macron signed the defence bill after the cabinet meeting, Reuters reported.",
+    };
+    expect(isRelevantEvidence(macron, page)).toBe(true);
+    expect(
+      isRelevantEvidence("Donald Trump signed the bill.", {
+        title: "Donald Tusk in Brussels",
+        snippet: "Donald Tusk visited Brussels for budget talks.",
+      }),
+    ).toBe(false);
+    const applied = applyEvidence({
+      label: "True",
+      confidence: 0.9,
+      explanation: "Reuters reports that Macron signed the bill.",
+      claimText: macron,
+      sourceUrls: [page.url],
+      evidence: [page],
+      searchEnabled: true,
+      uiLanguage: "en",
+    });
+    expect(applied.label).toBe("True");
+    expect(applied.sources).toHaveLength(1);
+
+    const zelensky = "Volodymyr Zelensky met allied leaders in Kyiv.";
+    expect(
+      isRelevantEvidence(zelensky, {
+        title: "Zelenskyy in Kyiv",
+        snippet: "Zelenskyy met allied leaders in Kyiv on Tuesday.",
+      }),
+    ).toBe(true);
+  });
+
+  it("treats died as killed and wounded as injured, and not died as drowned", () => {
+    const killed = "The driver was killed in the crash.";
+    const died = {
+      url: "https://apnews.com/article/crash",
+      title: "Fatal crash",
+      snippet: "The driver died in the crash, police said.",
+    };
+    expect(missingSpecificDetail(killed, [died])).toBe(false);
+    const applied = applyEvidence({
+      label: "True",
+      confidence: 0.88,
+      explanation: "Police said the driver died in the crash.",
+      claimText: killed,
+      sourceUrls: [died.url],
+      evidence: [died],
+      searchEnabled: true,
+      uiLanguage: "en",
+    });
+    expect(applied.label).toBe("True");
+
+    const injured = "Two passengers were injured.";
+    expect(
+      missingSpecificDetail(injured, [
+        { title: "Collision", snippet: "Two passengers were wounded and taken for treatment." },
+      ]),
+    ).toBe(false);
+    expect(
+      missingSpecificDetail("The sailor drowned after the boat capsized.", [
+        { title: "Capsized boat", snippet: "The sailor died after the boat capsized." },
+      ]),
+    ).toBe(true);
+  });
+
+  it("keeps a page the model marked irrelevant when that page states the core fact", () => {
+    const claim = "Emmanuel Macron signed the defence bill.";
+    const page = {
+      url: "https://www.reuters.com/world/europe/macron-bill",
+      title: "Macron signs defence bill",
+      snippet: "Macron signed the defence bill after the cabinet meeting.",
+    };
+    const applied = applyEvidence({
+      label: "True",
+      confidence: 0.84,
+      explanation: "The report says Macron signed the bill.",
+      claimText: claim,
+      sourceUrls: [page.url],
+      evidence: [page],
+      relevance: { [canonicalUrl(page.url)]: false },
+      searchEnabled: true,
+      uiLanguage: "en",
+    });
+    expect(applied.label).toBe("True");
+    expect(applied.sources).toHaveLength(1);
+  });
+
   it("drops an off-topic page and a page the verifier marked irrelevant", () => {
     const claim = "Disposable vapes will be banned across Britain next year.";
     expect(
@@ -750,6 +841,23 @@ describe("relevance and contradiction", () => {
 describe("syndicated copies", () => {
   const rescue =
     "Sixteen people were rescued from a panga 140 miles west of Ensenada after the vessel began taking on water in heavy seas.";
+
+  it("does not treat a paraphrase of a one-sentence paste as a reprint", () => {
+    const claim = "Emmanuel Macron said the driver was killed in the crash.";
+    expect(
+      isSyndicatedCopy(
+        {
+          url: "https://www.reuters.com/world/europe/macron-crash",
+          title: "Macron on the crash",
+          snippet: "Macron said the driver died in the crash outside Paris.",
+        },
+        null,
+        claim,
+        null,
+        claim,
+      ),
+    ).toBe(false);
+  });
 
   it("treats a republished paragraph as a copy, including on a known syndicator", () => {
     expect(

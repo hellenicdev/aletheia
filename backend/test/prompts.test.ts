@@ -12,6 +12,8 @@ describe("verify prompt", () => {
     expect(system).toContain("double quotes");
     expect(system).toContain("relevant");
     expect(system).toContain("percentage");
+    expect(system).toContain("surname");
+    expect(system).toContain("Do not use Unverifiable only because those words differ");
     expect(system).toContain("widely established facts");
     expect(segmentSystem("en")).toContain("personal anecdote");
     const user = verifyUser(
