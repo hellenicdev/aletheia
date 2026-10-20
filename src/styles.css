@@ -376,6 +376,14 @@ input::placeholder {
   overflow-wrap: anywhere;
 }
 
+.step-wait {
+  margin: 4px 0 0;
+  text-align: center;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
 .focal {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);

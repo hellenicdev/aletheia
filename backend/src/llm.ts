@@ -3,6 +3,7 @@ import { isBudgetExhausted } from "./budget";
 import type { AppConfig } from "./config";
 import { fetchSignal, isDeadline, raceAbort, readBody } from "./deadline";
 import { HttpError, UpstreamError, redactSecret } from "./errors";
+import { logEvent } from "./log";
 
 export interface ChatMessage {
   role: "system" | "user";
@@ -109,7 +110,11 @@ export async function completeJson<T>(options: {
     .filter(Boolean)
     .join("; ");
   const message = `The model returned invalid JSON after retries (${lastDetail}${where ? `; ${where}` : ""}).`;
-  console.error(`llm: ${message}${lastPreview ? ` preview=${JSON.stringify(lastPreview)}` : ""}`);
+  logEvent("llm_invalid_json", {
+    finishReason: lastReason,
+    field: lastField,
+    detail: lastDetail,
+  });
   throw new ModelOutputError(message, lastField, lastReason, lastPreview);
 }
 
@@ -176,7 +181,7 @@ export async function requestChat(
       /max_completion_tokens/i.test(safe) &&
       !flags.legacyMaxTokens
     ) {
-      console.error(`llm: HTTP ${response.status} ${safe}`);
+      logEvent("llm_retry", { status: response.status, reason: "max_completion_tokens" });
       return requestChat(options, messages, { ...flags, legacyMaxTokens: true });
     }
     if (
@@ -185,7 +190,7 @@ export async function requestChat(
       !flags.dropReasoningEffort &&
       Boolean(options.reasoningEffort)
     ) {
-      console.error(`llm: HTTP ${response.status} ${safe}`);
+      logEvent("llm_retry", { status: response.status, reason: "reasoning_effort" });
       return requestChat(options, messages, { ...flags, dropReasoningEffort: true });
     }
     if (
@@ -193,14 +198,14 @@ export async function requestChat(
       /response_format/i.test(safe) &&
       !flags.dropResponseFormat
     ) {
-      console.error(`llm: HTTP ${response.status} ${safe}`);
+      logEvent("llm_retry", { status: response.status, reason: "response_format" });
       return requestChat(options, messages, { ...flags, dropResponseFormat: true });
     }
     if (
       response.status === 400 &&
       ((/\bseed\b/i.test(safe) && !flags.dropSeed) || (/temperature/i.test(safe) && !flags.dropTemperature))
     ) {
-      console.error(`llm: HTTP ${response.status} ${safe}`);
+      logEvent("llm_retry", { status: response.status, reason: "sampling_params" });
       return requestChat(options, messages, {
         ...flags,
         dropSeed: flags.dropSeed || /\bseed\b/i.test(safe),
@@ -208,7 +213,7 @@ export async function requestChat(
       });
     }
     if (response.status === 401 || response.status === 403) {
-      console.error(`llm: HTTP ${response.status} ${safe}`);
+      logEvent("llm_failed", { status: response.status, reason: "rejected" });
       throw new HttpError(502, "The LLM API key was rejected.");
     }
     throw loggedUpstream("llm", response.status, safe, options.apiKey);
@@ -230,7 +235,7 @@ function loggedUpstream(
   secret: string,
 ): UpstreamError {
   const error = new UpstreamError(source, status, redactSecret(detail, secret));
-  console.error(error.message);
+  logEvent("llm_failed", { status: status ?? 0, reason: "upstream" });
   return error;
 }
 

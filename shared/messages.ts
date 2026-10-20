@@ -1,5 +1,23 @@
 import type { UiLanguage } from "./labels";
 
+export function analysisTimeoutMessage(lang: UiLanguage): string {
+  return lang === "el"
+    ? "Η ανάλυση έληξε πριν σταλεί ετυμηγορία. Δοκιμάστε ξανά."
+    : "The analysis timed out before a verdict could be sent. Try again.";
+}
+
+export function analysisInterruptedMessage(lang: UiLanguage): string {
+  return lang === "el"
+    ? "Η ανάλυση διακόπηκε πριν σταλεί ετυμηγορία. Δοκιμάστε ξανά."
+    : "The analysis was interrupted before a verdict could be sent. Try again.";
+}
+
+export function analysisFailedMessage(lang: UiLanguage): string {
+  return lang === "el"
+    ? "Η ανάλυση δεν ολοκληρώθηκε. Δοκιμάστε ξανά ή επικολλήστε το κείμενο."
+    : "The analysis could not be completed. Try again, or paste the article text.";
+}
+
 /** Shown when the page could not be scraped or fetched. Never names the provider status. */
 export function pageUnreadMessage(lang: UiLanguage): string {
   if (lang === "el") {

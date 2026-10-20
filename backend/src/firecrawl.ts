@@ -7,6 +7,7 @@ import { capOutbound, combineSignals, deadlineReached, fetchSignal, isDeadline, 
 import { currentPipelineCache, type ResultCache } from "./persistentCache";
 import { PIPELINE_VERSION } from "./version";
 import { HttpError, UpstreamError, redactSecret } from "./errors";
+import { logEvent } from "./log";
 import { LIMITS } from "./limits";
 import { assertPublicHttpUrl, isBlockedHost } from "./ssrf";
 import { clearTavilyCache } from "./tavily";
@@ -197,7 +198,7 @@ export async function searchWeb(options: {
     rememberProviderFailure(options.gate, response.status, text);
     const detail = options.gate?.block?.detail || text;
     const failure = new UpstreamError("search", response.status, redactSecret(detail, options.apiKey));
-    console.error(failure.message);
+    logEvent("search_failed", { provider: "firecrawl", status: response.status });
     throw failure;
   }
 
@@ -269,7 +270,7 @@ async function firecrawlPost(
     null,
     redactSecret(lastError instanceof Error ? lastError.message : "request failed", apiKey),
   );
-  console.error(failure.message);
+  logEvent("search_failed", { provider: "firecrawl", status: 0 });
   throw failure;
 }
 
