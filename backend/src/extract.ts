@@ -7,6 +7,7 @@ import { fetchSignal, isDeadline, raceAbort } from "./deadline";
 import { scrapeArticle, type CacheCharge, type ProviderGate } from "./firecrawl";
 import { LIMITS } from "./limits";
 import { HttpError } from "./errors";
+import { logEvent } from "./log";
 import { assertPublicHttpUrl } from "./ssrf";
 import { extractTavily, type TavilyGate } from "./tavily";
 
@@ -208,11 +209,11 @@ export async function fetchArticle(
         };
       }
       scrapeNote = "scrape returned no article text";
-      console.error(scrapeNote);
+      logEvent("extract_failed", { provider: "firecrawl", reason: "empty" });
     } catch (error) {
       if (isDeadline(error) || isBudgetExhausted(error)) throw error;
       scrapeNote = error instanceof Error ? error.message : "scrape failed";
-      console.error(scrapeNote);
+      logEvent("extract_failed", { provider: "firecrawl", reason: "rejected" });
     }
   }
 
@@ -260,17 +261,17 @@ export async function fetchArticle(
           opinionSection: looksLikeOpinionSection(extracted.finalUrl, extracted.title, text),
         };
       }
-      console.error("tavily extract returned no article text");
+      logEvent("extract_failed", { provider: "tavily", reason: "empty" });
     } catch (error) {
       if (isDeadline(error) || isBudgetExhausted(error)) throw error;
-      console.error(error instanceof Error ? error.message : "tavily extract failed");
+      logEvent("extract_failed", { provider: "tavily", reason: "rejected" });
     }
   }
 
   if (!key && !tavily && directError) throw directError;
   if (directError) {
     const reason = directFailureReason(directError, scrapeNote);
-    console.error(JSON.stringify({ extraction: "direct", directAttempted: true, reason }));
+    logEvent("extract_failed", { provider: "direct", reason: "unread" });
     throw new HttpError(422, pageUnreadMessage(uiLanguage), { extraction: "direct", reason });
   }
   throw new HttpError(422, pageUnreadMessage(uiLanguage));

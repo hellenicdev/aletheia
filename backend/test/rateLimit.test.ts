@@ -425,16 +425,65 @@ describe("analyze guards", () => {
     }
   });
 
+  it("hits a pre-warmed URL when the request adds tracking parameters", async () => {
+    let reserves = 0;
+    const limiter = {
+      idFromName: (name: string) => ({ toString: () => name }) as DurableObjectId,
+      get() {
+        return {
+          fetch: async () => {
+            reserves += 1;
+            return Response.json({ ok: true, code: "ok", retryAfter: 0 });
+          },
+        };
+      },
+    } as unknown as DurableObjectNamespace;
+    const cacheObject = new PipelineCache({ storage: sqliteStore() });
+    const page = "https://www.reuters.com/world/europe/story";
+    const tracked = "http://www.reuters.com/world/europe/story/?utm_source=demo&fbclid=abc";
+    const key = await cacheStorageKey(new Request(analysisCacheUrl(page)));
+    await cacheObject.fetch(
+      new Request("https://pipeline-cache.internal/put", {
+        method: "POST",
+        body: JSON.stringify({
+          key,
+          body: JSON.stringify({ article: { title: "Cached", text: "The council voted." } }),
+          ttl: 3_600,
+        }),
+      }),
+    );
+    try {
+      const response = await handleRequest(post({ url: tracked }), {
+        ...env,
+        IP_LIMITER: limiter,
+        TAVILY_CREDITS: limiter,
+        PIPELINE_CACHE: singleNamespace(cacheObject),
+      }, { now: () => 1_700_000_000_000 });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("x-aletheia-cache")).toBe("hit");
+      expect(await response.text()).toContain("Cached");
+      expect(reserves).toBe(0);
+    } finally {
+      bindPipelineCache(null);
+    }
+  });
+
   it("reports durable object bindings on the health check", async () => {
     clearProbeCache();
     const plain = await handleRequest(new Request("https://worker.test/api/health"), { OPENAI_API_KEY: "test-key" });
     const missing = (await plain.json()) as {
       limiter: string;
       pipelineVersion: string;
+      model: string;
+      searchProvider: string;
+      search: { active: string; note: string };
       bindings: { ipLimiter: boolean; tavilyCredits: boolean; pipelineCache: boolean };
     };
     expect(missing.limiter).toBe("missing");
     expect(missing.pipelineVersion).toBe(PIPELINE_VERSION);
+    expect(missing.searchProvider).toBe("none");
+    expect(missing.search.active).toBe("none");
+    expect(JSON.stringify(missing)).not.toContain("test-key");
     expect(missing.bindings).toEqual({ ipLimiter: false, tavilyCredits: false, pipelineCache: false });
 
     const { IP_LIMITER, TAVILY_CREDITS } = durableNamespaces();

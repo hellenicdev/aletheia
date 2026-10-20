@@ -1,6 +1,8 @@
 import type { AnalysisResult, ArticlePreview, StageName } from "../../shared/types";
 import { cacheApiAnalysisCache, type AnalysisCache } from "./analysisCache";
 import { PIPELINE_VERSION } from "./version";
+import { errorFields, logEvent } from "./log";
+import { searchReport } from "./searchReport";
 import { resolveConfig, type Env } from "./config";
 import { corsHeaders, jsonResponse } from "./cors";
 import { HttpError } from "./errors";
@@ -28,6 +30,7 @@ import {
 } from "./rateLimit";
 import { resolveFetch } from "./runtime";
 import { assertPublicHttpUrl } from "./ssrf";
+import { analysisFailedMessage, analysisInterruptedMessage, analysisTimeoutMessage } from "../../shared/messages";
 
 export { IpRateLimiter, PipelineCache, TavilyCredits };
 
@@ -82,12 +85,14 @@ export async function handleRequest(
   const path = url.pathname.replace(/\/$/, "") || "/";
 
   if (request.method === "GET" && path === "/api/health") {
-    const tavilyConfigured = Boolean(env.TAVILY_API_KEY?.trim());
+    const search = searchReport(env);
     const base = {
       searchConfigured: config.searchConfigured,
-      tavilyConfigured,
+      tavilyConfigured: search.tavily === "configured",
+      firecrawlConfigured: search.firecrawl === "configured",
       model: config.llmModel,
-      searchProvider: tavilyConfigured && !env.FIRECRAWL_API_KEY?.trim() ? "tavily" : "firecrawl",
+      searchProvider: search.active,
+      search,
       limiter: durableBindingsPresent(env) ? "durable-object" : "missing",
       bindings: {
         ipLimiter: Boolean(env.IP_LIMITER),
@@ -182,7 +187,7 @@ export async function handleRequest(
     try {
       allowed = (await edge.limit({ key })).success;
     } catch (error) {
-      console.error(error);
+      logEvent("edge_limit_failed", errorFields(error));
     }
     if (!allowed) return limitResponse("ip_burst", 60, lang, cors);
   }
@@ -195,7 +200,7 @@ export async function handleRequest(
   try {
     decision = await gate.reserve({ ip: key, now: now(), credits, dailyCreditCap, monthlyCreditCap });
   } catch (error) {
-    console.error(error);
+    logEvent("limiter_reserve_failed", errorFields(error));
     return jsonResponse({ error: limitStoreMessage(lang), code: "limiter_unavailable" }, 503, cors);
   }
   if (!decision.ok) return limitResponse(decision.code, decision.retryAfter, lang, cors);
@@ -204,7 +209,7 @@ export async function handleRequest(
   const encoder = new TextEncoder();
   const deadlineMs = deps.deadlineMs ?? LIMITS.analysisDeadlineMs;
   const abort = new AbortController();
-  const interruptedMessage = "The analysis was interrupted before a verdict could be sent.";
+  const interruptedMessage = analysisInterruptedMessage(lang);
   let heartbeat: ReturnType<typeof setTimeout> | undefined;
   let hardStop: ReturnType<typeof setTimeout> | undefined;
   let grace: ReturnType<typeof setTimeout> | undefined;
@@ -245,7 +250,9 @@ export async function handleRequest(
             terminal = true;
             try {
               controller.enqueue(
-                encoder.encode(`event: error\ndata: ${JSON.stringify({ message: interruptedMessage })}\n\n`),
+                encoder.encode(
+                  `event: error\ndata: ${JSON.stringify({ message: interruptedMessage, code: "interrupted" })}\n\n`,
+                ),
               );
             } catch {
               /* The client is already gone. */
@@ -253,7 +260,7 @@ export async function handleRequest(
           }
           rate.inFlight.count = Math.max(0, rate.inFlight.count - 1);
           const release = Promise.resolve(gate.release(key, now())).catch((error) => {
-            console.error(error);
+            logEvent("limiter_release_failed", errorFields(error));
           });
           try {
             deps.waitUntil?.(release);
@@ -276,7 +283,7 @@ export async function handleRequest(
         } catch {
           if (heartbeat) clearTimeout(heartbeat);
           abort.abort();
-          sendTerminal("error", { message: interruptedMessage });
+          sendTerminal("error", { message: interruptedMessage, code: "interrupted" });
           finish();
         }
       };
@@ -316,13 +323,13 @@ export async function handleRequest(
       });
 
       const task = (async () => {
-        const timeoutMessage = "The analysis timed out before a verdict could be sent.";
+        const timeoutMessage = analysisTimeoutMessage(lang);
         try {
           const winner = await Promise.race([work, deadline, aborted]);
           if (winner === "aborted") {
             abort.abort();
             void work.catch(() => undefined);
-            sendTerminal("error", { message: interruptedMessage });
+            sendTerminal("error", { message: interruptedMessage, code: "interrupted" });
           } else if (winner === "timeout") {
             abort.abort();
             const late = await Promise.race([
@@ -334,7 +341,7 @@ export async function handleRequest(
             if (late) {
               sendTerminal("result", late);
               rememberAnalysis(deps, analysisCache, input, lang, late);
-            } else sendTerminal("error", { message: timeoutMessage });
+            } else sendTerminal("error", { message: timeoutMessage, code: "timeout" });
           } else {
             sendTerminal("result", winner);
             rememberAnalysis(deps, analysisCache, input, lang, winner);
@@ -348,13 +355,22 @@ export async function handleRequest(
               ? timeoutMessage
               : error instanceof HttpError
                 ? error.message
-                : "The analysis could not be completed.";
-          if (!(error instanceof HttpError) && !timedOut && !request.signal.aborted) console.error(error);
+                : analysisFailedMessage(lang);
+          const code = request.signal.aborted
+            ? "interrupted"
+            : timedOut
+              ? "timeout"
+              : error instanceof HttpError
+                ? undefined
+                : "analysis_failed";
+          if (!(error instanceof HttpError) && !timedOut && !request.signal.aborted) {
+            logEvent("analysis_failed", errorFields(error));
+          }
           const late = request.signal.aborted ? null : await work.catch(() => null);
           if (late) {
             sendTerminal("result", late);
             rememberAnalysis(deps, analysisCache, input, lang, late);
-          } else sendTerminal("error", errorEvent(error, message));
+          } else sendTerminal("error", { ...errorEvent(error, message), ...(code ? { code } : {}) });
         } finally {
           await finish();
         }
@@ -492,7 +508,7 @@ function rememberAnalysis(
 
 function track(deps: HandlerDeps, promise: Promise<unknown>): void {
   const settled = promise.catch((error) => {
-    console.error(error);
+    logEvent("cache_write_failed", errorFields(error));
   });
   try {
     deps.waitUntil?.(settled);

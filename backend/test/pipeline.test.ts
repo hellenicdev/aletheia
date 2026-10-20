@@ -1716,6 +1716,7 @@ describe("handleRequest", () => {
       return (await response.json()) as {
         ok: boolean;
         tavilyConfigured: boolean;
+        searchProvider: string;
         probe: {
           firecrawl: { ok: boolean; status: number; reason?: string };
           tavily: { ok: boolean; status: number };
@@ -1724,6 +1725,7 @@ describe("handleRequest", () => {
     };
     const first = await probeAt(40_000);
     expect(first.tavilyConfigured).toBe(true);
+    expect(first.searchProvider).toBe("firecrawl-then-tavily");
     expect(first.ok).toBe(true);
     expect(first.probe.firecrawl).toMatchObject({ ok: false, status: 402, reason: "out_of_credits" });
     expect(first.probe.tavily).toMatchObject({ ok: true, status: 200 });

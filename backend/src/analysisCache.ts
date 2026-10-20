@@ -1,4 +1,3 @@
-import { canonicalUrl } from "../../shared/citations";
 import type { AnalysisResult } from "../../shared/types";
 import { currentPipelineCache, type ResultCache } from "./persistentCache";
 import { PIPELINE_VERSION } from "./version";
@@ -16,8 +15,63 @@ export function normaliseCachedText(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
+const TRACKING_PARAMS = new Set([
+  "fbclid",
+  "gclid",
+  "gclsrc",
+  "dclid",
+  "gbraid",
+  "wbraid",
+  "msclkid",
+  "yclid",
+  "twclid",
+  "ttclid",
+  "igshid",
+  "mc_cid",
+  "mc_eid",
+  "ref",
+  "ref_src",
+  "srsltid",
+  "si",
+  "spm",
+  "_ga",
+  "_gl",
+]);
+
+function isTrackingParam(key: string): boolean {
+  const name = key.toLowerCase();
+  return name.startsWith("utm_") || TRACKING_PARAMS.has(name);
+}
+
+/**
+ * Stable cache identity for the same article. A clean https URL matches the
+ * previous key, so an existing pipeline-version entry still hits. Tracking
+ * parameters, a trailing slash, and http are folded onto that key.
+ */
+export function normaliseAnalysisUrl(pageUrl: string): string {
+  try {
+    const parsed = new URL(pageUrl.trim());
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return pageUrl.trim();
+    if (parsed.protocol === "http:") parsed.protocol = "https:";
+    if (parsed.port === "80" || parsed.port === "443") parsed.port = "";
+    parsed.hash = "";
+    parsed.hostname = parsed.hostname.replace(/\.$/, "").toLowerCase();
+    if (parsed.pathname.length > 1) parsed.pathname = parsed.pathname.replace(/\/+$/, "");
+    const kept = [...parsed.searchParams.entries()]
+      .filter(([key]) => !isTrackingParam(key))
+      .sort((left, right) => (left[0] === right[0] ? left[1].localeCompare(right[1]) : left[0].localeCompare(right[0])));
+    parsed.search = "";
+    for (const [key, value] of kept) parsed.searchParams.append(key, value);
+    let serialized = parsed.toString();
+    if (serialized.endsWith("/")) serialized = serialized.slice(0, -1);
+    return serialized;
+  } catch {
+    return pageUrl.trim();
+  }
+}
+
 export function analysisCacheUrl(pageUrl: string): string {
-  return `https://cache.aletheia.internal/analysis/v${PIPELINE_VERSION}/${encodeURIComponent(canonicalUrl(pageUrl))}`;
+  return `https://cache.aletheia.internal/analysis/v${PIPELINE_VERSION}/${encodeURIComponent(normaliseAnalysisUrl(pageUrl))}`;
 }
 
 export async function textAnalysisCacheUrl(text: string, language: string): Promise<string> {

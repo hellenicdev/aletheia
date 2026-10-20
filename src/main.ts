@@ -13,7 +13,8 @@ import { LABELS, type UiLanguage } from "../shared/labels";
 import { partialClaimsNotice } from "../shared/messages";
 import type { AnalysisResult, SearchOutageReason, SegmentResult, StageName } from "../shared/types";
 import { CONSENT_STORAGE_KEY, grantAnalytics, injectGtag, readConsent, scheduleGtag, trackAnalyzeStarted, trackPageView } from "./analytics";
-import { AnalysisError, analyzeArticle, fetchHealth, STALL_MESSAGE } from "./api";
+import { AnalysisError, analyzeArticle, fetchHealth } from "./api";
+import { presentStreamError } from "./errorCopy";
 import { presentLimit } from "./limitCopy";
 import { detectedName, labelHelp, labelName, t, type MessageKey } from "./i18n";
 import { scheduleKofi } from "./kofi";
@@ -111,13 +112,13 @@ app.innerHTML = `
           <div id="panel-paste" role="tabpanel" aria-labelledby="tab-paste">
             <label class="field">
               <span data-i18n="articleLabel"></span>
-              <textarea id="article-text" data-i18n-placeholder="placeholderPaste" maxlength="12000" aria-describedby="char-count-label"></textarea>
+              <textarea id="article-text" data-i18n-placeholder="placeholderPaste" maxlength="12000" aria-describedby="char-count-label form-error"></textarea>
             </label>
           </div>
           <div id="panel-url" role="tabpanel" aria-labelledby="tab-url" hidden>
             <label class="field">
               <span data-i18n="urlLabel"></span>
-              <input id="article-url" type="url" inputmode="url" autocomplete="off" spellcheck="false" data-i18n-placeholder="placeholderUrl" />
+              <input id="article-url" type="url" inputmode="url" autocomplete="off" spellcheck="false" data-i18n-placeholder="placeholderUrl" aria-describedby="form-error" />
             </label>
           </div>
           <div class="composer-foot">
@@ -135,6 +136,7 @@ app.innerHTML = `
         <h2 id="stages-label" class="visually-hidden" data-i18n="stagesLabel"></h2>
         <ol class="stepper" id="stage-list"></ol>
         <p class="step-name" id="step-name" aria-live="polite"></p>
+        <p class="step-wait" id="step-wait"></p>
       </section>
       <details class="fold" id="extract-preview" hidden>
         <summary><span data-i18n="extracted"></span><span class="fold-aside" id="preview-title"></span></summary>
@@ -229,10 +231,15 @@ const gaugeNumber = $<HTMLElement>("#gauge-number");
 const gaugeStatus = $<HTMLElement>("#gauge-status");
 const newAnalysis = $<HTMLButtonElement>("#expand-button");
 let healthKind: "unknown" | "down" | "search" | "nosearch" = "unknown";
+let healthDetail = "";
+let elapsedTimer: ReturnType<typeof setInterval> | undefined;
+let elapsedStarted = 0;
 
 function renderHealth() {
   const node = $<HTMLElement>("#health");
   node.dataset.state = healthKind;
+  if (healthDetail) node.title = healthDetail;
+  else node.removeAttribute("title");
   if (healthKind === "unknown") {
     node.textContent = "";
     return;
@@ -380,31 +387,30 @@ function setMode(mode: "paste" | "url") {
 
 function showError(message: string | null, retryable = false) {
   errorBox.hidden = !message;
-  errorBox.textContent = message ? presentError(message) : "";
+  errorBox.textContent = message ?? "";
   retryButton.hidden = !message || !retryable;
+  const invalid = message ? "true" : "false";
+  textInput.setAttribute("aria-invalid", state.mode === "paste" ? invalid : "false");
+  urlInput.setAttribute("aria-invalid", state.mode === "url" ? invalid : "false");
+  if (message) {
+    errorBox.tabIndex = -1;
+    errorBox.focus();
+  }
 }
 
-function presentCaught(error: unknown): string {
+function presentCaught(error: unknown): { message: string; retryable: boolean } {
   if (error instanceof AnalysisError) {
     const limited = presentLimit(error, state.lang);
-    if (limited) return limited;
+    if (limited) return { message: limited, retryable: error.status === 503 };
+    const streamed = presentStreamError(error, state.lang);
+    if (streamed) return streamed;
   }
-  return error instanceof Error ? presentError(error.message) : t(state.lang, "errorEmpty");
-}
-
-function presentError(message: string): string {
-  if (/firecrawl scrape failed|could not be read|επικολλήστε το κείμενο του άρθρου/i.test(message)) {
-    return t(state.lang, "scrapeFailed");
+  if (error instanceof Error) {
+    const streamed = presentStreamError({ message: error.message }, state.lang);
+    if (streamed) return streamed;
+    return { message: error.message, retryable: false };
   }
-  if (message === STALL_MESSAGE) return t(state.lang, "errorStall");
-  return message;
-}
-
-function canRetry(message: string): boolean {
-  return (
-    message === STALL_MESSAGE ||
-    /ended without a result|interrupted before a verdict|timed out before a verdict/i.test(message)
-  );
+  return { message: t(state.lang, "errorFailed"), retryable: true };
 }
 
 function currentStages(): Record<StageName, StageState> {
@@ -420,6 +426,24 @@ const stageMemory: Record<StageName, StageState> = {
   verify: "pending",
   score: "pending",
 };
+
+function startElapsed() {
+  stopElapsed();
+  elapsedStarted = Date.now();
+  const paint = () => {
+    const seconds = Math.max(0, Math.floor((Date.now() - elapsedStarted) / 1000));
+    $<HTMLElement>("#step-wait").textContent = t(state.lang, "elapsedHint").replace("{n}", String(seconds));
+  };
+  paint();
+  elapsedTimer = setInterval(paint, 1000);
+}
+
+function stopElapsed() {
+  if (elapsedTimer) clearInterval(elapsedTimer);
+  elapsedTimer = undefined;
+  const node = app.querySelector<HTMLElement>("#step-wait");
+  if (node) node.textContent = "";
+}
 
 function resetStages() {
   for (const stage of STAGES) {
@@ -874,6 +898,7 @@ function showReport(result: AnalysisResult, sample: boolean) {
 }
 
 function returnToInput() {
+  stopElapsed();
   state.result = null;
   state.sample = false;
   state.running = false;
@@ -953,6 +978,8 @@ async function runAnalysis() {
   analyzeButton.textContent = t(state.lang, "analyzing");
   setPhase("running");
   resetStages();
+  setStage("ingest", "start");
+  startElapsed();
 
   try {
     const result = await analyzeArticle(
@@ -961,14 +988,16 @@ async function runAnalysis() {
       showPreview,
     );
     for (const stage of STAGES) stageMemory[stage] = "done";
+    stopElapsed();
     showReport(result, false);
   } catch (error) {
     state.running = false;
+    stopElapsed();
     analyzeButton.disabled = false;
     analyzeButton.textContent = t(state.lang, "analyze");
     setPhase("idle");
-    const message = presentCaught(error);
-    showError(message, canRetry(message));
+    const shown = presentCaught(error);
+    showError(shown.message, shown.retryable);
   }
 }
 
@@ -1049,6 +1078,7 @@ if ((params.get("lang") === "el" || params.get("lang") === "en") && aligned !== 
   if (consentChoice === "accepted") scheduleGtag();
   void fetchHealth().then((health) => {
     healthKind = !health ? "down" : health.searchConfigured ? "search" : "nosearch";
+    healthDetail = health ? [health.model, health.searchProvider].filter(Boolean).join(" · ") : "";
     renderHealth();
   });
   if (demo) void runSample(params.get("instant") === "1");

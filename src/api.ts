@@ -5,7 +5,15 @@ export interface Health {
   ok: boolean;
   searchConfigured: boolean;
   model: string;
+  /** `firecrawl`, `tavily`, `firecrawl-then-tavily`, or `none`. Config only, not a live probe. */
   searchProvider: string;
+  search?: {
+    firecrawl: "configured" | "absent";
+    tavily: "configured" | "absent";
+    order: string[];
+    active: string;
+    note: string;
+  };
 }
 
 export async function fetchHealth(): Promise<Health | null> {
@@ -76,7 +84,7 @@ export async function analyzeArticle(
   const decoder = new TextDecoder();
   let buffer = "";
   let result: AnalysisResult | null = null;
-  let failure: string | null = null;
+  let failure: { message: string; code?: string } | null = null;
 
   try {
     while (true) {
@@ -92,8 +100,11 @@ export async function analyzeArticle(
         if (parsed.event === "preview") onPreview?.(parsed.data as ArticlePreview);
         if (parsed.event === "result") result = parsed.data as AnalysisResult;
         if (parsed.event === "error") {
-          const data = parsed.data as { message?: string };
-          failure = data.message || "The analysis could not be completed.";
+          const data = parsed.data as { message?: string; code?: string };
+          failure = {
+            message: data.message || "The analysis could not be completed.",
+            code: typeof data.code === "string" ? data.code : undefined,
+          };
         }
       }
     }
@@ -102,7 +113,7 @@ export async function analyzeArticle(
     throw error;
   }
 
-  if (failure) throw new Error(failure);
+  if (failure) throw new AnalysisError(failure.message, { code: failure.code });
   if (!result) throw new Error("The analysis ended without a result.");
   return result;
 }

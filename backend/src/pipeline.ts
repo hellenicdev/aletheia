@@ -41,6 +41,7 @@ import type {
 import type { Env } from "./config";
 import { resolveConfig } from "./config";
 import { HttpError, UpstreamError } from "./errors";
+import { logEvent } from "./log";
 import { fetchArticle } from "./extract";
 import { createTavilyGate, searchTavily } from "./tavily";
 import { resolveFetch } from "./runtime";
@@ -1248,7 +1249,7 @@ function remember(warnings: string[], error: unknown, source: "llm" | "search") 
       : `${source}: ${error instanceof Error ? error.message : "request failed"}`;
   const warning = message.slice(0, 240);
   if (!warnings.includes(warning)) warnings.push(warning);
-  if (!(error instanceof UpstreamError)) console.error(warning);
+  if (!(error instanceof UpstreamError)) logEvent("pipeline_warning", { source, message: warning });
 }
 
 function validateContradictions(data: unknown, uiLanguage: UiLanguage): Contradiction[] {

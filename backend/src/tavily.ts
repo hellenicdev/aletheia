@@ -7,6 +7,7 @@ import { capOutbound, deadlineReached, fetchSignal, isDeadline, raceAbort, readB
 import { currentPipelineCache, type ResultCache } from "./persistentCache";
 import { PIPELINE_VERSION } from "./version";
 import { UpstreamError, redactSecret } from "./errors";
+import { logEvent } from "./log";
 
 const TAVILY_API = "https://api.tavily.com";
 
@@ -188,7 +189,7 @@ async function postTavily(
       null,
       redactSecret(error instanceof Error ? error.message : "request failed", apiKey),
     );
-    console.error(failure.message);
+    logEvent("search_failed", { provider: "tavily", status: 0 });
     throw failure;
   }
   if (!response.ok) {
@@ -196,7 +197,7 @@ async function postTavily(
     const detail = redactSecret(errorDetail(body) || body, apiKey);
     rememberTavilyFailure(gate, response.status, detail);
     const failure = new UpstreamError("tavily", response.status, detail);
-    console.error(failure.message);
+    logEvent("search_failed", { provider: "tavily", status: response.status });
     throw failure;
   }
   return readBody(response, signal, timeoutMs);

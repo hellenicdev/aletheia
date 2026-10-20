@@ -71,6 +71,8 @@ npx wrangler dev
 
 `src/config.ts` already points at `http://127.0.0.1:8787`.
 
+A meetup checklist (health check, cache pre-warm, and what to do when a limit hits) is in [DEMO.md](DEMO.md). Pre-warm is the only step that spends search credits, and it is marked.
+
 ## Secrets
 
 From `backend/`, log in once with `npx wrangler login`, then:
