@@ -5,10 +5,38 @@ import { PIPELINE_VERSION } from "./version";
 const TTL_SECONDS = 24 * 60 * 60;
 
 export interface AnalysisCache {
-  get(pageUrl: string): Promise<AnalysisResult | null>;
-  put(pageUrl: string, result: AnalysisResult): Promise<void>;
+  get(pageUrl: string, language?: string): Promise<AnalysisResult | null>;
+  put(pageUrl: string, result: AnalysisResult, language?: string): Promise<void>;
   getText?(text: string, language: string): Promise<AnalysisResult | null>;
   putText?(text: string, language: string, result: AnalysisResult): Promise<void>;
+}
+
+/**
+ * A transient provider failure must not be replayed for a day. An ok search is
+ * cached. A partial search is cached only when a cited source survived.
+ * Unavailable and out-of-credits results are not.
+ */
+export function shouldCacheAnalysis(result: {
+  segments: { sources: readonly unknown[] }[];
+  meta: { searchStatus: { state: string; reason: string | null } };
+}): boolean {
+  const { state, reason } = result.meta.searchStatus;
+  if (state === "unavailable" || reason === "out_of_credits") return false;
+  if (state === "ok") return true;
+  return result.segments.some((segment) => segment.sources.length > 0);
+}
+
+/** Writes a finished analysis when the search result is safe to replay. */
+export function storeAnalysis(
+  cache: AnalysisCache,
+  input: { url?: string; text?: string },
+  language: "en" | "el",
+  result: AnalysisResult,
+): Promise<void> | undefined {
+  if (!shouldCacheAnalysis(result)) return undefined;
+  if (input.url) return cache.put(input.url, result, language);
+  if (input.text && cache.putText) return cache.putText(input.text, language, result);
+  return undefined;
 }
 
 export function normaliseCachedText(text: string): string {
@@ -70,8 +98,10 @@ export function normaliseAnalysisUrl(pageUrl: string): string {
   }
 }
 
-export function analysisCacheUrl(pageUrl: string): string {
-  return `https://cache.aletheia.internal/analysis/v${PIPELINE_VERSION}/${encodeURIComponent(normaliseAnalysisUrl(pageUrl))}`;
+export function analysisCacheUrl(pageUrl: string, language = "en"): string {
+  const key = `https://cache.aletheia.internal/analysis/v${PIPELINE_VERSION}/${encodeURIComponent(normaliseAnalysisUrl(pageUrl))}`;
+  // English keeps the existing key so a pre-warm still hits. Greek is a suffix.
+  return language === "el" ? `${key}/el` : key;
 }
 
 export async function textAnalysisCacheUrl(text: string, language: string): Promise<string> {
@@ -84,22 +114,22 @@ export async function textAnalysisCacheUrl(text: string, language: string): Prom
 
 export function cacheApiAnalysisCache(): AnalysisCache {
   return {
-    async get(pageUrl) {
+    async get(pageUrl, language = "en") {
       const cache = workerCache();
       if (!cache) return null;
       try {
-        const hit = await cache.match(new Request(analysisCacheUrl(pageUrl)));
+        const hit = await cache.match(new Request(analysisCacheUrl(pageUrl, language)));
         if (!hit) return null;
         return (await hit.json()) as AnalysisResult;
       } catch {
         return null;
       }
     },
-    async put(pageUrl, result) {
+    async put(pageUrl, result, language = "en") {
       const cache = workerCache();
       if (!cache) return;
       await cache.put(
-        new Request(analysisCacheUrl(pageUrl)),
+        new Request(analysisCacheUrl(pageUrl, language)),
         new Response(JSON.stringify(result), {
           headers: { "Cache-Control": `public, max-age=${TTL_SECONDS}` },
         }),
