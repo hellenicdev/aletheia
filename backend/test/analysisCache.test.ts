@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { canonicalUrl } from "../../shared/citations";
-import { analysisCacheUrl, normaliseAnalysisUrl, normaliseCachedText, textAnalysisCacheUrl } from "../src/analysisCache";
+import {
+  analysisCacheUrl,
+  normaliseAnalysisUrl,
+  normaliseCachedText,
+  shouldCacheAnalysis,
+  storeAnalysis,
+  textAnalysisCacheUrl,
+  type AnalysisCache,
+} from "../src/analysisCache";
+import type { AnalysisResult } from "../../shared/types";
 import { PIPELINE_VERSION } from "../src/version";
 
 const clean = "https://www.reuters.com/world/europe/story";
@@ -41,6 +50,83 @@ describe("analysis cache key", () => {
     const greek = await textAnalysisCacheUrl(text, "el");
     expect(english).toBe(spaced);
     expect(greek).not.toBe(english);
-    expect(english).toContain(`/v${PIPELINE_VERSION}/`);
+    expect(english).toContain(`/text/en/`);
+    expect(greek).toContain(`/text/el/`);
+  });
+
+  it("keeps the English URL key and suffixes Greek", () => {
+    const english = analysisCacheUrl(clean, "en");
+    const greek = analysisCacheUrl(clean, "el");
+    expect(english).toBe(analysisCacheUrl(clean));
+    expect(english).toBe(
+      `https://cache.aletheia.internal/analysis/v${PIPELINE_VERSION}/${encodeURIComponent(clean)}`,
+    );
+    expect(greek).toBe(`${english}/el`);
+    expect(greek).not.toBe(english);
+  });
+});
+
+describe("analysis cache writes", () => {
+  const page = "https://example.com/story";
+
+  function recorded(): { cache: AnalysisCache; puts: string[] } {
+    const puts: string[] = [];
+    return {
+      puts,
+      cache: {
+        async get() {
+          return null;
+        },
+        async put(url, _result, language) {
+          puts.push(analysisCacheUrl(url, language));
+        },
+      },
+    };
+  }
+
+  function verdict(
+    status: { state: "ok" | "partial" | "unavailable"; reason: "out_of_credits" | "failed" | null },
+    sourced: boolean,
+  ): AnalysisResult {
+    return {
+      segments: [{ sources: sourced ? [{ url: "https://www.reuters.com/world/source" }] : [] }],
+      meta: { searchStatus: { ...status, provider: sourced ? ("tavily" as const) : null } },
+    } as AnalysisResult;
+  }
+
+  it("caches an ok result", async () => {
+    const { cache, puts } = recorded();
+    const result = verdict({ state: "ok", reason: null }, true);
+    expect(shouldCacheAnalysis(result)).toBe(true);
+    await storeAnalysis(cache, { url: page }, "en", result);
+    expect(puts).toEqual([analysisCacheUrl(page, "en")]);
+  });
+
+  it("does not cache an unavailable result", async () => {
+    const { cache, puts } = recorded();
+    const result = verdict({ state: "unavailable", reason: "failed" }, false);
+    expect(shouldCacheAnalysis(result)).toBe(false);
+    await storeAnalysis(cache, { url: page }, "en", result);
+    expect(puts).toEqual([]);
+  });
+
+  it("does not cache an out_of_credits result", async () => {
+    const { cache, puts } = recorded();
+    const missed = verdict({ state: "unavailable", reason: "out_of_credits" }, false);
+    const partial = verdict({ state: "partial", reason: "out_of_credits" }, true);
+    expect(shouldCacheAnalysis(missed)).toBe(false);
+    expect(shouldCacheAnalysis(partial)).toBe(false);
+    await storeAnalysis(cache, { url: page }, "en", missed);
+    await storeAnalysis(cache, { url: page }, "en", partial);
+    expect(puts).toEqual([]);
+  });
+
+  it("caches a partial search that still cites a source", async () => {
+    const { cache, puts } = recorded();
+    const result = verdict({ state: "partial", reason: "failed" }, true);
+    expect(shouldCacheAnalysis(result)).toBe(true);
+    await storeAnalysis(cache, { url: page }, "en", result);
+    expect(puts).toEqual([analysisCacheUrl(page)]);
+    expect(shouldCacheAnalysis(verdict({ state: "partial", reason: "failed" }, false))).toBe(false);
   });
 });

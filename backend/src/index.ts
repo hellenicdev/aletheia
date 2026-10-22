@@ -1,5 +1,5 @@
 import type { AnalysisResult, ArticlePreview, StageName } from "../../shared/types";
-import { cacheApiAnalysisCache, type AnalysisCache } from "./analysisCache";
+import { cacheApiAnalysisCache, storeAnalysis, type AnalysisCache } from "./analysisCache";
 import { PIPELINE_VERSION } from "./version";
 import { errorFields, logEvent } from "./log";
 import { searchReport } from "./searchReport";
@@ -162,7 +162,7 @@ export async function handleRequest(
   if (env.PIPELINE_CACHE) bindDurableCaches(env.PIPELINE_CACHE);
   const analysisCache = deps.analysisCache ?? cacheApiAnalysisCache();
   if (input.url) {
-    const cached = await analysisCache.get(input.url);
+    const cached = await analysisCache.get(input.url, lang);
     if (cached) return streamResponse(cors, (send) => send("result", cached), "hit");
   } else if (input.text && analysisCache.getText) {
     const cached = await analysisCache.getText(input.text, lang);
@@ -499,11 +499,8 @@ function rememberAnalysis(
   language: "en" | "el",
   result: AnalysisResult,
 ): void {
-  if (input.url) {
-    track(deps, analysisCache.put(input.url, result));
-    return;
-  }
-  if (input.text && analysisCache.putText) track(deps, analysisCache.putText(input.text, language, result));
+  const pending = storeAnalysis(analysisCache, input, language, result);
+  if (pending) track(deps, pending);
 }
 
 function track(deps: HandlerDeps, promise: Promise<unknown>): void {
