@@ -21,6 +21,18 @@ export interface Env {
    * this unset so a missing Durable Object binding is a 503, not an in-memory limit.
    */
   ALLOW_MEMORY_LIMITER?: string;
+  /** "true" turns the X mention cron on. Anything else, including "false", is off. */
+  X_BOT_ENABLED?: string;
+  /** Fresh analyses the bot may start per UTC day. 0 answers from the URL cache only. */
+  X_BOT_DAILY_CAP?: string;
+  X_BOT_PER_USER_DAILY?: string;
+  X_BOT_MAX_REPLIES_DAILY?: string;
+  X_BOT_USER_ID?: string;
+  X_BOT_HANDLE?: string;
+  X_API_KEY?: string;
+  X_API_SECRET?: string;
+  X_ACCESS_TOKEN?: string;
+  X_ACCESS_SECRET?: string;
 }
 
 export interface AppConfig {

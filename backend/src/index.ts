@@ -31,6 +31,7 @@ import {
 import { resolveFetch } from "./runtime";
 import { assertPublicHttpUrl } from "./ssrf";
 import { analysisFailedMessage, analysisInterruptedMessage, analysisTimeoutMessage } from "../../shared/messages";
+import { runXBot } from "./xBot";
 
 export { IpRateLimiter, PipelineCache, TavilyCredits };
 
@@ -113,6 +114,10 @@ export async function handleRequest(
     const limiter = await probeDurableObjects(env);
     const searchUp = probe.firecrawl.ok || probe.tavily.ok;
     return jsonResponse({ ok: probe.llm.ok && searchUp, ...base, probe: { ...probe, limiter } }, 200, cors);
+  }
+
+  if (request.method === "GET" && path === "/api/cached") {
+    return cachedLookup(url, env, cors, deps);
   }
 
   if (path !== "/api/analyze") {
@@ -535,10 +540,33 @@ function clientKey(request: Request): string {
   );
 }
 
+async function cachedLookup(url: URL, env: Env, cors: Headers, deps: HandlerDeps): Promise<Response> {
+  const page = url.searchParams.get("url")?.trim() ?? "";
+  const lang = url.searchParams.get("lang") === "el" ? "el" : "en";
+  try {
+    assertPublicHttpUrl(page);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "That address cannot be fetched.";
+    return jsonResponse({ error: message }, 400, cors);
+  }
+  if (env.PIPELINE_CACHE) bindDurableCaches(env.PIPELINE_CACHE);
+  const cache = deps.analysisCache ?? cacheApiAnalysisCache();
+  const hit = await cache.get(page, lang);
+  if (!hit) return jsonResponse({ cached: false }, 200, cors);
+  return jsonResponse({ cached: true, result: hit }, 200, cors);
+}
+
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     return handleRequest(request, env, {
       waitUntil: (promise) => ctx.waitUntil(promise),
     });
+  },
+  scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): void {
+    ctx.waitUntil(
+      runXBot(env).catch((error) => {
+        logEvent("x_bot_failed", errorFields(error));
+      }),
+    );
   },
 };

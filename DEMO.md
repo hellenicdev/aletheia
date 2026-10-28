@@ -71,6 +71,22 @@ The page shows a sentence in the current language. It does not show raw JSON. Re
 
 A run often takes 17–44 seconds. The progress row shows the current stage and an elapsed-time line so a quiet search does not look frozen.
 
+## X mention bot (off)
+
+The cron is deployed and disabled. Leave `X_BOT_ENABLED` as `"false"` for the meetup. While it is false, or while any X secret or `X_BOT_USER_ID` / `X_BOT_HANDLE` is empty, the job makes **no** X API calls.
+
+To turn it on later, after X has approved an AI reply bot in writing:
+
+1. Create the bot account and turn on the Automated account label.
+2. In the X developer portal, open the `@hellenicdev` app named `hellenicdev-aletheia`.
+3. From the **bot** account, authorise that app with Read and write, and copy that account's access token and secret. Do not use a personal token.
+4. Set `X_API_KEY`, `X_API_SECRET`, `X_ACCESS_TOKEN`, and `X_ACCESS_SECRET` as worker secrets. Set `X_BOT_USER_ID` and `X_BOT_HANDLE` as vars.
+5. Put a spending limit on the X pay-per-use credits.
+6. Keep `X_BOT_DAILY_CAP` at `0` until a cache-only rehearsal looks right. At `0` the bot replies only when the article URL is already in the analysis cache (no search). A higher cap **spends search credits** on misses and shares the site's Tavily daily and monthly limits.
+7. Set `X_BOT_ENABLED` to `"true"`.
+
+`stop` or `σταμάτα` adds that account to the denylist and confirms once. A mention with no article link gets no reply. The full report link is `https://hellenicdev.eu/aletheia/?url=` (or `/el/?url=`). If that URL is not cached, the page only prefills it.
+
 ## 5. Fallback that spends nothing
 
 **Sample report** is the safe last resort. It is fixture data, labelled as such, and needs no API.

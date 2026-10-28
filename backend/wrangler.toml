@@ -16,6 +16,17 @@ RATE_LIMIT_WINDOW_SEC = "600"
 # refused when the next reservation would pass either cap.
 TAVILY_DAILY_CREDITS = "120"
 TAVILY_MONTHLY_CREDITS = "950"
+# The mention cron is installed but does nothing until X_BOT_ENABLED is "true"
+# and the X secrets below are set. Cap 0 still allows cache-hit replies only.
+X_BOT_ENABLED = "false"
+X_BOT_DAILY_CAP = "0"
+X_BOT_PER_USER_DAILY = "3"
+X_BOT_MAX_REPLIES_DAILY = "30"
+X_BOT_USER_ID = ""
+X_BOT_HANDLE = ""
+
+[triggers]
+crons = ["*/2 * * * *"]
 
 # The binding's period can only be 10 or 60 seconds, so this is a 3-per-minute
 # edge guard. Its key is the IPv4 address or the IPv6 /64. The 10-minute, daily,
@@ -24,7 +35,9 @@ TAVILY_MONTHLY_CREDITS = "950"
 # global Durable Object. The result cache is a third. All three are top-level:
 # this worker has no [env.*] target, and Workers Builds deploys the top-level config.
 # The site-wide cap is stored on TavilyCredits so this file does not add a
-# migration. `wrangler versions upload` rejects a pending migration.
+# migration. The X bot cursor, reply ids, per-user counts, and denylist use
+# the same object (storage key `xbot`). `wrangler versions upload` rejects a
+# pending migration.
 [[ratelimits]]
 name = "ANALYZE_IP"
 namespace_id = "1001"

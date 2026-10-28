@@ -125,6 +125,7 @@ export class TavilyCredits {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname.endsWith("/xbot")) return this.xbot(request);
     if (request.method === "GET") {
       await this.ctx.storage.get("book");
       return Response.json({ ok: true });
@@ -159,6 +160,22 @@ export class TavilyCredits {
     });
     if (!decision) throw new Error("The Tavily credit ledger is missing SQLite storage.");
     return Response.json(decision);
+  }
+
+  /** Bot cursor and denylist. A separate key from the credit book, same object. */
+  private async xbot(request: Request): Promise<Response> {
+    if (request.method === "GET") {
+      const state = (await this.ctx.storage.get("xbot")) ?? null;
+      return Response.json({ ok: true, state });
+    }
+    const body = (await request.json()) as { state?: unknown };
+    if (!body.state || typeof body.state !== "object") return new Response("missing", { status: 400 });
+    const synced = runSync(this.ctx.storage, (io) => {
+      io.put("xbot", body.state);
+      return true;
+    });
+    if (!synced) await this.ctx.storage.put("xbot", body.state);
+    return Response.json({ ok: true });
   }
 }
 
