@@ -13,11 +13,12 @@ import { LABELS, type UiLanguage } from "../shared/labels";
 import { partialClaimsNotice } from "../shared/messages";
 import type { AnalysisResult, SearchOutageReason, SegmentResult, StageName } from "../shared/types";
 import { CONSENT_STORAGE_KEY, grantAnalytics, injectGtag, readConsent, scheduleGtag, trackAnalyzeStarted, trackPageView } from "./analytics";
-import { AnalysisError, analyzeArticle, fetchHealth } from "./api";
+import { AnalysisError, analyzeArticle, fetchCachedAnalysis, fetchHealth } from "./api";
 import { presentStreamError } from "./errorCopy";
 import { presentLimit } from "./limitCopy";
 import { detectedName, labelHelp, labelName, t, type MessageKey } from "./i18n";
 import { scheduleKofi } from "./kofi";
+import { presetArticleUrl } from "./presetUrl";
 import { appBaseFromPath, documentMeta, languageUrl, pageLangFromSearch, siteBase } from "./seo";
 import { CLAIM_LIMIT, joinNotice, parseFilter, presentLabels, visibleClaims, type ClaimFilter } from "./resultsView";
 import { buildSample } from "./sample";
@@ -1081,7 +1082,14 @@ if ((params.get("lang") === "el" || params.get("lang") === "en") && aligned !== 
     healthDetail = health ? [health.model, health.searchProvider].filter(Boolean).join(" · ") : "";
     renderHealth();
   });
-  if (demo) void runSample(params.get("instant") === "1");
+  const preset = presetArticleUrl(location.search);
+  if (preset) {
+    setMode("url");
+    urlInput.value = preset;
+    void fetchCachedAnalysis(preset, state.lang).then((cached) => {
+      if (cached) showReport(cached, false);
+    });
+  } else if (demo) void runSample(params.get("instant") === "1");
 }
 
 function storedConsent(): "accepted" | "declined" | null {

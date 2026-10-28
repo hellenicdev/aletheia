@@ -16,6 +16,20 @@ export interface Health {
   };
 }
 
+/** Cache read only. A miss is null and does not start an analysis. */
+export async function fetchCachedAnalysis(url: string, lang: "en" | "el"): Promise<AnalysisResult | null> {
+  try {
+    const params = new URLSearchParams({ url, lang });
+    const response = await fetch(`${trimSlash(BACKEND_URL)}/api/cached?${params.toString()}`);
+    if (!response.ok) return null;
+    const body = (await response.json()) as { cached?: boolean; result?: AnalysisResult };
+    if (!body.cached || !body.result) return null;
+    return body.result;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchHealth(): Promise<Health | null> {
   try {
     const response = await fetch(`${trimSlash(BACKEND_URL)}/api/health`);
