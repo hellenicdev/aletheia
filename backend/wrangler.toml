@@ -22,8 +22,8 @@ X_BOT_ENABLED = "false"
 X_BOT_DAILY_CAP = "0"
 X_BOT_PER_USER_DAILY = "3"
 X_BOT_MAX_REPLIES_DAILY = "30"
-X_BOT_USER_ID = ""
-X_BOT_HANDLE = ""
+X_BOT_USER_ID = "2115409689869475840"
+X_BOT_HANDLE = "aletheia_bot"
 
 [triggers]
 crons = ["*/2 * * * *"]
