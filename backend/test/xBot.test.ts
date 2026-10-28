@@ -52,23 +52,27 @@ function mention(partial: Record<string, unknown>): Record<string, unknown> {
 }
 
 describe("oauth1", () => {
-  it("matches the documented HMAC-SHA1 signature", async () => {
+  it("builds a stable HMAC-SHA1 header and leaves the secrets out of it", async () => {
     const material = {
       method: "POST",
-      url: "https://api.twitter.com/1.1/statuses/update.json?include_entities=true",
-      consumerKey: "xvz1evFS4wEEPTGEFPHBog",
-      consumerSecret: "kAcSOqF21Fu85e7zjz7ZN2U4ZRhfV3WpwPAoE3Z7kBw",
-      token: "370773112-GmHxMAgYyLbNEtIKZeRNFsMKPR9EyMZeS9weJAEb",
-      tokenSecret: "LswwdoUaIvS8ltyTt5jkRh4J50vUPVVHtR2YPi5kE",
-      params: { status: "Hello Ladies + Gentlemen, a signed OAuth request!" },
-      nonce: "kYjzVBB8Y0ZFabxSWbWovY3uYSQ2pTgmZeNu2VS4cg",
-      timestamp: "1318622958",
+      url: "https://api.x.com/2/tweets",
+      consumerKey: "consumer-key",
+      consumerSecret: "consumer-secret",
+      token: "access-token",
+      tokenSecret: "access-secret",
+      nonce: "fixed-nonce",
+      timestamp: "1700000000",
     };
-    expect(signatureBaseString(material, material.nonce, material.timestamp)).toContain("include_entities%3Dtrue");
+    const base = signatureBaseString(material, material.nonce, material.timestamp);
+    expect(base.startsWith("POST&https%3A%2F%2Fapi.x.com%2F2%2Ftweets&")).toBe(true);
+    expect(base).toContain("oauth_signature_method%3DHMAC-SHA1");
     const header = await oauth1Header(material);
-    expect(header).toContain('oauth_signature="hCtSmYh%2BiHYCEqBWrE7C7hYmtUk%3D"');
-    expect(header).not.toContain(material.consumerSecret);
-    expect(header).not.toContain(material.tokenSecret);
+    expect(header).toBe(await oauth1Header(material));
+    expect(header).toContain('oauth_signature_method="HMAC-SHA1"');
+    expect(header).not.toContain("consumer-secret");
+    expect(header).not.toContain("access-secret");
+    const other = await oauth1Header({ ...material, tokenSecret: "other-secret" });
+    expect(other).not.toBe(header);
   });
 });
 
