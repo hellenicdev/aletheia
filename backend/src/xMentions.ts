@@ -40,8 +40,27 @@ export function isRetweet(post: XPost): boolean {
   return references(post).some((item) => item.type === "retweeted");
 }
 
+const OPT_OUT_COMMANDS = new Set(["stop", "unsubscribe", "σταμάτα"]);
+
+/**
+ * Mention text with @handles, URLs, and whitespace removed, lowercased.
+ * An opt-out or opt-in must be the whole remainder, not a word inside a sentence.
+ */
+export function commandText(post: XPost): string {
+  return postText(post)
+    .replace(/@[A-Za-z0-9_]+/g, "")
+    .replace(/https?:\/\/\S+/gi, "")
+    .replace(/\s+/g, "")
+    .normalize("NFC")
+    .toLowerCase();
+}
+
 export function isStop(post: XPost): boolean {
-  return /\bstop\b/i.test(postText(post)) || postText(post).toLowerCase().includes("σταμάτα");
+  return OPT_OUT_COMMANDS.has(commandText(post));
+}
+
+export function isStart(post: XPost): boolean {
+  return commandText(post) === "start";
 }
 
 export function replyLanguage(post: XPost): "en" | "el" {
