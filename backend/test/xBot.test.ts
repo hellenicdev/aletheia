@@ -4,9 +4,9 @@ import type { AnalysisResult } from "../../shared/types";
 import { handleRequest } from "../src/index";
 import { TavilyCredits } from "../src/rateLimiter";
 import { runXBot, xBotReady, type XBotDeps } from "../src/xBot";
-import { articleLink, indexIncludes, type MentionPage } from "../src/xMentions";
+import { articleLink, commandText, indexIncludes, isStart, isStop, type MentionPage, type XPost } from "../src/xMentions";
 import { oauth1Header, signatureBaseString } from "../src/xOauth";
-import { formatMentionReply, weightedLength } from "../src/xReply";
+import { clipMentionText, formatMentionReply, optOutFooter, reportUrl, stopReply, weightedLength } from "../src/xReply";
 import { emptyXBot } from "../src/xState";
 import type { Env } from "../src/config";
 import type { AnalysisCache } from "../src/analysisCache";
@@ -113,11 +113,29 @@ describe("reply length", () => {
     const longUrl = `https://www.example.com/${"a".repeat(180)}?q=${"b".repeat(80)}`;
     for (const lang of ["en", "el"] as const) {
       const text = formatMentionReply(worst, longUrl, lang);
+      const link = reportUrl(longUrl, lang);
       expect(weightedLength(text)).toBeLessThanOrEqual(280);
-      expect(text).toContain(lang === "el" ? "/aletheia/el/?url=" : "/aletheia/?url=");
+      expect(text).toContain(link);
+      expect(text.endsWith(optOutFooter(lang))).toBe(true);
       expect(text).toContain("100/100");
     }
     expect(weightedLength(`see ${longUrl}`)).toBeLessThan(40);
+  });
+
+  it("truncates the summary and keeps the footer and report link", () => {
+    const longUrl = `https://www.example.com/${"a".repeat(180)}?q=${"b".repeat(80)}`;
+    const link = reportUrl(longUrl, "en");
+    const footer = optOutFooter("en");
+    const tail = `Full report: ${link}\n${footer}`;
+    const summary = `Aletheia: 100/100, Mostly reliable. ${"9 true, ".repeat(80)}`;
+    const text = clipMentionText(summary, tail);
+    expect(weightedLength(text)).toBeLessThanOrEqual(280);
+    expect(text.endsWith(footer)).toBe(true);
+    expect(text).toContain(link);
+    expect(text).toContain("100/100");
+    expect(text.length).toBeLessThan(summary.length);
+    expect(weightedLength(stopReply("en"))).toBeLessThanOrEqual(280);
+    expect(weightedLength(stopReply("el"))).toBeLessThanOrEqual(280);
   });
 });
 
@@ -156,6 +174,8 @@ describe("x mention bot", () => {
       expect(body.reply.in_reply_to_tweet_id).toBe("100");
       expect(body.text).toContain("62/100");
       expect(body.text).toContain("5 true");
+      expect(body.text.endsWith(optOutFooter("en"))).toBe(true);
+      expect(weightedLength(body.text)).toBeLessThanOrEqual(280);
       return Response.json({ data: { id: "200" } });
     };
     const next = await runXBot(ready, { fetchImpl, cache, state, now: () => Date.UTC(2026, 9, 22), analyze: async () => { throw new Error("analyzed"); } });
@@ -218,15 +238,20 @@ describe("x mention bot", () => {
 
   it("confirms stop once and then ignores that author", async () => {
     const texts: string[] = [];
+    const targets: string[] = [];
     const state = emptyXBot(1);
+    const optOut: string[] = [];
     const fetchImpl: typeof fetch = async (input, init) => {
       if ((init?.method ?? "GET") === "POST") {
-        texts.push(JSON.parse(String(init?.body)).text as string);
+        const body = JSON.parse(String(init?.body)) as { text: string; reply: { in_reply_to_tweet_id: string } };
+        texts.push(body.text);
+        targets.push(body.reply.in_reply_to_tweet_id);
         return Response.json({ data: { id: "1" } });
       }
       return Response.json({
         data: [
           mention({ id: "4", text: "@aletheia https://apnews.com/again", entities: { urls: [{ expanded_url: "https://apnews.com/again" }] } }),
+          mention({ id: "5", lang: "el", text: "@aletheia σταμάτα" }),
           mention({ id: "3", lang: "el", text: "@aletheia σταμάτα" }),
         ],
       });
@@ -234,12 +259,127 @@ describe("x mention bot", () => {
     const next = await runXBot(ready, {
       fetchImpl,
       state,
+      optOut,
       now: () => 1,
-      cache: { async get() { return report(); }, async put() {} },
+      cache: { async get() { throw new Error("cache"); }, async put() { throw new Error("put"); } },
       analyze: async () => { throw new Error("analyzed"); },
     });
-    expect(texts).toEqual(["Εντάξει. Η Αλήθεια δεν θα σας απαντήσει ξανά."]);
-    expect(next?.denylist).toContain("7");
+    expect(texts).toEqual([stopReply("el")]);
+    expect(targets).toEqual(["3"]);
+    expect(optOut).toEqual(["7"]);
+    expect(next?.denylist).toEqual([]);
+    expect(next?.fresh).toBe(0);
+    expect(next?.replies).toBe(1);
+  });
+
+  it("skips an opted-out author before analysis, replies, credits, and caps", async () => {
+    const optOut = ["7"];
+    const state = emptyXBot(1);
+    let posts = 0;
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      if ((init?.method ?? "GET") === "POST") posts += 1;
+      return Response.json({
+        data: [mention({ id: "50", text: "@aletheia check https://apnews.com/a", entities: { urls: [{ expanded_url: "https://apnews.com/a" }] } })],
+      });
+    };
+    const next = await runXBot({ ...ready, X_BOT_DAILY_CAP: "5" }, {
+      fetchImpl,
+      state,
+      optOut,
+      now: () => 1,
+      cache: { async get() { throw new Error("cache"); }, async put() { throw new Error("put"); } },
+      analyze: async () => { throw new Error("analyzed"); },
+      gate: {
+        async reserve() { throw new Error("reserve"); },
+        async release() { throw new Error("release"); },
+      },
+    });
+    expect(posts).toBe(0);
+    expect(optOut).toEqual(["7"]);
+    expect(next?.fresh).toBe(0);
+    expect(next?.replies).toBe(0);
+    expect(next?.users).toEqual({});
+    expect(next?.replied).toContain("50");
+  });
+
+  it("drops the opt-out when the author replies start", async () => {
+    const optOut = ["7"];
+    const state = { ...emptyXBot(1), denylist: ["7"] };
+    const replies: string[] = [];
+    let analyzed = 0;
+    let reserved = 0;
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      if ((init?.method ?? "GET") === "POST") {
+        replies.push((JSON.parse(String(init?.body)) as { reply: { in_reply_to_tweet_id: string } }).reply.in_reply_to_tweet_id);
+        return Response.json({ data: { id: "1" } });
+      }
+      return Response.json({
+        data: [
+          mention({ id: "62", text: "@aletheia https://apnews.com/back", entities: { urls: [{ expanded_url: "https://apnews.com/back" }] } }),
+          mention({ id: "61", text: "@aletheia   start  " }),
+        ],
+      });
+    };
+    const next = await runXBot({ ...ready, X_BOT_DAILY_CAP: "2" }, {
+      fetchImpl,
+      state,
+      optOut,
+      now: () => 1,
+      cache: { async get() { return null; }, async put() {} },
+      analyze: async () => {
+        analyzed += 1;
+        return report();
+      },
+      gate: {
+        async reserve() {
+          reserved += 1;
+          return { ok: true, code: "ok", retryAfter: 0 };
+        },
+        async release() {},
+      },
+    });
+    expect(optOut).toEqual([]);
+    expect(next?.denylist).toEqual([]);
+    expect(analyzed).toBe(1);
+    expect(reserved).toBe(1);
+    expect(replies).toEqual(["62"]);
+    expect(next?.fresh).toBe(1);
+  });
+
+  it("records stop without sending when the daily reply cap is spent", async () => {
+    const optOut: string[] = [];
+    const state = { ...emptyXBot(1), replies: 30 };
+    let posts = 0;
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      if ((init?.method ?? "GET") === "POST") posts += 1;
+      return Response.json({ data: [mention({ id: "70", text: "@aletheia stop https://apnews.com/a", entities: { urls: [{ expanded_url: "https://apnews.com/a" }] } })] });
+    };
+    const next = await runXBot(ready, {
+      fetchImpl,
+      state,
+      optOut,
+      now: () => 1,
+      cache: { async get() { throw new Error("cache"); }, async put() { throw new Error("put"); } },
+      analyze: async () => { throw new Error("analyzed"); },
+    });
+    expect(posts).toBe(0);
+    expect(optOut).toEqual(["7"]);
+    expect(next?.replies).toBe(30);
+    expect(next?.fresh).toBe(0);
+  });
+
+  it("sends nothing when the bot is disabled", async () => {
+    let calls = 0;
+    const optOut = ["7"];
+    const fetchImpl: typeof fetch = async () => {
+      calls += 1;
+      throw new Error("x called");
+    };
+    const state = emptyXBot(1);
+    const next = await runXBot({ ...ready, X_BOT_ENABLED: "false" }, { fetchImpl, optOut, state });
+    expect(next).toBe(state);
+    expect(calls).toBe(0);
+    expect(optOut).toEqual(["7"]);
   });
 
   it("does not reply to itself, a retweet, a post without the handle, or a repeated url", async () => {
@@ -319,6 +459,19 @@ describe("cached lookup", () => {
   });
 });
 
+describe("opt-out commands", () => {
+  it("matches stop, unsubscribe, and σταμάτα only after mentions, urls, and whitespace are gone", () => {
+    const post = (text: string): XPost => mention({ text }) as XPost;
+    expect(commandText(post("@Aletheia  STOP  https://t.co/abc"))).toBe("stop");
+    expect(isStop(post("@someone @aletheia unsubscribe"))).toBe(true);
+    expect(isStop(post("@aletheia\nΣταμάτα"))).toBe(true);
+    expect(isStop(post("@aletheia please stop"))).toBe(false);
+    expect(isStop(post("@aletheia stopping by https://apnews.com/a"))).toBe(false);
+    expect(isStart(post("@aletheia start"))).toBe(true);
+    expect(isStart(post("@aletheia start now"))).toBe(false);
+  });
+});
+
 describe("xbot durable object key", () => {
   it("stores the cursor beside the credit book", async () => {
     const map = new Map<string, unknown>();
@@ -344,5 +497,133 @@ describe("xbot durable object key", () => {
     const body = (await loaded.json()) as { state: { sinceId: string } };
     expect(body.state.sinceId).toBe("77");
     expect(map.has("book")).toBe(false);
+    const rejected = await credits.fetch(new Request("https://credits.internal/xbot-optout", { method: "POST", body: JSON.stringify({}) }));
+    expect(rejected.status).toBe(400);
+    const savedOpt = await credits.fetch(new Request("https://credits.internal/xbot-optout", {
+      method: "POST",
+      body: JSON.stringify({ ids: ["7", "7", "8"] }),
+    }));
+    expect(savedOpt.status).toBe(200);
+    const loadedOpt = await credits.fetch(new Request("https://credits.internal/xbot-optout"));
+    expect(await loadedOpt.json()).toEqual({ ok: true, ids: ["7", "8"] });
+    expect(map.get("xbot_optout")).toEqual(["7", "8"]);
+    expect(map.has("book")).toBe(false);
+    const cursor = map.get("xbot") as { sinceId: string };
+    expect(cursor.sinceId).toBe("77");
+  });
+
+  it("persists stop on xbot_optout, skips that account, and lets start undo it", async () => {
+    const map = new Map<string, unknown>();
+    const credits = new TavilyCredits({ storage: sqliteStore(map) });
+    const env = { ...ready, X_BOT_DAILY_CAP: "2", TAVILY_CREDITS: bindCredits(credits) };
+    let phase = "stop";
+    const replies: { text: string; to: string }[] = [];
+    let analyzed = 0;
+    let reserved = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if ((init?.method ?? "GET") === "POST") {
+        const body = JSON.parse(String(init?.body)) as { text: string; reply: { in_reply_to_tweet_id: string } };
+        replies.push({ text: body.text, to: body.reply.in_reply_to_tweet_id });
+        return Response.json({ data: { id: "r" } });
+      }
+      if (!url.includes("/mentions")) throw new Error(`unexpected ${url}`);
+      if (phase === "stop") {
+        return Response.json({
+          data: [mention({
+            id: "30",
+            text: "@aletheia unsubscribe https://apnews.com/nope",
+            entities: { urls: [{ expanded_url: "https://apnews.com/nope" }] },
+          })],
+        });
+      }
+      if (phase === "skip") {
+        return Response.json({
+          data: [mention({ id: "31", text: "@aletheia https://apnews.com/later", entities: { urls: [{ expanded_url: "https://apnews.com/later" }] } })],
+        });
+      }
+      return Response.json({
+        data: [
+          mention({ id: "33", text: "@aletheia https://apnews.com/back", entities: { urls: [{ expanded_url: "https://apnews.com/back" }] } }),
+          mention({ id: "32", text: "@aletheia start" }),
+        ],
+      });
+    };
+    const deps = {
+      fetchImpl,
+      now: () => 1,
+      cache: {
+        async get() {
+          return null;
+        },
+        async put() {},
+      },
+      analyze: async () => {
+        analyzed += 1;
+        return report();
+      },
+      gate: {
+        async reserve() {
+          reserved += 1;
+          return { ok: true as const, code: "ok" as const, retryAfter: 0 };
+        },
+        async release() {},
+      },
+    };
+    const stopped = await runXBot(env, deps);
+    expect(replies).toEqual([{ text: stopReply("en"), to: "30" }]);
+    expect(map.get("xbot_optout")).toEqual(["7"]);
+    expect((map.get("xbot") as { denylist: string[] }).denylist).toEqual([]);
+    expect(analyzed).toBe(0);
+    expect(reserved).toBe(0);
+    expect(stopped?.replies).toBe(1);
+    expect(stopped?.fresh).toBe(0);
+
+    phase = "skip";
+    replies.length = 0;
+    const skipped = await runXBot(env, deps);
+    expect(replies).toEqual([]);
+    expect(analyzed).toBe(0);
+    expect(reserved).toBe(0);
+    expect(skipped?.fresh).toBe(0);
+    expect(skipped?.replies).toBe(1);
+    expect(map.get("xbot_optout")).toEqual(["7"]);
+
+    phase = "start";
+    const resumed = await runXBot(env, deps);
+    expect(map.get("xbot_optout")).toEqual([]);
+    expect(analyzed).toBe(1);
+    expect(reserved).toBe(1);
+    expect(replies).toEqual([{ text: expect.stringContaining("62/100"), to: "33" }]);
+    expect(replies[0]?.text.endsWith(optOutFooter("en"))).toBe(true);
+    expect(resumed?.fresh).toBe(1);
+    expect(map.has("book")).toBe(false);
   });
 });
+
+function sqliteStore(map: Map<string, unknown>) {
+  const kv = {
+    get<T>(key: string) { return map.get(key) as T | undefined; },
+    put<T>(key: string, value: T) { map.set(key, value); },
+    delete(key: string) { map.delete(key); return true; },
+  };
+  return {
+    kv,
+    transactionSync<T>(run: () => T) { return run(); },
+    async get<T>(key: string) { return kv.get<T>(key); },
+    async put<T>(key: string, value: T) { kv.put(key, value); },
+    async delete(key: string) { return kv.delete(key); },
+    async transaction<T>(run: (txn: unknown) => Promise<T>) { return run(this); },
+  };
+}
+
+function bindCredits(object: { fetch(request: Request): Promise<Response> }): NonNullable<Env["TAVILY_CREDITS"]> {
+  return {
+    idFromName: (name: string) => ({ toString: () => name }),
+    get() {
+      return {
+        fetch: (input: RequestInfo | URL, init?: RequestInit) => object.fetch(new Request(input, init)),
+      };
+    },
+  } as unknown as NonNullable<Env["TAVILY_CREDITS"]>;
+}

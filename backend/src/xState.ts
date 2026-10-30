@@ -11,6 +11,7 @@ export interface XBotState {
   replied: string[];
   answered: Record<string, string[]>;
   users: Record<string, XUserCount>;
+  /** Legacy opt-outs saved before the `xbot_optout` key. Still skipped. `start` clears an id. */
   denylist: string[];
   day: string;
   fresh: number;

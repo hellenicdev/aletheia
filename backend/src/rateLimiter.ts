@@ -125,6 +125,7 @@ export class TavilyCredits {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname.endsWith("/xbot-optout")) return this.xbotOptOut(request);
     if (url.pathname.endsWith("/xbot")) return this.xbot(request);
     if (request.method === "GET") {
       await this.ctx.storage.get("book");
@@ -162,7 +163,7 @@ export class TavilyCredits {
     return Response.json(decision);
   }
 
-  /** Bot cursor and denylist. A separate key from the credit book, same object. */
+  /** Bot cursor. A separate key from the credit book and from `xbot_optout`. */
   private async xbot(request: Request): Promise<Response> {
     if (request.method === "GET") {
       const state = (await this.ctx.storage.get("xbot")) ?? null;
@@ -177,6 +178,36 @@ export class TavilyCredits {
     if (!synced) await this.ctx.storage.put("xbot", body.state);
     return Response.json({ ok: true });
   }
+
+  /** Account ids that asked the mention bot to stop. Same object, key `xbot_optout`. */
+  private async xbotOptOut(request: Request): Promise<Response> {
+    if (request.method === "GET") {
+      const ids = (await this.ctx.storage.get<string[]>("xbot_optout")) ?? [];
+      return Response.json({ ok: true, ids });
+    }
+    const body = (await request.json()) as { ids?: unknown };
+    if (!Array.isArray(body.ids) || body.ids.some((id) => typeof id !== "string")) {
+      return new Response("missing", { status: 400 });
+    }
+    const ids = uniqueIds(body.ids);
+    const synced = runSync(this.ctx.storage, (io) => {
+      io.put("xbot_optout", ids);
+      return true;
+    });
+    if (!synced) await this.ctx.storage.put("xbot_optout", ids);
+    return Response.json({ ok: true });
+  }
+}
+
+function uniqueIds(ids: string[]): string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const id of ids) {
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    unique.push(id);
+  }
+  return unique;
 }
 
 interface CacheRow {

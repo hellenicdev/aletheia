@@ -85,7 +85,7 @@ To turn it on later, after X has approved an AI reply bot in writing:
 6. Keep `X_BOT_DAILY_CAP` at `0` until a cache-only rehearsal looks right. At `0` the bot replies only when the article URL is already in the analysis cache (no search). A higher cap **spends search credits** on misses and shares the site's Tavily daily and monthly limits.
 7. Set `X_BOT_ENABLED` to `"true"`.
 
-`stop` or `σταμάτα` adds that account to the denylist and confirms once. A mention with no article link gets no reply. The full report link is `https://hellenicdev.eu/aletheia/?url=` (or `/el/?url=`). If that URL is not cached, the page only prefills it.
+`stop`, `unsubscribe`, or `σταμάτα` (alone, after the @mention and any link) stores that account under `xbot_optout` and confirms once. `start` removes it. Opted-out accounts get no reply and no analysis. A mention with no article link gets no reply. The full report link is `https://hellenicdev.eu/aletheia/?url=` (or `/el/?url=`). If that URL is not cached, the page only prefills it. Replies include a short automated-check line.
 
 ## 5. Fallback that spends nothing
 

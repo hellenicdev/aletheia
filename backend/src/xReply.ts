@@ -61,27 +61,69 @@ export function reportUrl(articleUrl: string, lang: "en" | "el"): string {
   return `${base}?url=${encodeURIComponent(articleUrl)}`;
 }
 
+const FOOTER = {
+  en: "Automated AI fact-check · reply stop to opt out",
+  el: "Αυτόματος έλεγχος AI · απάντησε σταμάτα για εξαίρεση",
+} as const;
+
+export function optOutFooter(lang: "en" | "el"): string {
+  return FOOTER[lang];
+}
+
 export function formatMentionReply(result: AnalysisResult, articleUrl: string, lang: "en" | "el"): string {
   const present = LABELS.filter((label) => (result.score.counts[label] ?? 0) > 0);
   const note = needsNote(result);
+  const tail = replyTail(articleUrl, lang);
   let shown = present;
   let withNote = note;
-  let text = compose(result, articleUrl, lang, shown, withNote);
-  while (weightedLength(text) > 280 && shown.length > 1) {
+  let withAuto = true;
+  let summary = summaryText(result, lang, shown, withNote, withAuto);
+  let text = joinReply(summary, tail);
+  while (weightedLength(text) > 280 && shown.length > 0) {
     shown = shown.slice(0, -1);
-    text = compose(result, articleUrl, lang, shown, withNote);
+    summary = summaryText(result, lang, shown, withNote, withAuto);
+    text = joinReply(summary, tail);
   }
   if (weightedLength(text) > 280 && withNote) {
     withNote = false;
-    text = compose(result, articleUrl, lang, shown, withNote);
+    summary = summaryText(result, lang, shown, withNote, withAuto);
+    text = joinReply(summary, tail);
   }
+  if (weightedLength(text) > 280 && withAuto) {
+    withAuto = false;
+    summary = summaryText(result, lang, shown, withNote, withAuto);
+    text = joinReply(summary, tail);
+  }
+  if (weightedLength(text) > 280) text = clipMentionText(summary, tail);
   return text;
+}
+
+/** Shortens the summary. The tail (report link and footer) is kept whole. */
+export function clipMentionText(summary: string, tail: string, limit = 280): string {
+  const fits = (body: string) => weightedLength(body) <= limit;
+  if (fits(joinReply(summary, tail))) return joinReply(summary, tail);
+  const chars = [...summary];
+  let low = 0;
+  let high = chars.length;
+  let best = tail;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    const cut = chars.slice(0, mid).join("").trimEnd();
+    const candidate = cut ? `${cut}…\n${tail}` : tail;
+    if (fits(candidate)) {
+      best = candidate;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return best;
 }
 
 export function stopReply(lang: "en" | "el"): string {
   return lang === "el"
-    ? "Εντάξει. Η Αλήθεια δεν θα σας απαντήσει ξανά."
-    : "Understood. Aletheia will not reply to you again.";
+    ? "Έγινε, δεν θα απαντήσω ξανά. Απάντησε start για αναίρεση."
+    : "Done, I won't reply to you again. Reply start to undo.";
 }
 
 function needsNote(result: AnalysisResult): boolean {
@@ -99,12 +141,21 @@ function band(score: number, lang: "en" | "el"): string {
   return "Weak";
 }
 
-function compose(
+function replyTail(articleUrl: string, lang: "en" | "el"): string {
+  const report = lang === "el" ? "Πλήρης αναφορά" : "Full report";
+  return `${report}: ${reportUrl(articleUrl, lang)}\n${FOOTER[lang]}`;
+}
+
+function joinReply(summary: string, tail: string): string {
+  return summary ? `${summary}\n${tail}` : tail;
+}
+
+function summaryText(
   result: AnalysisResult,
-  articleUrl: string,
   lang: "en" | "el",
   labels: Label[],
   note: boolean,
+  auto: boolean,
 ): string {
   const names = lang === "el" ? EL_LABEL : EN_LABEL;
   const total = LABELS.reduce((sum, label) => sum + (result.score.counts[label] ?? 0), 0);
@@ -114,9 +165,9 @@ function compose(
       ? `${total} ισχυρισμοί${parts.length ? `: ${parts.join(", ")}` : ""}`
       : `${total} claims${parts.length ? `: ${parts.join(", ")}` : ""}`;
   const caution = lang === "el" ? "Προσωρινό." : "Provisional.";
-  const auto = lang === "el" ? "Αυτόματος έλεγχος, μπορεί να πέσει έξω." : "Automated check, may be wrong.";
-  const report = lang === "el" ? "Πλήρης αναφορά" : "Full report";
+  const autoLine = lang === "el" ? "Αυτόματος έλεγχος, μπορεί να πέσει έξω." : "Automated check, may be wrong.";
   const head = `Aletheia: ${result.score.overall}/100, ${band(result.score.overall, lang)}. ${claims}.`;
   const middle = note ? ` ${caution}` : "";
-  return `${head}${middle} ${auto} ${report}: ${reportUrl(articleUrl, lang)}`;
+  const end = auto ? ` ${autoLine}` : "";
+  return `${head}${middle}${end}`.trim();
 }

@@ -10,7 +10,7 @@ import {
   type RateGate,
 } from "./rateLimit";
 import { analyze as runAnalyze, type AnalyzeDeps, type AnalyzeInput } from "./pipeline";
-import { articleLink, indexIncludes, isRetweet, isStop, mentionsHandle, replyLanguage, type MentionPage, type XPost } from "./xMentions";
+import { articleLink, indexIncludes, isRetweet, isStart, isStop, mentionsHandle, replyLanguage, type MentionPage, type XPost } from "./xMentions";
 import { oauth1Header } from "./xOauth";
 import { formatMentionReply, stopReply } from "./xReply";
 import { emptyXBot, laterId, rememberId, rollXBot, type XBotState } from "./xState";
@@ -26,6 +26,8 @@ export interface XBotDeps {
   cache?: AnalysisCache;
   /** Test hook. Production reads and writes the TavilyCredits object. */
   state?: XBotState;
+  /** Test hook for the `xbot_optout` set. Production uses the Durable Object. */
+  optOut?: string[];
 }
 
 export function xBotReady(env: Env): boolean {
@@ -44,6 +46,7 @@ export async function runXBot(env: Env, deps: XBotDeps = {}): Promise<XBotState 
     await saveState(env, state, deps.state);
     return state;
   }
+  let optOut = await loadOptOut(env, deps.optOut);
   if (env.PIPELINE_CACHE) bindDurableCaches(env.PIPELINE_CACHE);
   const cache = deps.cache ?? cacheApiAnalysisCache();
   let page: MentionPage;
@@ -67,11 +70,13 @@ export async function runXBot(env: Env, deps: XBotDeps = {}): Promise<XBotState 
   for (const post of posts) {
     state = rollXBot(state, now());
     if (state.rateLimitUntil > now()) break;
-    const outcome = await handleMention(env, deps, cache, state, post, included, caps, fetchImpl, now());
+    const outcome = await handleMention(env, deps, cache, state, optOut, post, included, caps, fetchImpl, now());
     state = outcome.state;
+    optOut = outcome.optOut;
     if (outcome.stop) break;
   }
   await saveState(env, state, deps.state);
+  await saveOptOut(env, optOut, deps.optOut);
   return state;
 }
 
@@ -94,57 +99,52 @@ async function handleMention(
   deps: XBotDeps,
   cache: AnalysisCache,
   state: XBotState,
+  optOut: string[],
   post: XPost,
   included: Map<string, XPost>,
   caps: Caps,
   fetchImpl: typeof fetch,
   now: number,
-): Promise<{ state: XBotState; stop: boolean }> {
+): Promise<{ state: XBotState; stop: boolean; optOut: string[] }> {
   const handle = env.X_BOT_HANDLE?.trim() ?? "";
   const botId = env.X_BOT_USER_ID?.trim() ?? "";
-  if (!post.id || state.replied.includes(post.id)) return { state, stop: false };
+  const keep = (next: XBotState, stop = false, ids = optOut) => ({ state: next, stop, optOut: ids });
+  if (!post.id || state.replied.includes(post.id)) return keep(state);
   const seen = (next: XBotState): XBotState => ({
     ...next,
     replied: rememberId(next.replied, post.id),
     sinceId: laterId(next.sinceId, post.id),
   });
-  if (post.author_id && post.author_id === botId) return { state: seen(state), stop: false };
-  if (isRetweet(post) || !mentionsHandle(post, handle)) return { state: seen(state), stop: false };
-  const author = post.author_id ?? "anonymous";
-  if (state.denylist.includes(author)) return { state: seen(state), stop: false };
+  if (post.author_id && post.author_id === botId) return keep(seen(state));
+  if (isRetweet(post) || !mentionsHandle(post, handle)) return keep(seen(state));
+  const authorId = post.author_id?.trim() ?? "";
+  const author = authorId || "anonymous";
   const lang = replyLanguage(post);
-  if (isStop(post)) {
-    if (state.replies >= caps.replies || userCount(state, author, now) >= caps.perUser) {
-      return { state: seen(state), stop: false };
-    }
-    const posted = await postReply(env, post.id, stopReply(lang), fetchImpl);
-    if (posted.limitedUntil) return { state: { ...state, rateLimitUntil: posted.limitedUntil }, stop: true };
-    if (!posted.ok) return { state: seen(state), stop: false };
-    return {
-      state: seen({
-        ...state,
-        denylist: state.denylist.includes(author) ? state.denylist : [...state.denylist, author],
-        replies: state.replies + 1,
-        users: bumpUser(state, author, now),
-      }),
-      stop: false,
-    };
+  if (isStop(post)) return recordOptOut(env, state, optOut, post, authorId, lang, caps, fetchImpl, now);
+  if (isStart(post)) {
+    if (!authorId) return keep(seen(state));
+    return keep(
+      seen({ ...state, denylist: state.denylist.filter((id) => id !== authorId) }),
+      false,
+      optOut.filter((id) => id !== authorId),
+    );
   }
+  if ((authorId && optOut.includes(authorId)) || state.denylist.includes(author)) return keep(seen(state));
   const link = articleLink(post, included);
-  if (!link) return { state: seen(state), stop: false };
+  if (!link) return keep(seen(state));
   const normalised = normaliseAnalysisUrl(link);
   const conversation = post.conversation_id ?? post.id;
-  if ((state.answered[conversation] ?? []).includes(normalised)) return { state: seen(state), stop: false };
+  if ((state.answered[conversation] ?? []).includes(normalised)) return keep(seen(state));
   if (state.replies >= caps.replies || userCount(state, author, now) >= caps.perUser) {
-    return { state: seen(state), stop: false };
+    return keep(seen(state));
   }
   const cached = await cache.get(link, lang);
   let result = cached;
   if (!result) {
-    if (state.fresh >= caps.fresh) return { state: seen(state), stop: false };
+    if (state.fresh >= caps.fresh) return keep(seen(state));
     const reserved = await reserveFresh(env, deps, author, now);
-    if (reserved === "retry") return { state, stop: true };
-    if (reserved === "skip") return { state: seen(state), stop: false };
+    if (reserved === "retry") return keep(state, true);
+    if (reserved === "skip") return keep(seen(state));
     try {
       result = await (deps.analyze ?? runAnalyze)(
         { url: link, uiLanguage: lang },
@@ -152,7 +152,7 @@ async function handleMention(
       );
     } catch (error) {
       logEvent("x_bot_failed", errorFields(error));
-      return { state, stop: true };
+      return keep(state, true);
     } finally {
       await reserved.release().catch((error) => logEvent("x_bot_failed", errorFields(error)));
     }
@@ -160,21 +160,55 @@ async function handleMention(
     const write = storeAnalysis(cache, { url: link }, lang, result);
     if (write) await write.catch((error) => logEvent("x_bot_failed", errorFields(error)));
   }
-  if (!result) return { state: seen(state), stop: false };
+  if (!result) return keep(seen(state));
   const posted = await postReply(env, post.id, formatMentionReply(result, link, lang), fetchImpl);
   if (posted.limitedUntil) {
-    return { state: { ...state, rateLimitUntil: posted.limitedUntil }, stop: true };
+    return keep({ ...state, rateLimitUntil: posted.limitedUntil }, true);
   }
-  if (!posted.ok) return { state: seen(state), stop: false };
+  if (!posted.ok) return keep(seen(state));
   const prior = state.answered[conversation] ?? [];
-  return {
-    state: seen({
+  return keep(
+    seen({
       ...state,
       replies: state.replies + 1,
       users: bumpUser(state, author, now),
       answered: { ...state.answered, [conversation]: [...prior, normalised].slice(-20) },
     }),
+  );
+}
+
+async function recordOptOut(
+  env: Env,
+  state: XBotState,
+  optOut: string[],
+  post: XPost,
+  authorId: string,
+  lang: "en" | "el",
+  caps: Caps,
+  fetchImpl: typeof fetch,
+  now: number,
+): Promise<{ state: XBotState; stop: boolean; optOut: string[] }> {
+  const seen = (next: XBotState): XBotState => ({
+    ...next,
+    replied: rememberId(next.replied, post.id),
+    sinceId: laterId(next.sinceId, post.id),
+  });
+  if (!authorId) return { state: seen(state), stop: false, optOut };
+  const already = optOut.includes(authorId) || state.denylist.includes(authorId);
+  if (already) return { state: seen(state), stop: false, optOut };
+  const recorded = [...optOut, authorId];
+  // One acknowledgement, and only while the bot is on and under the daily reply cap.
+  // The id is stored either way, so later mentions skip analysis.
+  if (env.X_BOT_ENABLED !== "true" || state.replies >= caps.replies) {
+    return { state: seen(state), stop: false, optOut: recorded };
+  }
+  const posted = await postReply(env, post.id, stopReply(lang), fetchImpl);
+  if (posted.limitedUntil) return { state: { ...state, rateLimitUntil: posted.limitedUntil }, stop: true, optOut };
+  if (!posted.ok) return { state: seen(state), stop: false, optOut: recorded };
+  return {
+    state: seen({ ...state, replies: state.replies + 1, users: bumpUser(state, authorId, now) }),
     stop: false,
+    optOut: recorded,
   };
 }
 
@@ -283,6 +317,31 @@ function bumpUser(state: XBotState, author: string, now: number): XBotState["use
   const day = rollXBot(state, now).day;
   const count = userCount(state, author, now) + 1;
   return { ...state.users, [author]: { day, count } };
+}
+
+async function loadOptOut(env: Env, injected: string[] | undefined): Promise<string[]> {
+  if (injected) return injected;
+  if (!env.TAVILY_CREDITS) return [];
+  const stub = env.TAVILY_CREDITS.get(env.TAVILY_CREDITS.idFromName("global"));
+  const response = await stub.fetch("https://credits.internal/xbot-optout");
+  if (!response.ok) return [];
+  const body = (await response.json()) as { ids?: unknown };
+  if (!Array.isArray(body.ids)) return [];
+  return body.ids.filter((id): id is string => typeof id === "string" && id.length > 0);
+}
+
+async function saveOptOut(env: Env, ids: string[], injected: string[] | undefined): Promise<void> {
+  const unique = [...new Set(ids.filter((id) => id.length > 0))];
+  if (injected) {
+    injected.splice(0, injected.length, ...unique);
+    return;
+  }
+  if (!env.TAVILY_CREDITS) return;
+  const stub = env.TAVILY_CREDITS.get(env.TAVILY_CREDITS.idFromName("global"));
+  await stub.fetch("https://credits.internal/xbot-optout", {
+    method: "POST",
+    body: JSON.stringify({ ids: unique }),
+  });
 }
 
 async function loadState(env: Env, now: number): Promise<XBotState> {

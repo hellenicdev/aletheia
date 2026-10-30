@@ -173,7 +173,9 @@ The worker has a cron every two minutes that can reply when someone mentions the
 
 The bot uses the same analysis pipeline and the same URL cache as the site. A cache hit does not spend search credits. A fresh analysis shares the site's daily and monthly Tavily caps, keyed as `x:<author id>`, and is also limited by `X_BOT_DAILY_CAP` (default `0`, so a miss stays silent). Replies are capped per person and per day. Greek posts use the `/el` cache key and link to `/aletheia/el/?url=`.
 
-State (the mention cursor, reply ids, per-user counts, and the denylist) is stored on the existing global `TavilyCredits` Durable Object under the key `xbot`. There is no new Durable Object class and no new migration.
+State (the mention cursor, reply ids, per-user counts, and any older denylist) is stored on the existing global `TavilyCredits` Durable Object under the key `xbot`. Opted-out account ids live on that same object under `xbot_optout`. There is no new Durable Object class and no new migration.
+
+A mention whose text is only `stop`, `unsubscribe`, or `σταμάτα` — after @mentions, links, and whitespace are removed, ignoring case — opts that account out. While the bot is enabled and still under the daily reply cap, it replies once, in reply to that post. A later `stop` does not get a second reply. `start` removes the id. While the bot is off, the cron does not call the X API, so it sends nothing. Opted-out accounts are skipped before a reply, an analysis, or any credit or cap use. A normal reply ends with a short automated-check line. The summary is shortened so the report link and that line stay inside 280 characters (a URL counts as 23).
 
 Secrets, set yourself with `npx wrangler secret put` from `backend/`:
 
