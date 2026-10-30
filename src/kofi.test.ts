@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { KOFI_PAGE_ID, KOFI_PAGE_URL } from "../shared/kofiPage";
 import { kofiButtonText, kofiDrawOptions, KOFI_BUTTON_FIT_CSS, KOFI_SRC } from "./kofi";
 
 describe("kofi widget", () => {
@@ -14,5 +15,7 @@ describe("kofi widget", () => {
     expect(kofiDrawOptions("el")["floating-chat.donateButton.text"]).toBe("Στήριξέ με");
     expect(KOFI_BUTTON_FIT_CSS).toContain("overflow: hidden");
     expect(KOFI_BUTTON_FIT_CSS).toContain("nowrap");
+    expect(KOFI_PAGE_ID).toBe("hellenicdev");
+    expect(KOFI_PAGE_URL).toBe("https://ko-fi.com/hellenicdev");
   });
 });

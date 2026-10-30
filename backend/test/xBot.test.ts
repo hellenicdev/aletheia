@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { LABELS } from "../../shared/labels";
-import type { AnalysisResult } from "../../shared/types";
+import { LABELS, type Label } from "../../shared/labels";
+import { KOFI_PAGE_URL } from "../../shared/kofiPage";
+import type { AnalysisResult, SegmentResult } from "../../shared/types";
 import { handleRequest } from "../src/index";
 import { TavilyCredits } from "../src/rateLimiter";
 import { runXBot, xBotReady, type XBotDeps } from "../src/xBot";
 import { articleLink, commandText, indexIncludes, isStart, isStop, type MentionPage, type XPost } from "../src/xMentions";
 import { oauth1Header, signatureBaseString } from "../src/xOauth";
-import { clipMentionText, formatMentionReply, optOutFooter, reportUrl, stopReply, weightedLength } from "../src/xReply";
+import { clipMentionText, formatMentionReply, MADE_BY_URL, optOutFooter, reportUrl, stopReply, weightedLength } from "../src/xReply";
 import { emptyXBot } from "../src/xState";
 import type { Env } from "../src/config";
 import type { AnalysisCache } from "../src/analysisCache";
@@ -39,6 +40,29 @@ function report(overall = 62): AnalysisResult {
     meta: { searchStatus: { state: "ok", reason: null, provider: "tavily" } },
   } as AnalysisResult;
 }
+
+function claim(text: string, label: Label, start: number): SegmentResult {
+  return {
+    id: String(start),
+    text,
+    start,
+    end: start + text.length,
+    label,
+    confidence: 0.9,
+    explanation: "",
+    sources: [],
+    evidenceMode: "web-search",
+  };
+}
+
+function withClaims(overall: number, claims: SegmentResult[]): AnalysisResult {
+  return { ...report(overall), segments: claims };
+}
+
+const CREDIT_LINES = [
+  `Made by HellenicDev ${MADE_BY_URL}`,
+  `Support me ${KOFI_PAGE_URL}`,
+] as const;
 
 function mention(partial: Record<string, unknown>): Record<string, unknown> {
   return {
@@ -114,12 +138,18 @@ describe("reply length", () => {
     for (const lang of ["en", "el"] as const) {
       const text = formatMentionReply(worst, longUrl, lang);
       const link = reportUrl(longUrl, lang);
+      const lines = text.split("\n");
       expect(weightedLength(text)).toBeLessThanOrEqual(280);
-      expect(text).toContain(link);
-      expect(text.endsWith(optOutFooter(lang))).toBe(true);
+      expect(lines.slice(-4)).toEqual([
+        `${lang === "el" ? "Πλήρης αναφορά" : "Full report"}: ${link}`,
+        ...CREDIT_LINES,
+        optOutFooter(lang),
+      ]);
       expect(text).toContain("100/100");
     }
     expect(weightedLength(`see ${longUrl}`)).toBeLessThan(40);
+    expect(KOFI_PAGE_URL).toBe("https://ko-fi.com/hellenicdev");
+    expect(MADE_BY_URL).toBe("https://hellenicdev.eu?utm_source=aletheia_bot");
   });
 
   it("truncates the summary and keeps the footer and report link", () => {
@@ -137,6 +167,68 @@ describe("reply length", () => {
     expect(weightedLength(stopReply("en"))).toBeLessThanOrEqual(280);
     expect(weightedLength(stopReply("el"))).toBeLessThanOrEqual(280);
   });
+
+  it("keeps one to six short claims, in order, ahead of the fixed closing lines", () => {
+    const labels: Label[] = ["True", "False", "Misleading", "Unverifiable", "Opinion", "Personal"];
+    const marks = ["✅", "❌", "⚠️", "❔", "💬", "👤"];
+    for (let count = 1; count <= 6; count += 1) {
+      const claims = labels.slice(0, count).map((label, index) => claim(`Point ${index}.`, label, index * 10));
+      const text = formatMentionReply(withClaims(62, claims), "https://example.com/iran", "en");
+      const lines = text.split("\n");
+      expect(weightedLength(text)).toBeLessThanOrEqual(280);
+      expect(lines[0]).toBe("Mostly reliable, 62/100");
+      expect(lines.slice(1, 1 + count)).toEqual(claims.map((item, index) => `${marks[index]} ${item.text}`));
+      expect(lines.slice(-4)).toEqual([
+        `Full report: ${reportUrl("https://example.com/iran", "en")}`,
+        ...CREDIT_LINES,
+        optOutFooter("en"),
+      ]);
+      expect(text).not.toContain("Point 6.");
+    }
+  });
+
+  it("shortens long claims before it drops the report link, credits, or disclosure", () => {
+    const longUrl = `https://www.example.com/${"a".repeat(180)}?q=${"b".repeat(80)}`;
+    const claims = Array.from({ length: 7 }, (_, index) =>
+      claim(`C${index} ${"harbour fee ".repeat(40)}`, index % 2 === 0 ? "True" : "False", index),
+    );
+    const text = formatMentionReply(withClaims(48, claims), longUrl, "en");
+    const lines = text.split("\n");
+    expect(weightedLength(text)).toBeLessThanOrEqual(280);
+    expect(lines[0]).toBe("Mixed, 48/100");
+    expect(lines.slice(-4)).toEqual([
+      `Full report: ${reportUrl(longUrl, "en")}`,
+      ...CREDIT_LINES,
+      optOutFooter("en"),
+    ]);
+    const shown = lines.slice(1, -4);
+    expect(shown.length).toBeGreaterThanOrEqual(1);
+    expect(shown.length).toBeLessThanOrEqual(6);
+    expect(shown.every((line) => line.startsWith("✅ ") || line.startsWith("❌ "))).toBe(true);
+    expect(text).not.toContain(claims[0].text);
+    expect(text).not.toContain("C6");
+    expect(shown.join("\n")).toContain("…");
+    for (const line of shown) expect(line.length).toBeLessThan(claims[0].text.length);
+  });
+
+  it("uses a Greek verdict, claim, report link, and disclosure", () => {
+    const text = formatMentionReply(
+      withClaims(40, [claim("Το τέλος έμεινε σταθερό.", "Misleading", 0), claim("Η δεύτερη πρόταση είναι ψευδής.", "False", 20)]),
+      "https://www.kathimerini.gr/politics/story",
+      "el",
+    );
+    const lines = text.split("\n");
+    expect(weightedLength(text)).toBeLessThanOrEqual(280);
+    expect(lines[0]).toBe("Μεικτό, 40/100");
+    expect(lines[1]).toBe("⚠️ Το τέλος έμεινε σταθερό.");
+    expect(lines[2]).toBe("❌ Η δεύτερη πρόταση είναι ψευδής.");
+    expect(lines.slice(-4)).toEqual([
+      `Πλήρης αναφορά: ${reportUrl("https://www.kathimerini.gr/politics/story", "el")}`,
+      ...CREDIT_LINES,
+      optOutFooter("el"),
+    ]);
+    expect(optOutFooter("el")).toContain("σταμάτα");
+  });
 });
 
 describe("x mention bot", () => {
@@ -147,6 +239,66 @@ describe("x mention bot", () => {
     expect(xBotReady({ ...ready, X_BOT_ENABLED: "false" })).toBe(false);
     await expect(runXBot({ ...ready, X_BOT_ENABLED: "false" }, { fetchImpl })).resolves.toBeNull();
     await expect(runXBot({ ...ready, X_API_SECRET: "" }, { fetchImpl })).resolves.toBeNull();
+  });
+
+  it("replies once about the article link on the parent post", async () => {
+    const posts: { text: string; to: string }[] = [];
+    const looked: string[] = [];
+    const state = emptyXBot(1);
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if ((init?.method ?? "GET") === "POST") {
+        const body = JSON.parse(String(init?.body)) as { text: string; reply: { in_reply_to_tweet_id: string } };
+        posts.push({ text: body.text, to: body.reply.in_reply_to_tweet_id });
+        return Response.json({ data: { id: "200" } });
+      }
+      if (!url.includes("/mentions")) throw new Error(`unexpected ${url}`);
+      return Response.json({
+        data: [
+          mention({
+            id: "100",
+            text: "@aletheia Is this true?",
+            referenced_tweets: [{ type: "replied_to", id: "9" }],
+          }),
+        ],
+        includes: {
+          tweets: [
+            {
+              id: "9",
+              text: "Iran did X... more here: https://t.co/iran",
+              entities: { urls: [{ url: "https://t.co/iran", expanded_url: "https://example.com/iran" }] },
+            },
+          ],
+        },
+      });
+    };
+    await runXBot(ready, {
+      fetchImpl,
+      state,
+      now: () => 1,
+      cache: {
+        async get(url) {
+          looked.push(url);
+          return report(55);
+        },
+        async put() {
+          throw new Error("put");
+        },
+      },
+      analyze: async () => {
+        throw new Error("analyzed");
+      },
+    });
+    expect(posts).toHaveLength(1);
+    expect(posts[0]?.to).toBe("100");
+    expect(looked).toEqual(["https://example.com/iran"]);
+    expect(posts[0]?.text).toContain(reportUrl("https://example.com/iran", "en"));
+    expect(posts[0]?.text.split("\n").slice(-4)).toEqual([
+      `Full report: ${reportUrl("https://example.com/iran", "en")}`,
+      ...CREDIT_LINES,
+      optOutFooter("en"),
+    ]);
+    expect(weightedLength(posts[0]?.text ?? "")).toBeLessThanOrEqual(280);
   });
 
   it("replies from the cache without a fresh analysis when the daily cap is 0", async () => {
@@ -173,7 +325,8 @@ describe("x mention bot", () => {
       const body = JSON.parse(String(init?.body)) as { text: string; reply: { in_reply_to_tweet_id: string } };
       expect(body.reply.in_reply_to_tweet_id).toBe("100");
       expect(body.text).toContain("62/100");
-      expect(body.text).toContain("5 true");
+      expect(body.text).toContain("Support me https://ko-fi.com/hellenicdev");
+      expect(body.text).toContain(MADE_BY_URL);
       expect(body.text.endsWith(optOutFooter("en"))).toBe(true);
       expect(weightedLength(body.text)).toBeLessThanOrEqual(280);
       return Response.json({ data: { id: "200" } });

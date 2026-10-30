@@ -2,6 +2,8 @@
  * Ko-fi floating chat, drawn with the publisher's options.
  * The script is injected after load, on idle, so it stays off the critical path.
  */
+import { KOFI_PAGE_ID } from "../shared/kofiPage";
+
 export const KOFI_SRC = "https://storage.ko-fi.com/cdn/scripts/overlay-widget.js";
 
 type KofiOverlay = {
@@ -39,14 +41,14 @@ export function kofiDrawOptions(lang: "en" | "el" = "en"): Record<string, string
 }
 
 export function mountKofi(doc: Document = document, lang: "en" | "el" = "en"): void {
-  if (doc.querySelector("script[data-kofi='hellenicdev']")) return;
+  if (doc.querySelector(`script[data-kofi='${KOFI_PAGE_ID}']`)) return;
   const script = doc.createElement("script");
   script.src = KOFI_SRC;
   script.async = true;
-  script.dataset.kofi = "hellenicdev";
+  script.dataset.kofi = KOFI_PAGE_ID;
   script.addEventListener("load", () => {
     const overlay = (window as Window & { kofiWidgetOverlay?: KofiOverlay }).kofiWidgetOverlay;
-    overlay?.draw("hellenicdev", kofiDrawOptions(lang));
+    overlay?.draw(KOFI_PAGE_ID, kofiDrawOptions(lang));
     // The widget's button lives in an untitled iframe. Name it so the frame is not an accessibility failure.
     labelKofiFrames(doc, lang);
     window.setTimeout(() => labelKofiFrames(doc, lang), 500);
