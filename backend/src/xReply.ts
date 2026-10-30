@@ -1,5 +1,6 @@
-import { LABELS, type Label } from "../../shared/labels";
-import type { AnalysisResult } from "../../shared/types";
+import type { Label } from "../../shared/labels";
+import { KOFI_PAGE_URL } from "../../shared/kofiPage";
+import type { AnalysisResult, SegmentResult } from "../../shared/types";
 
 const SCALE = 100;
 const URL_UNITS = 23 * SCALE;
@@ -36,69 +37,50 @@ function codeWeight(code: number): number {
   return 200;
 }
 
-const EN_LABEL: Record<Label, string> = {
-  True: "true",
-  False: "false",
-  Misleading: "misleading",
-  Unverifiable: "unverifiable",
-  Opinion: "opinion",
-  Personal: "personal",
-  Rhetorical: "rhetorical",
-};
-
-const EL_LABEL: Record<Label, string> = {
-  True: "αληθή",
-  False: "ψευδή",
-  Misleading: "παραπλανητικά",
-  Unverifiable: "μη επαληθεύσιμα",
-  Opinion: "γνώμες",
-  Personal: "προσωπικές",
-  Rhetorical: "ρητορικά",
-};
-
 export function reportUrl(articleUrl: string, lang: "en" | "el"): string {
   const base = lang === "el" ? "https://hellenicdev.eu/aletheia/el/" : "https://hellenicdev.eu/aletheia/";
   return `${base}?url=${encodeURIComponent(articleUrl)}`;
 }
 
-const FOOTER = {
-  en: "Automated AI fact-check · reply stop to opt out",
-  el: "Αυτόματος έλεγχος AI · απάντησε σταμάτα για εξαίρεση",
+/** Same first page of claims the site shows before "Show all". */
+const MAX_CLAIMS = 6;
+
+const CLAIM_MARK: Record<Label, string> = {
+  True: "✅",
+  False: "❌",
+  Misleading: "⚠️",
+  Unverifiable: "❔",
+  Opinion: "💬",
+  Personal: "👤",
+  Rhetorical: "📣",
+};
+
+const DISCLOSURE = {
+  en: "AI bot · reply stop to opt out",
+  el: "AI bot · απάντησε σταμάτα για εξαίρεση",
 } as const;
 
+export const MADE_BY_URL = "https://hellenicdev.eu?utm_source=aletheia_bot";
+
 export function optOutFooter(lang: "en" | "el"): string {
-  return FOOTER[lang];
+  return DISCLOSURE[lang];
 }
 
 export function formatMentionReply(result: AnalysisResult, articleUrl: string, lang: "en" | "el"): string {
-  const present = LABELS.filter((label) => (result.score.counts[label] ?? 0) > 0);
-  const note = needsNote(result);
   const tail = replyTail(articleUrl, lang);
-  let shown = present;
-  let withNote = note;
-  let withAuto = true;
-  let summary = summaryText(result, lang, shown, withNote, withAuto);
-  let text = joinReply(summary, tail);
-  while (weightedLength(text) > 280 && shown.length > 0) {
-    shown = shown.slice(0, -1);
-    summary = summaryText(result, lang, shown, withNote, withAuto);
-    text = joinReply(summary, tail);
+  const verdict = verdictLine(result, lang);
+  const claims = topClaims(result);
+  const room = 280 - weightedLength(`${verdict}\n`) - weightedLength(`\n${tail}`);
+  let count = claims.length;
+  while (count > 0) {
+    const block = fitClaims(claims.slice(0, count), room);
+    if (block) return `${verdict}\n${block}\n${tail}`;
+    count -= 1;
   }
-  if (weightedLength(text) > 280 && withNote) {
-    withNote = false;
-    summary = summaryText(result, lang, shown, withNote, withAuto);
-    text = joinReply(summary, tail);
-  }
-  if (weightedLength(text) > 280 && withAuto) {
-    withAuto = false;
-    summary = summaryText(result, lang, shown, withNote, withAuto);
-    text = joinReply(summary, tail);
-  }
-  if (weightedLength(text) > 280) text = clipMentionText(summary, tail);
-  return text;
+  return clipMentionText(verdict, tail);
 }
 
-/** Shortens the summary. The tail (report link and footer) is kept whole. */
+/** Shortens the summary. The tail (report link, credits, and disclosure) is kept whole. */
 export function clipMentionText(summary: string, tail: string, limit = 280): string {
   const fits = (body: string) => weightedLength(body) <= limit;
   if (fits(joinReply(summary, tail))) return joinReply(summary, tail);
@@ -126,8 +108,22 @@ export function stopReply(lang: "en" | "el"): string {
     : "Done, I won't reply to you again. Reply start to undo.";
 }
 
-function needsNote(result: AnalysisResult): boolean {
-  return result.degraded || result.provisional || result.meta.searchStatus.state !== "ok";
+function replyTail(articleUrl: string, lang: "en" | "el"): string {
+  const report = lang === "el" ? "Πλήρης αναφορά" : "Full report";
+  return [
+    `${report}: ${reportUrl(articleUrl, lang)}`,
+    `Made by HellenicDev ${MADE_BY_URL}`,
+    `Support me ${KOFI_PAGE_URL}`,
+    DISCLOSURE[lang],
+  ].join("\n");
+}
+
+function joinReply(summary: string, tail: string): string {
+  return summary ? `${summary}\n${tail}` : tail;
+}
+
+function verdictLine(result: AnalysisResult, lang: "en" | "el"): string {
+  return `${band(result.score.overall, lang)}, ${result.score.overall}/100`;
 }
 
 function band(score: number, lang: "en" | "el"): string {
@@ -141,33 +137,51 @@ function band(score: number, lang: "en" | "el"): string {
   return "Weak";
 }
 
-function replyTail(articleUrl: string, lang: "en" | "el"): string {
-  const report = lang === "el" ? "Πλήρης αναφορά" : "Full report";
-  return `${report}: ${reportUrl(articleUrl, lang)}\n${FOOTER[lang]}`;
+function topClaims(result: AnalysisResult): SegmentResult[] {
+  return result.segments
+    .map((segment, index) => ({ segment, index }))
+    .filter(({ segment }) => segment.text.replace(/\s+/g, " ").trim().length > 0)
+    .sort((a, b) => a.segment.start - b.segment.start || a.index - b.index)
+    .slice(0, MAX_CLAIMS)
+    .map(({ segment }) => segment);
 }
 
-function joinReply(summary: string, tail: string): string {
-  return summary ? `${summary}\n${tail}` : tail;
+function fitClaims(claims: SegmentResult[], room: number): string | null {
+  if (room < 0) return null;
+  const longest = claims.reduce((max, claim) => Math.max(max, [...flatten(claim.text)].length), 1);
+  let low = 0;
+  let high = longest;
+  let best: string | null = null;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    const block = claims.map((claim) => claimLine(claim, mid)).join("\n");
+    if (weightedLength(block) <= room) {
+      best = block;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return best;
 }
 
-function summaryText(
-  result: AnalysisResult,
-  lang: "en" | "el",
-  labels: Label[],
-  note: boolean,
-  auto: boolean,
-): string {
-  const names = lang === "el" ? EL_LABEL : EN_LABEL;
-  const total = LABELS.reduce((sum, label) => sum + (result.score.counts[label] ?? 0), 0);
-  const parts = labels.map((label) => `${result.score.counts[label]} ${names[label]}`);
-  const claims =
-    lang === "el"
-      ? `${total} ισχυρισμοί${parts.length ? `: ${parts.join(", ")}` : ""}`
-      : `${total} claims${parts.length ? `: ${parts.join(", ")}` : ""}`;
-  const caution = lang === "el" ? "Προσωρινό." : "Provisional.";
-  const autoLine = lang === "el" ? "Αυτόματος έλεγχος, μπορεί να πέσει έξω." : "Automated check, may be wrong.";
-  const head = `Aletheia: ${result.score.overall}/100, ${band(result.score.overall, lang)}. ${claims}.`;
-  const middle = note ? ` ${caution}` : "";
-  const end = auto ? ` ${autoLine}` : "";
-  return `${head}${middle}${end}`.trim();
+function claimLine(segment: SegmentResult, maxChars: number): string {
+  return `${CLAIM_MARK[segment.label]} ${shorten(segment.text, maxChars)}`;
+}
+
+function shorten(text: string, maxChars: number): string {
+  const flat = flatten(text);
+  const chars = [...flat];
+  if (chars.length <= maxChars) return flat;
+  let end = Math.max(0, maxChars);
+  if (end < chars.length && chars[end] !== " ") {
+    const space = chars.slice(0, end).join("").lastIndexOf(" ");
+    if (space > 0) end = space;
+  }
+  const cut = chars.slice(0, end).join("").trimEnd();
+  return cut ? `${cut}…` : "…";
+}
+
+function flatten(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
 }
