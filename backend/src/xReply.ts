@@ -50,6 +50,7 @@ const CLAIM_MARK: Record<Label, string> = {
   False: "❌",
   Misleading: "⚠️",
   Unverifiable: "❔",
+  "Not checked": "–",
   Opinion: "💬",
   Personal: "👤",
   Rhetorical: "📣",
@@ -140,6 +141,7 @@ function band(score: number, lang: "en" | "el"): string {
 function topClaims(result: AnalysisResult): SegmentResult[] {
   return result.segments
     .map((segment, index) => ({ segment, index }))
+    .filter(({ segment }) => segment.label !== "Not checked")
     .filter(({ segment }) => segment.text.replace(/\s+/g, " ").trim().length > 0)
     .sort((a, b) => a.segment.start - b.segment.start || a.index - b.index)
     .slice(0, MAX_CLAIMS)

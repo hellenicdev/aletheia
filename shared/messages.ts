@@ -67,6 +67,13 @@ export function anecdoteExplanation(lang: UiLanguage): string {
     : "This is a personal anecdote or quotation, so it was not selected for checking.";
 }
 
+/** A checkable claim the 12-search cap did not reach. Not a verdict. */
+export function notCheckedExplanation(lang: UiLanguage): string {
+  return lang === "el"
+    ? "Δεν ελέγχθηκε σε αυτή την ανάλυση για εξοικονόμηση μονάδων αναζήτησης."
+    : "Not checked in this analysis to save search credits.";
+}
+
 export function unverifiableExplanation(
   lang: UiLanguage,
   reason:

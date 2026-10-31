@@ -155,6 +155,7 @@ export function emptyCounts(): Record<Label, number> {
     False: 0,
     Misleading: 0,
     Unverifiable: 0,
+    "Not checked": 0,
     Opinion: 0,
     Personal: 0,
     Rhetorical: 0,
@@ -227,7 +228,9 @@ export function aggregateScore(
     if (!options.searchEnabled) sourcing = Math.min(sourcing, SOURCING_CAP_NO_SEARCH);
   }
 
-  const toneSource = segments.filter((segment) => countsInScore(segment));
+  const toneSource = segments.filter(
+    (segment) => countsInScore(segment) && segment.label !== "Not checked",
+  );
   const tones = (toneSource.length > 0 ? toneSource : segments).map((segment) => segment.tone ?? 100);
   const averageTone = tones.reduce((sum, value) => sum + value, 0) / tones.length;
   const worstTone = Math.min(...tones);
@@ -452,6 +455,18 @@ function buildVerdict(
         : outsideSearch === 1
           ? "1 further claim was outside this search and does not count as a coverage gap."
           : `${outsideSearch} further claims were outside this search and do not count as a coverage gap.`,
+    );
+  }
+  const notChecked = counts["Not checked"];
+  if (notChecked > 0) {
+    parts.push(
+      lang === "el"
+        ? notChecked === 1
+          ? "1 ισχυρισμός δεν ελέγχθηκε, για εξοικονόμηση μονάδων αναζήτησης."
+          : `${notChecked} ισχυρισμοί δεν ελέγχθηκαν, για εξοικονόμηση μονάδων αναζήτησης.`
+        : notChecked === 1
+          ? "1 claim was not checked, to save search credits."
+          : `${notChecked} claims were not checked, to save search credits.`,
     );
   }
   if (counts.Personal > 0) {

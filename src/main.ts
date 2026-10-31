@@ -596,6 +596,7 @@ function renderSummary(segments: SegmentResult[]) {
     const swatch = document.createElement("span");
     swatch.className = "swatch";
     swatch.setAttribute("aria-hidden", "true");
+    button.title = labelHelp(state.lang, label);
     button.append(swatch, document.createTextNode(`${count} ${labelName(state.lang, label)}`));
     row.append(button);
   }
@@ -634,11 +635,13 @@ function claimCard(segment: SegmentResult): HTMLElement {
   card.className = "claim-card";
   card.id = `claim-${segment.id}`;
   card.dataset.label = segment.label;
+  if (segment.unverifiableReason) card.dataset.unverifiableReason = segment.unverifiableReason;
   const top = document.createElement("div");
   top.className = "claim-top";
   const pill = document.createElement("span");
   pill.className = "pill";
   pill.dataset.label = segment.label;
+  pill.title = labelHelp(state.lang, segment.label);
   const swatch = document.createElement("span");
   swatch.className = "swatch";
   swatch.setAttribute("aria-hidden", "true");
@@ -650,6 +653,7 @@ function claimCard(segment: SegmentResult): HTMLElement {
   confidenceName.className = "visually-hidden";
   confidenceName.textContent = `${t(state.lang, "confidence")} `;
   confidence.append(confidenceName, document.createTextNode(`${percent}%`));
+  if (segment.label === "Not checked") confidence.hidden = true;
   top.append(pill, confidence);
   const text = document.createElement("p");
   text.className = "claim-text";
@@ -682,6 +686,10 @@ function claimReason(segment: SegmentResult): DocumentFragment {
   const explanation = document.createElement("p");
   explanation.className = "explanation";
   explanation.textContent = segment.explanation;
+  if (segment.label === "Not checked") {
+    fragment.append(explanation);
+    return fragment;
+  }
   const mode = document.createElement("p");
   mode.className = "mode";
   mode.textContent = t(
@@ -693,6 +701,13 @@ function claimReason(segment: SegmentResult): DocumentFragment {
         : "evidenceNa",
   );
   fragment.append(explanation, mode);
+  if (segment.unverifiableReason) {
+    const code = document.createElement("p");
+    code.className = "claim-code";
+    code.dataset.reason = segment.unverifiableReason;
+    code.textContent = segment.unverifiableReason;
+    fragment.append(code);
+  }
   if (segment.sources.length === 0) {
     const none = document.createElement("p");
     none.className = "explanation";

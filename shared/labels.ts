@@ -3,12 +3,16 @@ export const LABELS = [
   "False",
   "Misleading",
   "Unverifiable",
+  "Not checked",
   "Opinion",
   "Personal",
   "Rhetorical",
 ] as const;
 
 export type Label = (typeof LABELS)[number];
+
+/** Labels the verifier may return. "Not checked" is assigned in code when the search cap is reached. */
+export const VERDICT_LABELS = LABELS.filter((label) => label !== "Not checked");
 
 export const CLAIM_TYPES = [
   "checkable_factual",

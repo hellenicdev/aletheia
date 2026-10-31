@@ -7,7 +7,7 @@ export type ClaimFilter = "all" | Label;
 
 export type ClaimSort = "reading" | "verdict" | "confidence";
 
-/** Problems first, then supported claims, then commentary. */
+/** Problems first, then supported claims, then commentary. Not checked is not a verdict. */
 const VERDICT_RANK: Record<Label, number> = {
   False: 0,
   Misleading: 1,
@@ -16,6 +16,7 @@ const VERDICT_RANK: Record<Label, number> = {
   Opinion: 4,
   Personal: 5,
   Rhetorical: 6,
+  "Not checked": 7,
 };
 
 export function parseFilter(value: string | null | undefined): ClaimFilter {

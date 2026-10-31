@@ -334,6 +334,35 @@ describe("aggregateScore", () => {
     expect(score.toneNeutrality).toBeLessThan(90);
   });
 
+  it("keeps Not checked claims out of the unverifiable count and the score", () => {
+    const checked = aggregateScore([segment("True")], {
+      contradictionCount: 0,
+      searchEnabled: true,
+      uiLanguage: "en",
+    });
+    const withSkipped = aggregateScore(
+      [segment("True"), { ...segment("Not checked", 0, false), tone: 0 }],
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "en" },
+    );
+    expect(withSkipped.overall).toBe(checked.overall);
+    expect(withSkipped.factualAccuracy).toBe(checked.factualAccuracy);
+    expect(withSkipped.toneNeutrality).toBe(checked.toneNeutrality);
+    expect(withSkipped.counts["Not checked"]).toBe(1);
+    expect(withSkipped.counts.Unverifiable).toBe(0);
+    expect(withSkipped.verdict).toContain("1 claim was not checked, to save search credits.");
+    expect(withSkipped.verdict).toContain("0 unverifiable");
+    const greek = aggregateScore(
+      [segment("True"), segment("Not checked", 0, false)],
+      { contradictionCount: 0, searchEnabled: true, uiLanguage: "el" },
+    );
+    expect(greek.verdict).toContain("1 ισχυρισμός δεν ελέγχθηκε");
+    expect(coverageOf([segment("True"), segment("Not checked", 0, false)])).toEqual({
+      verified: 1,
+      covered: 1,
+      total: 1,
+    });
+  });
+
   it("scores selected claims and ignores factual claims that were not searched", () => {
     const checked = aggregateScore(
       [

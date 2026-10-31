@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { STRINGS, t } from "./i18n";
+import { labelHelp, labelName, STRINGS, t } from "./i18n";
 
 describe("i18n", () => {
   it("translates every English string into Greek", () => {
@@ -12,6 +12,10 @@ describe("i18n", () => {
   });
 
   it("returns Greek copy for the Greek interface", () => {
+    expect(labelName("en", "Not checked")).toBe("Not checked");
+    expect(labelName("el", "Not checked")).toBe("Δεν ελέγχθηκε");
+    expect(labelHelp("en", "Not checked")).toBe("Not checked in this analysis to save search credits.");
+    expect(labelHelp("el", "Not checked")).toContain("Δεν ελέγχθηκε");
     expect(t("el", "analyze")).toBe("Ανάλυση");
     expect(t("el", "misleading")).toMatch(/[\u0370-\u03FF]/);
   });

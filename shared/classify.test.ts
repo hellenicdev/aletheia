@@ -94,6 +94,13 @@ describe("inferClaimType", () => {
       "«Είμαστε οι πρώτοι που αγγίξαμε αυτά τα αντικείμενα», είπε ο αρχαιολόγος.";
     expect(isPersonalAccount(greek)).toBe(false);
     expect(inferClaimType(greek)).toBe("checkable_factual");
+    const company =
+      'Binance did not directly respond to BBC questions about North Korea but said: "We are working closely with our law enforcement partners."';
+    expect(isPersonalAccount(company)).toBe(false);
+    expect(inferClaimType(company)).toBe("checkable_factual");
+    const laptop =
+      'The firm said an engineer\'s laptop had been compromised, "our subsequent investigation has uncovered additional points of breach".';
+    expect(isPersonalAccount(laptop)).toBe(false);
   });
 });
 

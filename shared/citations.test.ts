@@ -943,6 +943,61 @@ describe("syndicated copies", () => {
     expect(liberal.label).toBe("Unverifiable");
   });
 
+  it("keeps another newsroom's account of the same Binance hack", () => {
+    const title = "Crypto giant Binance hit by hack suspected to be largest in history";
+    const claim =
+      "Cryptocurrency giant Binance said on Thursday that $6.3bn (£4.7bn) of digital assets have been impacted by what is thought to be the biggest crypto hack on record.";
+    const article = `${claim} The world's biggest crypto exchange said about half of those assets had been frozen.`;
+    const reuters = {
+      url: "https://www.reuters.com/technology/binance-hack-2026-10-30/",
+      title: "Binance says $6.3 billion crypto hack may be the largest on record",
+      snippet:
+        "Binance said $6.3 billion of digital assets were affected in a hack it described as possibly the largest crypto theft on record. About half of the assets were frozen.",
+    };
+    expect(isRelevantEvidence(claim, reuters)).toBe(true);
+    expect(isSyndicatedCopy(reuters, title, article, "bbc.com", claim)).toBe(false);
+    const applied = applyEvidence({
+      label: "True",
+      confidence: 0.9,
+      explanation: "Reuters reports the same $6.3 billion figure for the Binance hack.",
+      claimText: claim,
+      sourceUrls: [reuters.url],
+      evidence: [reuters],
+      searchEnabled: true,
+      uiLanguage: "en",
+      articleDomain: "bbc.com",
+      articleTitle: title,
+      articleText: article,
+    });
+    expect(applied.label).toBe("True");
+    expect(applied.unverifiableReason).toBeNull();
+    expect(applied.sources.map((source) => source.url)).toEqual([reuters.url]);
+
+    const sameHeadline = {
+      url: "https://news.sky.com/story/binance-hack-13450001",
+      title,
+      snippet: claim,
+    };
+    expect(isSyndicatedCopy(sameHeadline, title, article, "bbc.com", claim)).toBe(true);
+
+    const greekClaim = "Κρυπτονομίσματα όπως η Binance έχασαν 6,3 δισ. δολάρια σε χάκερ.";
+    const greekPage = {
+      url: "https://www.kathimerini.gr/economy/binance-hacker/",
+      title: "Η Binance δέχθηκε χάκερ που μπορεί να είναι το μεγαλύτερο στην ιστορία",
+      snippet: "Η Binance ανακοίνωσε απώλειες 6,3 δισ. δολαρίων από χάκερ.",
+    };
+    expect(isRelevantEvidence(greekClaim, greekPage)).toBe(true);
+    expect(
+      isSyndicatedCopy(
+        greekPage,
+        "Χάκερ στη Binance: το μεγαλύτερο πλήγμα στην ιστορία των κρυπτονομισμάτων",
+        `${greekClaim} Η εταιρεία είπε ότι πάγωσε περίπου τα μισά κεφάλαια.`,
+        "bbc.com",
+        greekClaim,
+      ),
+    ).toBe(false);
+  });
+
   it("keeps an independent account that does not repeat the article", () => {
     const applied = applyEvidence({
       label: "True",

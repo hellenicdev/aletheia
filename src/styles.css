@@ -15,6 +15,8 @@
   --misleading-bg: rgba(227, 179, 65, 0.18);
   --unverifiable: #9aa8b8;
   --unverifiable-bg: rgba(154, 168, 184, 0.16);
+  --not-checked: #8a8a8a;
+  --not-checked-bg: rgba(138, 138, 138, 0.16);
   --opinion: #c4b5fd;
   --opinion-bg: rgba(167, 139, 250, 0.18);
   --personal: #7eb6ff;
@@ -698,6 +700,7 @@ input::placeholder {
 .summary button[data-filter="False"], .pill[data-label="False"], .legend-item[data-label="False"] { --claim-ink: var(--false); }
 .summary button[data-filter="Misleading"], .pill[data-label="Misleading"], .legend-item[data-label="Misleading"] { --claim-ink: var(--misleading); }
 .summary button[data-filter="Unverifiable"], .pill[data-label="Unverifiable"], .legend-item[data-label="Unverifiable"] { --claim-ink: var(--unverifiable); }
+.summary button[data-filter="Not checked"], .pill[data-label="Not checked"], .legend-item[data-label="Not checked"] { --claim-ink: var(--not-checked); }
 .summary button[data-filter="Opinion"], .pill[data-label="Opinion"], .legend-item[data-label="Opinion"] { --claim-ink: var(--opinion); }
 .summary button[data-filter="Personal"], .pill[data-label="Personal"], .legend-item[data-label="Personal"] { --claim-ink: var(--personal); }
 .summary button[data-filter="Rhetorical"], .pill[data-label="Rhetorical"], .legend-item[data-label="Rhetorical"] { --claim-ink: var(--rhetorical); }
@@ -786,6 +789,7 @@ input::placeholder {
 .pill[data-label="False"] { background: var(--false-bg); }
 .pill[data-label="Misleading"] { background: var(--misleading-bg); }
 .pill[data-label="Unverifiable"] { background: var(--unverifiable-bg); }
+.pill[data-label="Not checked"] { background: var(--not-checked-bg); color: var(--not-checked); }
 .pill[data-label="Opinion"] { background: var(--opinion-bg); }
 .pill[data-label="Personal"] { background: var(--personal-bg); }
 .pill[data-label="Rhetorical"] { background: var(--rhetorical-bg); }
@@ -822,6 +826,13 @@ input::placeholder {
   margin: 0 0 8px;
   color: var(--muted);
   font-size: 13px;
+}
+
+.claim-code {
+  margin: 0 0 8px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 12px;
 }
 
 .sources { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
@@ -961,6 +972,7 @@ input::placeholder {
 .claim[data-label="False"] { --claim-bg: var(--false-bg); --claim-ink: var(--false); }
 .claim[data-label="Misleading"] { --claim-bg: var(--misleading-bg); --claim-ink: var(--misleading); }
 .claim[data-label="Unverifiable"] { --claim-bg: var(--unverifiable-bg); --claim-ink: var(--unverifiable); }
+.claim[data-label="Not checked"] { --claim-bg: var(--not-checked-bg); --claim-ink: var(--not-checked); }
 .claim[data-label="Opinion"] { --claim-bg: var(--opinion-bg); --claim-ink: var(--opinion); }
 .claim[data-label="Personal"] { --claim-bg: var(--personal-bg); --claim-ink: var(--personal); }
 .claim[data-label="Rhetorical"] { --claim-bg: var(--rhetorical-bg); --claim-ink: var(--rhetorical); }

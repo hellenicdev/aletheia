@@ -168,6 +168,18 @@ describe("reply length", () => {
     expect(weightedLength(stopReply("el"))).toBeLessThanOrEqual(280);
   });
 
+  it("leaves Not checked claims out of the reply", () => {
+    const claims = [
+      claim("Checked.", "True", 0),
+      claim("Skipped harbour count.", "Not checked", 10),
+      claim("Also checked.", "False", 20),
+    ];
+    const text = formatMentionReply(withClaims(70, claims), "https://example.com/story", "en");
+    expect(text).toContain("✅ Checked.");
+    expect(text).toContain("❌ Also checked.");
+    expect(text).not.toContain("Skipped");
+  });
+
   it("keeps one to six short claims, in order, ahead of the fixed closing lines", () => {
     const labels: Label[] = ["True", "False", "Misleading", "Unverifiable", "Opinion", "Personal"];
     const marks = ["✅", "❌", "⚠️", "❔", "💬", "👤"];

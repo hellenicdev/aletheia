@@ -57,7 +57,7 @@ describe("analyzeArticle stall watchdog", () => {
         logicalConsistency: 100,
         overall: 100,
         verdict: "1 of 1",
-        counts: { True: 1, False: 0, Misleading: 0, Unverifiable: 0, Opinion: 0, Personal: 0, Rhetorical: 0 },
+        counts: { True: 1, False: 0, Misleading: 0, Unverifiable: 0, "Not checked": 0, Opinion: 0, Personal: 0, Rhetorical: 0 },
       },
       contradictions: [],
       truncated: false,

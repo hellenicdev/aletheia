@@ -12,6 +12,24 @@ export interface SourceCitation {
   snippet: string;
 }
 
+/**
+ * Which step produced an Unverifiable label. Absent or null on every other label.
+ * A live report can be grouped by this field without reading the explanation.
+ */
+export type UnverifiableReason =
+  | "not_searched_cap"
+  | "search_failed"
+  | "check_failed"
+  | "no_results"
+  | "evidence_filtered_irrelevant"
+  | "evidence_filtered_copy"
+  | "model_unverifiable"
+  | "downgraded_missing_detail"
+  | "downgraded_uncited"
+  | "downgraded_not_contradiction"
+  | "downgraded_entity_mismatch"
+  | "model_only";
+
 export interface SegmentResult {
   id: string;
   text: string;
@@ -22,6 +40,8 @@ export interface SegmentResult {
   explanation: string;
   sources: SourceCitation[];
   evidenceMode: EvidenceMode;
+  /** Machine-readable cause. Null when the label is not Unverifiable. */
+  unverifiableReason?: UnverifiableReason | null;
 }
 
 export interface SubScores {
