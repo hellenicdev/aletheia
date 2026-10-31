@@ -1660,6 +1660,104 @@ describe("analyze", () => {
     expect(result.segments[0]?.label).toBe("True");
     expect(result.segments[0]?.explanation).toContain("7 to 2");
   });
+
+  it("cites another newsroom for the Binance hack and names why a claim stayed unverifiable", async () => {
+    clearSearchCache();
+    const claim =
+      "Cryptocurrency giant Binance said on Thursday that $6.3bn (£4.7bn) of digital assets have been impacted by what is thought to be the biggest crypto hack on record.";
+    const padding = [
+      "Oslo harbour added 12 fishing berths after the Monday council vote.",
+      "Lisbon pilots guided 9 cargo ships through the afternoon fog.",
+      "Naples dockworkers unloaded 40 crates of olives before sunset.",
+      "Helsinki ferry carried 220 passengers across the gulf on Tuesday.",
+      "Marseille customs seized 18 containers at the southern terminal.",
+      "Valencia shipyard launched 3 patrol boats during the spring ceremony.",
+      "Gdansk stevedores moved 55 timber loads onto the waiting rail.",
+      "Piraeus agents cleared 27 cruise visitors through the new gate.",
+      "Antwerp refiners stored 14 fuel tanks beside the inner basin.",
+      "Trieste clerks logged 6 storm delays for the evening departures.",
+      "Bergen fishers landed 80 tonnes of cod at the municipal quay.",
+      "Cork inspectors closed 4 oyster beds after the water test.",
+      "Tallinn captains delayed 11 departures because of the ice warning.",
+    ].join(" ");
+    const page = "https://www.reuters.com/technology/binance-hack-2026-10-30/";
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev/v2/search")) {
+        const body = JSON.parse(String(init?.body)) as { highlights?: boolean; query?: string };
+        expect(body.highlights).toBe(true);
+        const aboutBinance = (body.query ?? "").toLowerCase().includes("binance");
+        return new Response(
+          JSON.stringify({
+            success: true,
+            data: {
+              web: aboutBinance
+                ? [
+                    {
+                      url: page,
+                      title: "Binance says $6.3 billion crypto hack may be the largest on record",
+                      description:
+                        "Binance said $6.3 billion of digital assets were affected in a hack it described as possibly the largest crypto theft on record.",
+                      position: 1,
+                    },
+                  ]
+                : [
+                    {
+                      url: "https://www.example.com/harbour-log",
+                      title: "Harbour log",
+                      description: "The harbour log records boats still waiting after the Monday vote.",
+                      position: 1,
+                    },
+                  ],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(classifyPayload(user, () => ({ claimType: "checkable_factual", note: "A recorded claim." })));
+      }
+      if (system.startsWith("TASK:queries")) {
+        const payload = JSON.parse(user) as { claims: { id: string; text: string }[] };
+        return llmPayload({
+          queries: payload.claims.map((item) => ({ id: item.id, query: item.text.slice(0, 80) })),
+        });
+      }
+      if (system.startsWith("TASK:verify")) {
+        const payload = JSON.parse(user) as { claims: { id: string; claim: string; evidence: { url: string }[] }[] };
+        return llmPayload({
+          results: payload.claims.map((item) => ({
+            id: item.id,
+            label: item.claim.includes("Binance") ? "True" : "Unverifiable",
+            confidence: item.claim.includes("Binance") ? 0.9 : 0.4,
+            explanation: item.claim.includes("Binance")
+              ? "Reuters reports that Binance said $6.3 billion of assets were affected."
+              : "The harbour pages do not state this count.",
+            sourceUrls: item.claim.includes("Binance") ? item.evidence.map((entry) => entry.url) : [],
+            sources: item.evidence.map((entry) => ({ url: entry.url, relevant: item.claim.includes("Binance") })),
+          })),
+        });
+      }
+      if (system.startsWith("TASK:consistency")) return llmPayload({ contradictions: [] });
+      throw new Error(system.slice(0, 24));
+    };
+    const result = await analyze(
+      { text: `${claim} ${padding}`, uiLanguage: "en" },
+      { env, fetchImpl },
+    );
+    const binance = result.segments.find((segment) => segment.text.includes("Binance"));
+    expect(binance?.label).toBe("True");
+    expect(binance?.unverifiableReason).toBeNull();
+    expect(binance?.sources.map((source) => source.url)).toEqual([page]);
+    const capped = result.segments.filter((segment) => segment.unverifiableReason === "not_searched_cap");
+    expect(capped.length).toBeGreaterThan(0);
+    expect(result.segments.every((segment) => segment.label !== "Unverifiable" || segment.unverifiableReason)).toBe(
+      true,
+    );
+  });
 });
 
 describe("handleRequest", () => {

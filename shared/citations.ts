@@ -3,7 +3,7 @@ import { inferClaimType, isAttributedClaim, isPersonalAccount } from "./classify
 import { anecdoteExplanation, opinionExplanation, rhetoricalExplanation, unverifiableExplanation } from "./messages";
 import { tokenOverlap } from "./rank";
 import { hostOf, isBlockedEvidenceHost, isSocialHost, sameOutlet } from "./reputation";
-import type { SourceCitation } from "./types";
+import type { SourceCitation, UnverifiableReason } from "./types";
 
 export interface EvidenceItem {
   url: string;
@@ -31,6 +31,7 @@ export interface AppliedEvidence {
   explanation: string;
   sources: SourceCitation[];
   evidenceMode: EvidenceMode;
+  unverifiableReason: UnverifiableReason | null;
 }
 
 const DECIDED = new Set<Label>(["True", "False", "Misleading"]);
@@ -120,7 +121,6 @@ export function isSyndicatedCopy(
   const ours = (articleTitle ?? "").replace(/\s+/g, " ").trim();
   const lead = articleText.replace(/\s+/g, " ").trim().slice(0, 500);
   if (nearlyIdenticalTitle(ours, title)) return true;
-  if (looseReprint(ours, title)) return true;
   // A one-sentence paste has no surrounding article to reprint. A page that
   // restates that sentence is the evidence, not a syndicated copy.
   if (!articleIsTheClaim(articleText, claimText)) {
@@ -237,8 +237,10 @@ function creditsForeignWire(surface: string, url?: string): boolean {
 }
 
 /**
- * A shorter headline that repeats the article title is the same story.
- * One-sided overlap counts: the reprint often adds only a site suffix.
+ * The same headline, or a shortened reprint of it. Two newsrooms covering one
+ * event share the name and a few words and often land near 0.55. That overlap
+ * is corroboration. A reprint keeps about 0.7 of the words in both directions,
+ * or one headline whose words are almost all contained in the other.
  */
 function nearlyIdenticalTitle(articleTitle: string, resultTitle: string): boolean {
   if (articleTitle.length < 24 || resultTitle.length < 24) return false;
@@ -246,8 +248,8 @@ function nearlyIdenticalTitle(articleTitle: string, resultTitle: string): boolea
   const backward = tokenOverlap(resultTitle, articleTitle);
   const min = Math.min(forward, backward);
   const max = Math.max(forward, backward);
-  if (min < 0.4) return false;
-  return min >= 0.55 || max >= 0.85;
+  if (min >= 0.68) return true;
+  return max >= 0.85 && min >= 0.45;
 }
 
 /** Token overlap above ~0.6 in both directions means the result repeats this article. */
@@ -448,6 +450,12 @@ function keyEntityTokens(claim: string): string[] {
   const longestTokens = tokens.filter((token) => token.length === longest);
   const shorterDistinctive = tokens.filter((token) => token.length >= 5 && !GIVEN_NAMES.has(token) && token.length < longest);
   if (longestTokens.every((token) => GIVEN_NAMES.has(token)) && shorterDistinctive.length > 0) {
+    return shorterDistinctive;
+  }
+  // "Cryptocurrency giant Binance said..." capitalises a common noun because
+  // it is the first word. The name that follows is the entity a page must share.
+  const opening = claim.match(/[\p{L}]{4,}/u)?.[0]?.toLowerCase() ?? "";
+  if (opening && longestTokens.every((token) => token === opening) && shorterDistinctive.length > 0) {
     return shorterDistinctive;
   }
   return longestTokens;
@@ -721,6 +729,11 @@ export function applyEvidence(input: {
   /** When search ran and returned nothing, stable facts may keep a low-confidence model label. */
   allowModelKnowledge?: boolean;
   /**
+   * Why the evidence list passed in is empty. Set by the pipeline after it
+   * drops copies and off-topic hits, so an Unverifiable label names that step.
+   */
+  evidenceGap?: "no_results" | "evidence_filtered_irrelevant" | "evidence_filtered_copy" | null;
+  /**
    * The verifier's relevance flag, keyed by canonical URL. Absent means the
    * model did not say. A false flag drops the citation even when words overlap.
    */
@@ -735,6 +748,7 @@ export function applyEvidence(input: {
       explanation: anecdoteExplanation(input.uiLanguage),
       sources: [],
       evidenceMode: "not-applicable",
+      unverifiableReason: null,
     };
   }
   const label = isAttributedClaim(input.claimText) && input.label === "Opinion" ? "Unverifiable" : input.label;
@@ -748,6 +762,7 @@ export function applyEvidence(input: {
         : rhetoricalExplanation(input.uiLanguage),
       sources: [],
       evidenceMode: "not-applicable",
+      unverifiableReason: null,
     };
   }
 
@@ -762,6 +777,7 @@ export function applyEvidence(input: {
         : input.explanation,
       sources: [],
       evidenceMode: "model-knowledge-only",
+      unverifiableReason: downgrade ? "model_only" : null,
     };
   }
 
@@ -803,6 +819,7 @@ export function applyEvidence(input: {
       explanation: unverifiableExplanation(input.uiLanguage, "entity-mismatch"),
       sources: [],
       evidenceMode: "web-search",
+      unverifiableReason: "downgraded_entity_mismatch",
     };
   }
 
@@ -813,6 +830,7 @@ export function applyEvidence(input: {
       explanation: unverifiableExplanation(input.uiLanguage, "not-contradiction"),
       sources: [],
       evidenceMode: "web-search",
+      unverifiableReason: "downgraded_not_contradiction",
     };
   }
 
@@ -828,6 +846,7 @@ export function applyEvidence(input: {
         explanation: input.explanation,
         sources: [],
         evidenceMode: "model-knowledge-only",
+        unverifiableReason: null,
       };
     }
     const reason =
@@ -838,12 +857,22 @@ export function applyEvidence(input: {
           : independent.length > 0
             ? "no-evidence"
             : "not-independent";
+    const gap: UnverifiableReason =
+      input.evidenceGap ??
+      (input.evidence.length === 0
+        ? "no_results"
+        : usable.length > 0
+          ? "downgraded_uncited"
+          : independent.length > 0
+            ? "evidence_filtered_irrelevant"
+            : "evidence_filtered_copy");
     return {
       label: "Unverifiable",
       confidence: Math.min(confidence, 0.45),
       explanation: unverifiableExplanation(input.uiLanguage, reason),
       sources: [],
       evidenceMode: "web-search",
+      unverifiableReason: gap,
     };
   }
 
@@ -854,6 +883,7 @@ export function applyEvidence(input: {
       explanation: unverifiableExplanation(input.uiLanguage, "detail-missing"),
       sources,
       evidenceMode: "web-search",
+      unverifiableReason: "downgraded_missing_detail",
     };
   }
 
@@ -864,6 +894,7 @@ export function applyEvidence(input: {
       explanation: unverifiableExplanation(input.uiLanguage, "no-evidence"),
       sources: [],
       evidenceMode: input.searchEnabled ? "web-search" : "model-knowledge-only",
+      unverifiableReason: input.evidence.length === 0 ? (input.evidenceGap ?? "no_results") : "model_unverifiable",
     };
   }
 
@@ -873,6 +904,12 @@ export function applyEvidence(input: {
     explanation: input.explanation,
     sources,
     evidenceMode: "web-search",
+    unverifiableReason:
+      label === "Unverifiable"
+        ? input.evidence.length === 0
+          ? (input.evidenceGap ?? "no_results")
+          : "model_unverifiable"
+        : null,
   };
 }
 

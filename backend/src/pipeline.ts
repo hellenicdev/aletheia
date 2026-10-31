@@ -37,6 +37,7 @@ import type {
   SearchStatus,
   SegmentResult,
   StageName,
+  UnverifiableReason,
 } from "../../shared/types";
 import type { Env } from "./config";
 import { resolveConfig } from "./config";
@@ -208,6 +209,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
   const echoOnly = new Set<string>();
   const searchFailed = new Set<string>();
   const cutShort = new Set<string>();
+  const evidenceGap = new Map<string, EvidenceGap>();
   let providerReason: SearchOutageReason | null = null;
   let searchAttempts = 0;
   let searchErrors = 0;
@@ -373,6 +375,16 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
           .sort((left, right) => evidenceSourceRank(left.url) - evidenceSourceRank(right.url));
         if (hits.length > 0 && independent.length === 0) echoOnly.add(segment.id);
         evidence.set(segment.id, relevant);
+        evidenceGap.set(
+          segment.id,
+          hits.length === 0
+            ? "no_results"
+            : independent.length === 0
+              ? "evidence_filtered_copy"
+              : relevant.length === 0
+                ? "evidence_filtered_irrelevant"
+                : null,
+        );
       } catch (error) {
         remember(warnings, error, "search");
         searchDegraded = true;
@@ -380,6 +392,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
         searchFailed.add(segment.id);
         cutShort.add(segment.id);
         evidence.set(segment.id, []);
+        evidenceGap.set(segment.id, "no_results");
         const outage = providerOutage(error);
         if (outage) providerReason = providerReason ?? outage;
         if (outage || isBudgetExhausted(error) || signal.aborted) {
@@ -430,6 +443,11 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
         ),
         sources: [],
         evidenceMode: searchEnabled ? "web-search" : "model-knowledge-only",
+        unverifiableReason: echoOnly.has(segment.id)
+          ? "evidence_filtered_copy"
+          : failed
+            ? "search_failed"
+            : (evidenceGap.get(segment.id) ?? "no_results"),
       }),
     );
   }
@@ -442,7 +460,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       remember(warnings, new Error("analysis deadline reached before verification finished"), "llm");
       for (const group of groups.slice(cursor)) {
         for (const segment of group) {
-          verified.set(segment.id, unverifiedSegment(segment, uiLanguage, searchEnabled, "check-failed"));
+          verified.set(segment.id, unverifiedSegment(segment, uiLanguage, searchEnabled, "check_failed"));
           cutShort.add(segment.id);
         }
       }
@@ -476,6 +494,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
               signal,
               charge: chargeCache,
               suppressModelKnowledge: providerReason !== null,
+              evidenceGap,
             }),
             timeoutMs + 750,
             "verification timed out",
@@ -485,7 +504,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
           if (isModelAuthError(error)) throw error;
           remember(warnings, error, "llm");
           for (const segment of group) {
-            verified.set(segment.id, unverifiedSegment(segment, uiLanguage, searchEnabled, "check-failed"));
+            verified.set(segment.id, unverifiedSegment(segment, uiLanguage, searchEnabled, "check_failed"));
             cutShort.add(segment.id);
           }
         }
@@ -495,7 +514,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       for (const group of groups.slice(cursor)) {
         for (const segment of group) {
           if (verified.has(segment.id)) continue;
-          verified.set(segment.id, unverifiedSegment(segment, uiLanguage, searchEnabled, "check-failed"));
+          verified.set(segment.id, unverifiedSegment(segment, uiLanguage, searchEnabled, "check_failed"));
           cutShort.add(segment.id);
         }
       }
@@ -519,7 +538,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       continue;
     }
     if (searchFailed.has(segment.id)) {
-      verified.set(segment.id, unverifiedSegment(segment, uiLanguage, searchEnabled, "search-failed"));
+      verified.set(segment.id, unverifiedSegment(segment, uiLanguage, searchEnabled, "search_failed"));
       continue;
     }
     if (overBudget.has(segment.id)) {
@@ -549,6 +568,7 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
           explanation: unverifiableExplanation(uiLanguage, "budget"),
           sources: [],
           evidenceMode: searchEnabled ? "web-search" : "model-knowledge-only",
+          unverifiableReason: "not_searched_cap",
         }),
       );
       continue;
@@ -1025,6 +1045,7 @@ async function judgeGroup(options: {
   signal?: AbortSignal;
   charge?: CacheCharge;
   suppressModelKnowledge?: boolean;
+  evidenceGap?: Map<string, EvidenceGap>;
 }): Promise<Map<string, SegmentResult>> {
   const results = new Map<string, SegmentResult>();
   const pending: DraftSegment[] = [];
@@ -1055,6 +1076,7 @@ async function judgeGroup(options: {
           articleTitle: options.articleTitle,
           allowModelKnowledge:
             options.searchEnabled && urls.length === 0 && !options.suppressModelKnowledge,
+          evidenceGap: options.evidenceGap?.get(segment.id) ?? null,
         }),
       ),
     );
@@ -1098,6 +1120,7 @@ async function judgeGroup(options: {
           explanation: unverifiableExplanation(options.uiLanguage, "weak-evidence"),
           sources: [],
           evidenceMode: options.searchEnabled ? "web-search" : "model-knowledge-only",
+          unverifiableReason: options.evidenceGap?.get(segment.id) ?? "model_unverifiable",
         }),
       );
       continue;
@@ -1119,6 +1142,7 @@ async function judgeGroup(options: {
         options.searchEnabled &&
         (options.evidence.get(segment.id)?.length ?? 0) === 0 &&
         !options.suppressModelKnowledge,
+      evidenceGap: options.evidenceGap?.get(segment.id) ?? null,
     });
     results.set(segment.id, finishSegment(segment, applied));
     const urls = (options.evidence.get(segment.id) ?? []).map((item) => item.url);
@@ -1272,7 +1296,9 @@ function validateContradictions(data: unknown, uiLanguage: UiLanguage): Contradi
 
 function finishSegment(
   segment: DraftSegment,
-  result: Pick<SegmentResult, "label" | "confidence" | "explanation" | "sources" | "evidenceMode">,
+  result: Pick<SegmentResult, "label" | "confidence" | "explanation" | "sources" | "evidenceMode"> & {
+    unverifiableReason?: UnverifiableReason | null;
+  },
 ): SegmentResult {
   return {
     id: segment.id,
@@ -1284,6 +1310,7 @@ function finishSegment(
     explanation: result.explanation,
     sources: result.sources,
     evidenceMode: result.evidenceMode,
+    unverifiableReason: result.label === "Unverifiable" ? (result.unverifiableReason ?? "model_unverifiable") : null,
   };
 }
 
@@ -1299,16 +1326,19 @@ function unverifiedSegment(
   segment: DraftSegment,
   uiLanguage: UiLanguage,
   searchEnabled: boolean,
-  reason: "weak-evidence" | "budget" | "no-evidence" | "search-failed" | "not-independent" | "check-failed",
+  reason: "search_failed" | "check_failed",
 ): SegmentResult {
   return finishSegment(segment, {
     label: "Unverifiable",
     confidence: 0.3,
-    explanation: unverifiableExplanation(uiLanguage, reason),
+    explanation: unverifiableExplanation(uiLanguage, reason === "search_failed" ? "search-failed" : "check-failed"),
     sources: [],
     evidenceMode: searchEnabled ? "web-search" : "model-knowledge-only",
+    unverifiableReason: reason,
   });
 }
+
+type EvidenceGap = "no_results" | "evidence_filtered_irrelevant" | "evidence_filtered_copy" | null;
 
 function remainingMs(deadline: number, cap: number): number {
   return Math.max(1_000, Math.min(cap, deadline - Date.now()));

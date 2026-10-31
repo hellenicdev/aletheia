@@ -563,6 +563,7 @@ function claimCard(segment: SegmentResult): HTMLElement {
   card.className = "claim-card";
   card.id = `claim-${segment.id}`;
   card.dataset.label = segment.label;
+  if (segment.unverifiableReason) card.dataset.unverifiableReason = segment.unverifiableReason;
   const top = document.createElement("div");
   top.className = "claim-top";
   const pill = document.createElement("span");
@@ -621,6 +622,13 @@ function claimReason(segment: SegmentResult): DocumentFragment {
         : "evidenceNa",
   );
   fragment.append(explanation, mode);
+  if (segment.unverifiableReason) {
+    const code = document.createElement("p");
+    code.className = "claim-code";
+    code.dataset.reason = segment.unverifiableReason;
+    code.textContent = segment.unverifiableReason;
+    fragment.append(code);
+  }
   if (segment.sources.length === 0) {
     const none = document.createElement("p");
     none.className = "explanation";

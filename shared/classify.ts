@@ -34,6 +34,8 @@ const PRIVATE_NARRATIVE =
 const WHO_EXPERIENCE = /\bwho (?:has |had |have )?(?:been |started |used |smoked |vaped |quit )/i;
 const FIRST_PERSON =
   /\b(?:i|i've|i’ve|i'm|i’m|i am|i was|i had|i have|i'd|i’d|my|we|we've|we're|our|εγώ|μου|έχω|είμαι|ήμουν)\b/iu;
+const INDIVIDUAL_FIRST =
+  /\b(?:i|i've|i’ve|i'm|i’m|i am|i was|i had|i have|i'd|i’d|my|εγώ|μου|έχω|είμαι|ήμουν)\b/iu;
 const PRIVATE_ROLE =
   /\b(?:teacher|student|pupil|nurse|mother|father|mum|dad|resident|smoker|vaper|woman|man|girl|boy|teenager|pensioner|δάσκαλος|μαθητ\p{L}*|μητέρα|πατέρας)\b/iu;
 
@@ -58,7 +60,9 @@ export function isPersonalAccount(text: string): boolean {
   if (PRIVATE_NARRATIVE.test(value)) return true;
   if (WHO_EXPERIENCE.test(value)) return true;
   const quoted = [...value.matchAll(/["“«]([^"”»]{8,})["”»]/g)].map((match) => match[1]);
-  if (quoted.some((span) => FIRST_PERSON.test(span))) return true;
+  // "I've been vaping" is a private story. "We will cover the losses" is the
+  // company or the official speaking, and it stays checkable.
+  if (quoted.some((span) => INDIVIDUAL_FIRST.test(span))) return true;
   if (
     ATTRIBUTED.test(value) &&
     PRIVATE_ROLE.test(value) &&
