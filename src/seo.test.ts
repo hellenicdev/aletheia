@@ -47,4 +47,10 @@ describe("seo", () => {
     expect(languageUrl("/", "?demo=el", "el")).toBe("/el/?demo=el");
     expect(languageUrl("/el/", "?lang=en&demo=el", "en")).toBe("/?demo=1");
   });
+
+  it("keeps a shared report link in the language of its path", () => {
+    expect(pageLangFromSearch("?url=https://example.com/a", "el", "el-GR", "/aletheia/")).toBe("en");
+    expect(pageLangFromSearch("?url=https://example.com/a", "en", "en", "/aletheia/el/")).toBe("el");
+    expect(pageLangFromSearch("?url=https://example.com/a", "el", "el", "/el/")).toBe("el");
+  });
 });

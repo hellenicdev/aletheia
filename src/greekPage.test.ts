@@ -17,5 +17,10 @@ describe("greek page", () => {
     expect(greek).toContain("Το σήμα της Αλήθειας σε σκούρο φόντο");
     expect(greek).not.toContain("claim-level news credibility");
     expect(greek).toContain("gtag('consent', 'default'");
+    expect(greek).toContain('property="og:title"');
+    expect(greek).toContain('property="og:description"');
+    expect(greek).toContain('property="og:image" content="https://hellenicdev.eu/aletheia/og.png"');
+    expect(greek).toContain('name="twitter:card" content="summary_large_image"');
+    expect(html).toContain('property="og:image" content="https://hellenicdev.eu/aletheia/og.png"');
   });
 });

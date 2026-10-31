@@ -33,5 +33,10 @@ describe("i18n", () => {
     expect(t("el", "ignoredNav")).toContain("Αγνοήθηκαν");
     expect(t("en", "github")).toBe("View source on GitHub");
     expect(t("el", "github")).toBe("Πηγαίος κώδικας στο GitHub");
+    expect(t("en", "shareText")).toBe("Aletheia rated this article {score}/100: {band}");
+    expect(t("el", "shareText")).toContain("{score}/100");
+    expect(t("el", "share")).toBe("Κοινοποίηση");
+    expect(t("en", "shareCopied")).toBe("Copied!");
+    expect(t("el", "shareCopied")).toBe("Αντιγράφηκε!");
   });
 });

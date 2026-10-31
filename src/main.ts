@@ -12,7 +12,7 @@ import { renderHighlighted } from "../shared/highlight";
 import { LABELS, type UiLanguage } from "../shared/labels";
 import { partialClaimsNotice } from "../shared/messages";
 import type { AnalysisResult, SearchOutageReason, SegmentResult, StageName } from "../shared/types";
-import { CONSENT_STORAGE_KEY, grantAnalytics, injectGtag, readConsent, scheduleGtag, trackAnalyzeStarted, trackPageView } from "./analytics";
+import { CONSENT_STORAGE_KEY, grantAnalytics, injectGtag, readConsent, scheduleGtag, trackAnalyzeStarted, trackPageView, trackShare } from "./analytics";
 import { AnalysisError, analyzeArticle, fetchCachedAnalysis, fetchHealth } from "./api";
 import { presentStreamError } from "./errorCopy";
 import { presentLimit } from "./limitCopy";
@@ -20,8 +20,9 @@ import { detectedName, labelHelp, labelName, t, type MessageKey } from "./i18n";
 import { scheduleKofi } from "./kofi";
 import { presetArticleUrl } from "./presetUrl";
 import { appBaseFromPath, documentMeta, languageUrl, pageLangFromSearch, siteBase } from "./seo";
-import { CLAIM_LIMIT, joinNotice, parseFilter, presentLabels, visibleClaims, type ClaimFilter } from "./resultsView";
-import { buildSample } from "./sample";
+import { CLAIM_LIMIT, joinNotice, parseFilter, parseSort, presentLabels, sortClaims, visibleClaims, type ClaimFilter, type ClaimSort } from "./resultsView";
+import { buildFixture, fixtureFromSearch, type FixtureId } from "./sample";
+import { prefersWebShare, reportPermalink, scoreBand, shareMessage, shareTarget, writeClipboard, type ShareChannel } from "./share";
 
 const STAGES: StageName[] = ["ingest", "segment", "evidence", "verify", "score"];
 const STAGE_KEY: Record<StageName, MessageKey> = {
@@ -42,8 +43,13 @@ const state: {
   result: AnalysisResult | null;
   sample: boolean;
   claimFilter: ClaimFilter;
+  claimSort: ClaimSort;
   showAllClaims: boolean;
   openClaimId: string | null;
+  fixtureId: FixtureId | null;
+  /** URL the report was cached under. Falls back to the article source URL. */
+  shareArticleUrl: string | null;
+  reveal: boolean;
 } = {
   lang: "en",
   mode: "paste",
@@ -51,8 +57,12 @@ const state: {
   result: null,
   sample: false,
   claimFilter: "all",
+  claimSort: "reading",
   showAllClaims: false,
   openClaimId: null,
+  fixtureId: null,
+  shareArticleUrl: null,
+  reveal: false,
 };
 
 const mount = document.querySelector<HTMLElement>("#app");
@@ -62,6 +72,7 @@ const app: HTMLElement = mount;
 app.classList.add("app");
 app.dataset.phase = "idle";
 app.innerHTML = `
+  <div class="share-backdrop" id="share-backdrop" hidden aria-hidden="true"></div>
   <a class="skip" href="#composer" data-i18n="skip"></a>
   <div class="consent" id="consent" role="region" aria-labelledby="consent-title" hidden>
     <div class="consent-copy">
@@ -135,9 +146,14 @@ app.innerHTML = `
       </section>
       <section id="stages" hidden tabindex="-1" aria-labelledby="stages-label">
         <h2 id="stages-label" class="visually-hidden" data-i18n="stagesLabel"></h2>
-        <ol class="stepper" id="stage-list"></ol>
-        <p class="step-name" id="step-name" aria-live="polite"></p>
-        <p class="step-wait" id="step-wait"></p>
+        <div class="runway">
+          <p class="step-name" id="step-name" aria-live="polite"></p>
+          <div class="progress" id="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-labelledby="stages-label">
+            <span class="progress-fill" id="progress-fill"></span>
+          </div>
+          <ol class="stepper" id="stage-list"></ol>
+          <p class="step-wait" id="step-wait"></p>
+        </div>
       </section>
       <details class="fold" id="extract-preview" hidden>
         <summary><span data-i18n="extracted"></span><span class="fold-aside" id="preview-title"></span></summary>
@@ -147,6 +163,7 @@ app.innerHTML = `
         </div>
       </details>
       <section id="report" hidden tabindex="-1" aria-labelledby="score-label">
+        <p class="visually-hidden" id="report-ready" aria-live="polite"></p>
         <div class="focal">
           <div class="gauge" id="gauge" data-band="mid" role="img">
             <svg viewBox="0 0 120 120" aria-hidden="true">
@@ -161,12 +178,41 @@ app.innerHTML = `
           </div>
           <div>
             <p class="section-label" id="score-label" data-i18n="scoreLabel"></p>
+            <p class="band" id="band" hidden></p>
             <p class="verdict" id="verdict" tabindex="-1" aria-live="polite"></p>
             <p class="notice" id="notice" hidden></p>
+            <div class="share" id="share">
+              <button type="button" class="share-button" id="share-button" aria-haspopup="menu" aria-expanded="false" aria-controls="share-menu">
+                <svg class="share-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 16V4m0 0 4 4m-4-4-4 4M5 13v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5"></path>
+                </svg>
+                <span data-i18n="share"></span>
+              </button>
+              <div class="share-menu" id="share-menu" role="menu" hidden data-i18n-aria="shareMenu">
+                <button type="button" role="menuitem" data-share="copy" data-i18n="shareCopy"></button>
+                <button type="button" role="menuitem" data-share="x" data-i18n="shareX"></button>
+                <button type="button" role="menuitem" data-share="facebook" data-i18n="shareFacebook"></button>
+                <button type="button" role="menuitem" data-share="linkedin" data-i18n="shareLinkedIn"></button>
+                <button type="button" role="menuitem" data-share="whatsapp" data-i18n="shareWhatsApp"></button>
+                <button type="button" role="menuitem" data-share="telegram" data-i18n="shareTelegram"></button>
+                <button type="button" role="menuitem" data-share="email" data-i18n="shareEmail"></button>
+              </div>
+            </div>
+            <p class="visually-hidden" id="share-status" role="status"></p>
           </div>
         </div>
         <div class="summary" id="summary" role="group" aria-labelledby="claims-heading"></div>
-        <h2 class="claims-heading" id="claims-heading" data-i18n="claimsHeading"></h2>
+        <div class="claims-bar">
+          <h2 class="claims-heading" id="claims-heading" data-i18n="claimsHeading"></h2>
+          <label class="sort-control">
+            <span data-i18n="sortLabel"></span>
+            <select id="claim-sort">
+              <option value="reading" data-i18n="sortReading"></option>
+              <option value="verdict" data-i18n="sortVerdict"></option>
+              <option value="confidence" data-i18n="sortConfidence"></option>
+            </select>
+          </label>
+        </div>
         <div class="claim-list" id="claim-list"></div>
         <button class="ghost show-all" type="button" id="show-all-claims" hidden></button>
         <div class="folds">
@@ -369,7 +415,7 @@ function setLanguage(lang: UiLanguage) {
     return;
   }
   state.lang = lang;
-  if (state.sample && state.result) state.result = buildSample(lang);
+  if (state.sample && state.result) state.result = buildFixture(state.fixtureId ?? "mixed", lang);
   applyI18n();
   if (storedConsent()) scheduleKofi(window, lang);
 }
@@ -475,25 +521,41 @@ function setStage(stage: StageName, status: "start" | "done" | "progress", done?
 function renderStages(stages: Record<StageName, StageState>) {
   stageList.replaceChildren();
   let current: StageName | null = null;
+  let doneCount = 0;
   for (const stage of STAGES) {
     const item = document.createElement("li");
     item.dataset.state = stages[stage];
     const label = t(state.lang, STAGE_KEY[stage]);
     const statusKey: MessageKey =
       stages[stage] === "active" ? "stageActive" : stages[stage] === "done" ? "stageDone" : "stagePending";
-    item.setAttribute("aria-label", `${label}, ${t(state.lang, statusKey)}`);
+    if (stages[stage] === "done") doneCount += 1;
     if (stages[stage] === "active") {
       item.setAttribute("aria-current", "step");
       current = stage;
     }
-    const dot = document.createElement("span");
-    dot.className = "step-dot";
-    item.append(dot);
+    const mark = document.createElement("span");
+    mark.className = "step-mark";
+    mark.setAttribute("aria-hidden", "true");
+    const copy = document.createElement("span");
+    copy.className = "step-label";
+    const detail = stages[stage] === "active" ? stageDetail[stage] : "";
+    copy.textContent = detail ? `${label} ${detail}` : label;
+    const status = document.createElement("span");
+    status.className = "visually-hidden";
+    status.textContent = `, ${t(state.lang, statusKey)}`;
+    copy.append(status);
+    item.append(mark, copy);
     stageList.append(item);
   }
   const named = current ?? STAGES.find((stage) => stages[stage] === "pending") ?? null;
   const progress = named ? stageDetail[named] : "";
   stepName.textContent = named ? `${t(state.lang, STAGE_KEY[named])}${progress ? ` ${progress}` : ""}` : "";
+  const activeBonus = current ? 0.45 : 0;
+  const percent = Math.round(((doneCount + activeBonus) / STAGES.length) * 100);
+  const bar = $<HTMLElement>("#progress");
+  bar.setAttribute("aria-valuenow", String(percent));
+  bar.setAttribute("aria-valuetext", stepName.textContent);
+  $<HTMLElement>("#progress-fill").style.width = `${percent}%`;
 }
 
 function renderLegend() {
@@ -550,8 +612,17 @@ function renderClaims() {
   list.replaceChildren();
   const segments = state.result?.segments ?? [];
   renderSummary(segments);
-  const { visible, total } = visibleClaims(segments, state.claimFilter, state.showAllClaims);
-  for (const segment of visible) list.append(claimCard(segment));
+  const matched = state.claimFilter === "all" ? segments : segments.filter((segment) => segment.label === state.claimFilter);
+  const sorted = sortClaims(matched, state.claimSort);
+  const { visible, total } = visibleClaims(sorted, "all", state.showAllClaims);
+  list.classList.toggle("is-entering", state.reveal);
+  visible.forEach((segment, index) => {
+    const card = claimCard(segment);
+    if (state.reveal) card.style.animationDelay = `${Math.min(index, 8) * 45}ms`;
+    list.append(card);
+  });
+  const sort = $<HTMLSelectElement>("#claim-sort");
+  if (sort.value !== state.claimSort) sort.value = state.claimSort;
   more.hidden = total <= CLAIM_LIMIT;
   more.textContent = state.showAllClaims ? t(state.lang, "showFewer") : `${t(state.lang, "showAll")} (${total})`;
   more.setAttribute("aria-expanded", String(state.showAllClaims));
@@ -601,6 +672,7 @@ function claimCard(segment: SegmentResult): HTMLElement {
   reason.className = "claim-more";
   reason.id = `reason-${segment.id}`;
   reason.hidden = !open;
+  reason.classList.toggle("is-open", open);
   if (open) reason.append(claimReason(segment));
   card.append(reason);
   return card;
@@ -666,14 +738,18 @@ function renderIgnored() {
 
 function renderScore() {
   const result = state.result;
+  const bandEl = $<HTMLElement>("#band");
   if (!result) {
-    gauge.classList.remove("is-provisional");
+    gauge.classList.remove("is-provisional", "is-ready");
     gauge.dataset.band = "mid";
     gauge.setAttribute("aria-label", t(state.lang, "scoreLabel"));
     gaugeValue.style.strokeDashoffset = String(ARC);
     gaugeNumber.textContent = "—";
     gaugeStatus.hidden = true;
+    bandEl.hidden = true;
+    bandEl.textContent = "";
     verdictEl.textContent = "";
+    verdictEl.classList.remove("is-ready");
     $<HTMLElement>("#notice").hidden = true;
     $<HTMLElement>("#subscores").replaceChildren();
     $<HTMLElement>("#contradictions").replaceChildren();
@@ -683,6 +759,7 @@ function renderScore() {
   }
   const overall = result.score.overall;
   const provisional = result.provisional === true;
+  const band = scoreBand(overall, provisional);
   gauge.classList.toggle("is-provisional", provisional);
   gauge.dataset.band = overall < 45 ? "low" : overall < 75 ? "mid" : "high";
   gaugeStatus.hidden = !provisional;
@@ -691,8 +768,16 @@ function renderScore() {
     "aria-label",
     `${t(state.lang, "scoreLabel")} ${overall}${provisional ? `, ${t(state.lang, "provisional")}` : ""}`,
   );
-  animateGauge(overall);
+  const bandKey: MessageKey =
+    band === "high" ? "bandHigh" : band === "mid" ? "bandMid" : band === "low" ? "bandLow" : "bandProvisional";
+  bandEl.hidden = false;
+  bandEl.dataset.band = band;
+  bandEl.textContent = t(state.lang, bandKey);
+  bandEl.classList.toggle("is-ready", state.reveal);
+  animateGauge(overall, state.reveal);
   verdictEl.textContent = result.score.verdict;
+  verdictEl.classList.toggle("is-ready", state.reveal);
+  if (state.reveal) $<HTMLElement>("#report-ready").textContent = t(state.lang, "reportReady");
   const notice = $<HTMLElement>("#notice");
   const line = joinNotice(noticeParts(result));
   notice.hidden = line.length === 0;
@@ -777,7 +862,16 @@ function renderSubs(result: AnalysisResult) {
     const track = document.createElement("div");
     track.className = "track";
     const fill = document.createElement("span");
-    fill.style.width = `${row.value ?? 0}%`;
+    const width = `${row.value ?? 0}%`;
+    const grow = state.reveal && !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    fill.style.width = grow ? "0%" : width;
+    if (grow) {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          fill.style.width = width;
+        });
+      });
+    }
     track.append(fill);
     block.append(top, track);
     if (row.note) {
@@ -790,19 +884,34 @@ function renderSubs(result: AnalysisResult) {
   }
 }
 
-function animateGauge(target: number) {
+let gaugeToken = 0;
+
+function animateGauge(target: number, reveal: boolean) {
+  const token = ++gaugeToken;
   const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  gaugeValue.style.strokeDashoffset = String(ARC * (1 - target / 100));
-  if (reduce) {
+  const finalOffset = String(ARC * (1 - target / 100));
+  gauge.classList.remove("is-ready");
+  if (!reveal || reduce) {
+    gaugeValue.style.strokeDashoffset = finalOffset;
     gaugeNumber.textContent = String(target);
     return;
   }
+  gaugeValue.style.strokeDashoffset = String(ARC);
+  gaugeNumber.textContent = "0";
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      if (token !== gaugeToken) return;
+      gaugeValue.style.strokeDashoffset = finalOffset;
+    });
+  });
   const started = performance.now();
   const step = (now: number) => {
+    if (token !== gaugeToken) return;
     const progress = Math.min(1, (now - started) / 700);
     const eased = 1 - (1 - progress) ** 3;
     gaugeNumber.textContent = String(Math.round(target * eased));
     if (progress < 1) requestAnimationFrame(step);
+    else gauge.classList.add("is-ready");
   };
   requestAnimationFrame(step);
 }
@@ -899,10 +1008,14 @@ function showReport(result: AnalysisResult, sample: boolean) {
   state.claimFilter = "all";
   state.showAllClaims = false;
   state.openClaimId = null;
+  state.reveal = true;
   analyzeButton.disabled = false;
   analyzeButton.textContent = t(state.lang, "analyze");
+  closeShare();
   setPhase("result");
   applyI18n();
+  state.reveal = false;
+  syncShareTargets();
   verdictEl.focus();
 }
 
@@ -913,8 +1026,13 @@ function returnToInput() {
   state.running = false;
   state.openClaimId = null;
   state.claimFilter = "all";
+  state.claimSort = "reading";
   state.showAllClaims = false;
+  state.fixtureId = null;
+  state.shareArticleUrl = null;
+  $<HTMLElement>("#report-ready").textContent = "";
   showError(null);
+  closeShare();
   setPhase("idle");
   applyI18n();
   textInput.focus();
@@ -924,6 +1042,7 @@ function setPhase(phase: "idle" | "running" | "result") {
   app.dataset.phase = phase;
   composer.hidden = phase !== "idle";
   stagesEl.hidden = phase !== "running";
+  stagesEl.setAttribute("aria-busy", phase === "running" ? "true" : "false");
   report.hidden = phase !== "result";
   newAnalysis.hidden = phase !== "result";
   if (phase !== "running") $<HTMLElement>("#extract-preview").hidden = true;
@@ -937,24 +1056,30 @@ function showPreview(article: { title: string | null; text: string }) {
   $<HTMLElement>("#preview-body").textContent = article.text;
 }
 
-async function runSample(instant: boolean) {
+async function runFixture(id: FixtureId, instant: boolean) {
   if (state.running) return;
   showError(null);
   state.running = true;
   state.result = null;
   state.sample = true;
+  state.fixtureId = id;
+  state.shareArticleUrl = null;
   analyzeButton.disabled = true;
   setPhase("running");
   resetStages();
+  startElapsed();
   const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   if (!instant && !reduce) {
     for (const stage of STAGES) {
       setStage(stage, "start");
-      await wait(380);
+      await wait(680);
       setStage(stage, "done");
     }
+  } else {
+    for (const stage of STAGES) stageMemory[stage] = "done";
   }
-  showReport(buildSample(state.lang), true);
+  stopElapsed();
+  showReport(buildFixture(id, state.lang), true);
 }
 
 async function runAnalysis() {
@@ -981,8 +1106,10 @@ async function runAnalysis() {
   trackAnalyzeStarted(window.gtag);
   state.running = true;
   state.sample = false;
+  state.fixtureId = null;
   state.result = null;
   state.openClaimId = null;
+  state.shareArticleUrl = state.mode === "url" ? (payload.url ?? null) : null;
   analyzeButton.disabled = true;
   analyzeButton.textContent = t(state.lang, "analyzing");
   setPhase("running");
@@ -1023,7 +1150,7 @@ $<HTMLElement>(".tabs").addEventListener("keydown", (event) => {
   setMode(next);
   $<HTMLButtonElement>(next === "paste" ? "#tab-paste" : "#tab-url").focus();
 });
-$<HTMLButtonElement>("#sample-button").addEventListener("click", () => void runSample(false));
+$<HTMLButtonElement>("#sample-button").addEventListener("click", () => void runFixture("mixed", false));
 newAnalysis.addEventListener("click", () => {
   returnToInput();
 });
@@ -1057,48 +1184,17 @@ $<HTMLButtonElement>("#show-all-claims").addEventListener("click", () => {
   renderClaims();
   $<HTMLButtonElement>("#show-all-claims").focus();
 });
+$<HTMLSelectElement>("#claim-sort").addEventListener("change", () => {
+  state.claimSort = parseSort($<HTMLSelectElement>("#claim-sort").value);
+  state.showAllClaims = false;
+  state.openClaimId = null;
+  renderClaims();
+});
 $<HTMLElement>("#article-body").addEventListener("click", (event) => {
   const claim = (event.target as HTMLElement).closest<HTMLButtonElement>(".claim");
   if (!claim?.dataset.id) return;
   openClaim(claim.dataset.id);
 });
-
-const params = new URLSearchParams(location.search);
-const demo = params.get("demo");
-const stored = (() => {
-  try {
-    return localStorage.getItem("aletheia-lang");
-  } catch {
-    return null;
-  }
-})();
-state.lang = pageLangFromSearch(location.search, stored, navigator.language, location.pathname);
-const aligned = languageUrl(location.pathname, location.search, state.lang);
-if ((params.get("lang") === "el" || params.get("lang") === "en") && aligned !== `${location.pathname}${location.search}`) {
-  location.replace(`${aligned}${location.hash}`);
-} else {
-  const consentChoice = storedConsent();
-  if (!consentChoice) {
-    $<HTMLElement>("#consent").hidden = false;
-  } else {
-    scheduleKofi(window, state.lang);
-  }
-  applyI18n();
-  if (consentChoice === "accepted") scheduleGtag();
-  void fetchHealth().then((health) => {
-    healthKind = !health ? "down" : health.searchConfigured ? "search" : "nosearch";
-    healthDetail = health ? [health.model, health.searchProvider].filter(Boolean).join(" · ") : "";
-    renderHealth();
-  });
-  const preset = presetArticleUrl(location.search);
-  if (preset) {
-    setMode("url");
-    urlInput.value = preset;
-    void fetchCachedAnalysis(preset, state.lang).then((cached) => {
-      if (cached) showReport(cached, false);
-    });
-  } else if (demo) void runSample(params.get("instant") === "1");
-}
 
 function storedConsent(): "accepted" | "declined" | null {
   try {
@@ -1138,3 +1234,219 @@ function rememberConsent(choice: "accepted" | "declined") {
 
 $<HTMLButtonElement>("#consent-accept").addEventListener("click", () => rememberConsent("accepted"));
 $<HTMLButtonElement>("#consent-decline").addEventListener("click", () => rememberConsent("declined"));
+
+const shareButton = $<HTMLButtonElement>("#share-button");
+const shareMenu = $<HTMLElement>("#share-menu");
+const shareStatus = $<HTMLElement>("#share-status");
+let shareResetTimer: ReturnType<typeof setTimeout> | undefined;
+
+function articleUrlForShare(): string | null {
+  const explicit = state.shareArticleUrl?.trim() ?? "";
+  if (/^https?:\/\//i.test(explicit)) return explicit;
+  const source = state.result?.article.sourceUrl?.trim() ?? "";
+  if (/^https?:\/\//i.test(source)) return source;
+  return null;
+}
+
+function currentShare() {
+  const result = state.result;
+  const score = result?.score.overall ?? 0;
+  const band = scoreBand(score, result?.provisional === true);
+  const bandKey: MessageKey =
+    band === "high" ? "bandHigh" : band === "mid" ? "bandMid" : band === "low" ? "bandLow" : "bandProvisional";
+  const text = shareMessage(t(state.lang, "shareText"), score, t(state.lang, bandKey));
+  const articleUrl = articleUrlForShare();
+  const url = articleUrl ? reportPermalink(state.lang, articleUrl, location) : null;
+  return { text, url, subject: t(state.lang, "shareSubject"), title: t(state.lang, "shareSubject") };
+}
+
+function syncShareTargets() {
+  const linked = Boolean(currentShare().url);
+  for (const item of shareMenu.querySelectorAll<HTMLButtonElement>("[data-share]")) {
+    if (item.dataset.share === "copy") {
+      item.disabled = false;
+      continue;
+    }
+    item.disabled = !linked;
+  }
+}
+
+function shareMenuItems(): HTMLButtonElement[] {
+  return [...shareMenu.querySelectorAll<HTMLButtonElement>("[data-share]")].filter((item) => !item.disabled);
+}
+
+function closeShare(focusButton = false) {
+  shareMenu.hidden = true;
+  $<HTMLElement>("#share-backdrop").hidden = true;
+  shareButton.setAttribute("aria-expanded", "false");
+  if (shareResetTimer) clearTimeout(shareResetTimer);
+  shareResetTimer = undefined;
+  const copy = shareMenu.querySelector<HTMLButtonElement>("[data-share='copy']");
+  if (copy) copy.textContent = t(state.lang, "shareCopy");
+  if (focusButton) shareButton.focus();
+}
+
+function openShare() {
+  syncShareTargets();
+  $<HTMLElement>("#share-backdrop").hidden = false;
+  shareMenu.hidden = false;
+  shareButton.setAttribute("aria-expanded", "true");
+  shareMenuItems()[0]?.focus();
+}
+
+function showShareFeedback(message: string) {
+  shareStatus.textContent = message;
+  const copy = shareMenu.querySelector<HTMLButtonElement>("[data-share='copy']");
+  if (copy && (message === t(state.lang, "shareCopied") || message === t(state.lang, "shareFailed") || message === t(state.lang, "shareNoLink"))) {
+    copy.textContent = message;
+  }
+  if (shareResetTimer) clearTimeout(shareResetTimer);
+  shareResetTimer = setTimeout(() => {
+    shareStatus.textContent = "";
+    if (copy) copy.textContent = t(state.lang, "shareCopy");
+  }, 2000);
+}
+
+async function copyShareLink() {
+  const payload = currentShare();
+  if (!payload.url) {
+    showShareFeedback(t(state.lang, "shareNoLink"));
+    return;
+  }
+  const ok = await writeClipboard(payload.url);
+  if (!ok) {
+    showShareFeedback(t(state.lang, "shareFailed"));
+    return;
+  }
+  trackShare(window.gtag, "copy");
+  showShareFeedback(t(state.lang, "shareCopied"));
+}
+
+function openShareChannel(channel: Exclude<ShareChannel, "copy">) {
+  const payload = currentShare();
+  if (!payload.url) {
+    showShareFeedback(t(state.lang, "shareNoLink"));
+    return;
+  }
+  const href = shareTarget(channel, payload.text, payload.url, payload.subject);
+  trackShare(window.gtag, channel);
+  if (channel === "email") window.location.href = href;
+  else window.open(href, "_blank", "noopener,noreferrer");
+  closeShare();
+}
+
+shareButton.addEventListener("click", () => {
+  if (!shareMenu.hidden) {
+    closeShare();
+    return;
+  }
+  const payload = currentShare();
+  const coarse = window.matchMedia("(pointer: coarse)").matches;
+  if (prefersWebShare({ canShare: typeof navigator.share === "function", coarsePointer: coarse }) && payload.url) {
+    void navigator.share({ title: payload.title, text: payload.text, url: payload.url }).then(
+      () => trackShare(window.gtag, "web_share"),
+      (error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        openShare();
+      },
+    );
+    return;
+  }
+  openShare();
+});
+
+shareMenu.addEventListener("click", (event) => {
+  const item = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-share]");
+  if (!item || item.disabled) return;
+  const channel = item.dataset.share;
+  if (channel === "copy") {
+    void copyShareLink();
+    return;
+  }
+  if (channel === "x" || channel === "facebook" || channel === "linkedin" || channel === "whatsapp" || channel === "telegram" || channel === "email") {
+    openShareChannel(channel);
+  }
+});
+
+shareMenu.addEventListener("keydown", (event) => {
+  const items = shareMenuItems();
+  const index = items.findIndex((item) => item === document.activeElement);
+  if (event.key === "Escape" || event.key === "Tab") {
+    if (event.key === "Escape") event.preventDefault();
+    closeShare(event.key === "Escape");
+    return;
+  }
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    if (items.length === 0) return;
+    const next = event.key === "ArrowDown" ? (index + 1 + items.length) % items.length : (index - 1 + items.length) % items.length;
+    items[next]?.focus();
+  }
+  if (event.key === "Home") {
+    event.preventDefault();
+    items[0]?.focus();
+  }
+  if (event.key === "End") {
+    event.preventDefault();
+    items[items.length - 1]?.focus();
+  }
+});
+
+shareButton.addEventListener("keydown", (event) => {
+  if (event.key === "ArrowDown" && shareMenu.hidden) {
+    event.preventDefault();
+    openShare();
+  }
+});
+
+document.addEventListener("pointerdown", (event) => {
+  if (shareMenu.hidden) return;
+  const target = event.target;
+  if (!(target instanceof Node)) return;
+  if (shareMenu.contains(target) || shareButton.contains(target)) return;
+  closeShare();
+});
+$<HTMLElement>("#share-backdrop").addEventListener("click", () => closeShare());
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !shareMenu.hidden) closeShare(true);
+});
+
+const params = new URLSearchParams(location.search);
+const stored = (() => {
+  try {
+    return localStorage.getItem("aletheia-lang");
+  } catch {
+    return null;
+  }
+})();
+state.lang = pageLangFromSearch(location.search, stored, navigator.language, location.pathname);
+const aligned = languageUrl(location.pathname, location.search, state.lang);
+if ((params.get("lang") === "el" || params.get("lang") === "en") && aligned !== `${location.pathname}${location.search}`) {
+  location.replace(`${aligned}${location.hash}`);
+} else {
+  const consentChoice = storedConsent();
+  if (!consentChoice) {
+    $<HTMLElement>("#consent").hidden = false;
+  } else {
+    scheduleKofi(window, state.lang);
+  }
+  applyI18n();
+  if (consentChoice === "accepted") scheduleGtag();
+  void fetchHealth().then((health) => {
+    healthKind = !health ? "down" : health.searchConfigured ? "search" : "nosearch";
+    healthDetail = health ? [health.model, health.searchProvider].filter(Boolean).join(" · ") : "";
+    renderHealth();
+  });
+  const preset = presetArticleUrl(location.search);
+  const fixture = fixtureFromSearch(location.search);
+  if (preset) {
+    // Shared links only read the cache. A miss fills the URL field and does not start an analysis.
+    setMode("url");
+    urlInput.value = preset;
+    state.shareArticleUrl = preset;
+    void fetchCachedAnalysis(preset, state.lang).then((cached) => {
+      if (cached) showReport(cached, false);
+    });
+  } else if (fixture) void runFixture(fixture, params.get("instant") === "1");
+}
