@@ -121,6 +121,37 @@ describe("analysis cache writes", () => {
     expect(puts).toEqual([]);
   });
 
+  it("also stores the canonical article URL when a redirect changed it", async () => {
+    const { cache, puts } = recorded();
+    const result = verdict({ state: "ok", reason: null }, true);
+    result.article = { sourceUrl: "https://example.com/story/canonical" } as AnalysisResult["article"];
+    await storeAnalysis(cache, { url: page }, "el", result);
+    expect(puts).toEqual([
+      analysisCacheUrl(page, "el"),
+      analysisCacheUrl("https://example.com/story/canonical", "el"),
+    ]);
+  });
+
+  it("does not write a second key when the article URL normalises to the same cache entry", async () => {
+    const { cache, puts } = recorded();
+    const result = verdict({ state: "ok", reason: null }, true);
+    result.article = { sourceUrl: "http://example.com/story/" } as AnalysisResult["article"];
+    await storeAnalysis(cache, { url: page }, "en", result);
+    expect(puts).toEqual([analysisCacheUrl(page, "en")]);
+  });
+
+  it("matches a share permalink to the cache key after the url query is decoded", () => {
+    const article = "https://www.reuters.com/world/europe/story?id=1";
+    const permalink = `https://hellenicdev.eu/aletheia/?url=${encodeURIComponent(article)}`;
+    const parsed = new URL(permalink).searchParams.get("url");
+    expect(parsed).toBe(article);
+    expect(analysisCacheUrl(parsed ?? "", "en")).toBe(analysisCacheUrl(article, "en"));
+    const greek = `https://hellenicdev.eu/aletheia/el/?url=${encodeURIComponent(article)}`;
+    const greekUrl = new URL(greek).searchParams.get("url") ?? "";
+    expect(analysisCacheUrl(greekUrl, "el")).toBe(analysisCacheUrl(article, "el"));
+    expect(analysisCacheUrl(greekUrl, "el")).not.toBe(analysisCacheUrl(article, "en"));
+  });
+
   it("caches a partial search that still cites a source", async () => {
     const { cache, puts } = recorded();
     const result = verdict({ state: "partial", reason: "failed" }, true);

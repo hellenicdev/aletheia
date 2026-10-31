@@ -9,6 +9,7 @@ import {
   readConsent,
   trackAnalyzeStarted,
   trackPageView,
+  trackShare,
 } from "./analytics";
 
 describe("analytics", () => {
@@ -20,6 +21,16 @@ describe("analytics", () => {
     expect(calls).toEqual([["event", "analyze_started"]]);
     trackAnalyzeStarted(undefined);
     expect(calls).toHaveLength(1);
+  });
+
+  it("records a share event with the channel and without the article URL", () => {
+    const calls: unknown[][] = [];
+    trackShare((...args) => {
+      calls.push(args);
+    }, "copy");
+    trackShare(undefined, "web_share");
+    expect(calls).toEqual([["event", "share", { method: "copy" }]]);
+    expect(JSON.stringify(calls)).not.toContain("http");
   });
 
   it("grants analytics only and never grants ads", () => {
