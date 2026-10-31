@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Label } from "../shared/labels";
-import { CLAIM_LIMIT, joinNotice, parseFilter, presentLabels, visibleClaims } from "./resultsView";
+import { CLAIM_LIMIT, joinNotice, parseFilter, parseSort, presentLabels, sortClaims, visibleClaims } from "./resultsView";
 
 const labels: Label[] = ["True", "False", "Misleading", "Unverifiable", "Opinion", "Rhetorical", "True"];
 
@@ -27,6 +27,20 @@ describe("results view", () => {
     expect(visibleClaims(items, "False", false).visible).toEqual([{ label: "False" }]);
     expect(parseFilter("Opinion")).toBe("Opinion");
     expect(parseFilter("nope")).toBe("all");
+  });
+
+  it("sorts by verdict severity and by confidence without dropping claims", () => {
+    const items = [
+      { label: "True" as const, confidence: 0.4, start: 0 },
+      { label: "False" as const, confidence: 0.9, start: 10 },
+      { label: "Opinion" as const, confidence: 0.2, start: 20 },
+      { label: "Misleading" as const, confidence: 0.5, start: 5 },
+    ];
+    expect(sortClaims(items, "reading").map((item) => item.start)).toEqual([0, 10, 20, 5].sort((a, b) => a - b));
+    expect(sortClaims(items, "verdict").map((item) => item.label)).toEqual(["False", "Misleading", "True", "Opinion"]);
+    expect(sortClaims(items, "confidence").map((item) => item.confidence)).toEqual([0.9, 0.5, 0.4, 0.2]);
+    expect(parseSort("verdict")).toBe("verdict");
+    expect(parseSort("nope")).toBe("reading");
   });
 
   it("joins notices into one line and drops blanks", () => {

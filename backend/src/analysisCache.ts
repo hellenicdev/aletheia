@@ -34,9 +34,23 @@ export function storeAnalysis(
   result: AnalysisResult,
 ): Promise<void> | undefined {
   if (!shouldCacheAnalysis(result)) return undefined;
-  if (input.url) return cache.put(input.url, result, language);
-  if (input.text && cache.putText) return cache.putText(input.text, language, result);
-  return undefined;
+  const writes: Promise<void>[] = [];
+  if (input.url) {
+    writes.push(cache.put(input.url, result, language));
+    const canonical = result.article?.sourceUrl;
+    if (
+      typeof canonical === "string" &&
+      canonical.trim().length > 0 &&
+      normaliseAnalysisUrl(canonical) !== normaliseAnalysisUrl(input.url)
+    ) {
+      // Share links use the article URL. A redirect must still hit this report.
+      writes.push(cache.put(canonical, result, language));
+    }
+  } else if (input.text && cache.putText) {
+    writes.push(cache.putText(input.text, language, result));
+  }
+  if (writes.length === 0) return undefined;
+  return Promise.all(writes).then(() => undefined);
 }
 
 export function normaliseCachedText(text: string): string {

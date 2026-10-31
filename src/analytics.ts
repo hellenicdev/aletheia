@@ -21,6 +21,11 @@ export function trackAnalyzeStarted(gtag?: (...args: unknown[]) => void): void {
   gtag?.("event", "analyze_started");
 }
 
+/** Recommended `share` event. The method is the channel. The article URL stays out. */
+export function trackShare(gtag: ((...args: unknown[]) => void) | undefined, method: string): void {
+  gtag?.("event", "share", { method });
+}
+
 export function grantAnalytics(gtag?: (...args: unknown[]) => void): void {
   gtag?.("consent", "update", { ...CONSENT_ANALYTICS });
 }

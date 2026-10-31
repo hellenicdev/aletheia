@@ -34,6 +34,9 @@ export function pageLangFromSearch(
   const demo = params.get("demo");
   if (demo === "el") return "el";
   if (demo === "en" || demo === "1") return "en";
+  // A shared report link picks the language from the path, not a previous visit.
+  // /aletheia/?url=… stays English. /aletheia/el/?url=… is already Greek above.
+  if (params.get("url")?.trim()) return "en";
   if (stored === "el" || stored === "en") return stored;
   return navigatorLang.toLowerCase().startsWith("el") ? "el" : "en";
 }
