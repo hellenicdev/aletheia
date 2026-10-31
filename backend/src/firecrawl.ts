@@ -148,12 +148,11 @@ export async function searchWeb(options: {
 }): Promise<EvidenceItem[]> {
   const query = options.query.trim().slice(0, 240);
   if (!query) return [];
-  const claimKey = options.claim?.replace(/\s+/g, " ").trim().slice(0, 180) ?? "";
-  const cacheKey = claimKey ? `${options.language}:${query}:${claimKey}` : `${options.language}:${query}`;
+  const cacheKey = searchCacheKey(options.language, query, options.claim ?? "");
   if (!options.bypassCache) {
     const cached = searchCache.get(cacheKey);
     if (cached && Date.now() - cached.at < 10 * 60_000) return cached.hits;
-    const persisted = await readPersisted<EvidenceItem[]>(`search:${cacheKey}`, options.charge);
+    const persisted = await readPersisted<EvidenceItem[]>(cacheKey, options.charge);
     if (persisted) {
       searchCache.set(cacheKey, { at: Date.now(), hits: persisted });
       return persisted;
@@ -170,7 +169,12 @@ export async function searchWeb(options: {
     limit: options.limit ?? 5,
     sources: ["web"],
     timeout: timeoutMs,
-    highlights: false,
+    // Highlights replace the site's meta description with a passage about the
+    // query. They are included in the search price. Leaving them off fed the
+    // verifier taglines, so a checkable claim came back unverifiable even when
+    // a page stated the fact. Do not add scrapeOptions: that bills a scrape
+    // for every result on top of the search.
+    highlights: true,
   };
   if (options.language === "el") payload.country = "GR";
 
@@ -219,7 +223,7 @@ export async function searchWeb(options: {
     .slice(0, 4);
   if (!options.bypassCache) {
     searchCache.set(cacheKey, { at: Date.now(), hits });
-    await writePersisted(`search:${cacheKey}`, hits, options.charge);
+    await writePersisted(cacheKey, hits, options.charge);
   }
   return hits;
 }
@@ -445,6 +449,16 @@ export function scrapeCacheKey(url: string): string {
   return `scrape:v${PIPELINE_VERSION}:${url}`;
 }
 
+/**
+ * Search hits are cached with the pipeline version. A pass that stored meta
+ * descriptions must not be reused after retrieval starts keeping the passage.
+ */
+export function searchCacheKey(language: string, query: string, claim = ""): string {
+  const claimKey = claim.replace(/\s+/g, " ").trim().slice(0, 180);
+  const base = `search:v${PIPELINE_VERSION}:${language}:${query}`;
+  return claimKey ? `${base}:${claimKey}` : base;
+}
+
 export function peekQuery(claim: string): string | null {
   const hit = queryMemory.get(queryCacheKey(claim, PIPELINE_VERSION));
   if (!hit || Date.now() - hit.at > CACHE_TTL_SECONDS * 1000) return null;
@@ -581,27 +595,41 @@ function readHits(payload: Record<string, unknown>): Hit[] {
 function toEvidence(hit: Hit, claim?: string, expand?: { used: number }): EvidenceItem | null {
   if (typeof hit.url !== "string" || !/^https?:\/\//i.test(hit.url)) return null;
   const markdown = markdownToText(stringValue(hit.markdown));
-  const snippetSource =
-    stringValue(hit.description) || stringValue(hit.snippet) || markdown;
-  const byline = apByline(markdown) || apByline(stringValue(hit.title));
-  let snippet = [snippetSource, byline && !apByline(snippetSource) ? byline : ""]
-    .filter(Boolean)
-    .join(" ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 400);
-  if (claim && expand && expand.used < 2 && passageMissesFigure(claim, snippet)) {
-    const focused = focusPassage(claim, markdown.length > snippet.length ? markdown : snippet);
-    if (focused && passageAddsFigure(claim, snippet, focused)) {
-      snippet = focused.slice(0, 1500);
+  const description = markdownToText(stringValue(hit.description));
+  const snippetField = markdownToText(stringValue(hit.snippet));
+  const passage = choosePassage([description, snippetField, markdown], claim);
+  const byline = apByline(markdown) || apByline(description) || apByline(stringValue(hit.title));
+  const credit = byline && !apByline(passage) ? byline : "";
+  const full = passage.replace(/\s+/g, " ").trim();
+  let body = full.slice(0, 400);
+  if (claim && expand && expand.used < 2 && passageMissesFigure(claim, body)) {
+    const focused = focusPassage(claim, full);
+    if (focused && passageAddsFigure(claim, body, focused)) {
+      body = focused.slice(0, credit ? 1400 : 1500);
       expand.used += 1;
     }
   }
+  const snippet = [body, credit].filter(Boolean).join(" ").replace(/\s+/g, " ").trim().slice(0, 1500);
   return {
     url: hit.url,
     title: (stringValue(hit.title) || hit.url).replace(/\s+/g, " ").trim().slice(0, 180),
     snippet,
   };
+}
+
+/**
+ * Web highlights arrive in description and news highlights in snippet.
+ * Prefer a passage that actually states the claim's figures. A scraped page
+ * is only the fallback when the highlight does not.
+ */
+function choosePassage(candidates: string[], claim?: string): string {
+  const texts = candidates.map((text) => text.replace(/\s+/g, " ").trim()).filter(Boolean);
+  if (texts.length === 0) return "";
+  if (claim) {
+    const stated = texts.find((text) => !passageMissesFigure(claim, text));
+    if (stated) return stated;
+  }
+  return texts.reduce((best, text) => (text.length > best.length ? text : best));
 }
 
 /** Keep an Associated Press credit that arrived only in markdown, so a reprint is not scored as a second source. */

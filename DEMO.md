@@ -1,6 +1,6 @@
 # Demo pre-flight
 
-Use this before a live meetup. `PIPELINE_VERSION` is **15**. This pass does not change verdicts or the cache version, so a clean `https` URL that was already cached still hits. A URL that was only cached with tracking parameters needs one fresh run of the clean URL.
+Use this before a live meetup. `PIPELINE_VERSION` is **16**. This pass changes the evidence the verifier sees, so an analysis cached at version 15 misses. The first run of each article searches again. A repeat of that same clean URL still hits. A URL that was only cached with tracking parameters needs one fresh run of the clean URL.
 
 Nothing below calls search unless the step says **spends credits**.
 
@@ -16,7 +16,7 @@ Expect:
 
 - `ok: true`
 - `limiter: "durable-object"` and all three `bindings` true
-- `pipelineVersion: "15"`
+- `pipelineVersion: "16"`
 - `model` equal to the configured `OPENAI_MODEL` (`Beam-501B-A23B` in `wrangler.toml`). This is the configured id, not a live model call.
 - `searchProvider: "firecrawl-then-tavily"` when both keys are set. Firecrawl is tried first. A rejection, including HTTP 402, falls through to Tavily. `search.note` says the same thing. `search.firecrawl` and `search.tavily` are `configured` or `absent`. No key material is included.
 
