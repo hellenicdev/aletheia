@@ -1595,6 +1595,71 @@ describe("analyze", () => {
     expect(result.segments[0]?.label).toBe("True");
     expect(result.segments[0]?.sources.map((source) => source.url)).toEqual([page]);
   });
+
+  it("verifies a claim from the highlighted passage instead of the site tagline", async () => {
+    clearSearchCache();
+    const claim = "The council voted 7 to 2 on Monday and published the minutes for residents.";
+    const page = "https://www.reuters.com/world/council-vote";
+    const filler = "Site navigation and newsletter signup. ".repeat(30);
+    let highlights: unknown;
+    let seenSnippet = "";
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("api.firecrawl.dev/v2/search")) {
+        const body = JSON.parse(String(init?.body)) as { highlights?: boolean; scrapeOptions?: unknown };
+        highlights = body.highlights;
+        expect(body.scrapeOptions).toBeUndefined();
+        return new Response(
+          JSON.stringify({
+            success: true,
+            data: {
+              web: [
+                {
+                  url: page,
+                  title: "Council vote",
+                  description: `${filler}The council voted 7 to 2 on Monday and published the minutes.`,
+                },
+              ],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] };
+      const system = body.messages[0]?.content ?? "";
+      const user = body.messages[1]?.content ?? "";
+      if (system.startsWith("TASK:segment")) {
+        return llmPayload(classifyPayload(user, () => ({ claimType: "checkable_factual", note: "A recorded claim." })));
+      }
+      if (system.startsWith("TASK:queries")) {
+        return llmPayload({ queries: [{ id: "s1", query: "council voted 7 to 2" }] });
+      }
+      if (system.startsWith("TASK:verify")) {
+        const payload = JSON.parse(user) as { claims: { evidence: { snippet: string }[] }[] };
+        seenSnippet = payload.claims[0]?.evidence[0]?.snippet ?? "";
+        return llmPayload({
+          results: [
+            {
+              id: "s1",
+              label: "True",
+              confidence: 0.9,
+              explanation: "Reuters reports that the council voted 7 to 2.",
+              sourceUrls: [page],
+              sources: [{ url: page, relevant: true }],
+            },
+          ],
+        });
+      }
+      if (system.startsWith("TASK:consistency")) return llmPayload({ contradictions: [] });
+      throw new Error(system.slice(0, 24));
+    };
+    const result = await analyze({ text: claim, uiLanguage: "en" }, { env, fetchImpl });
+    expect(highlights).toBe(true);
+    expect(seenSnippet).toContain("voted 7 to 2");
+    expect(seenSnippet.length).toBeLessThan(filler.length);
+    expect(result.segments[0]?.label).toBe("True");
+    expect(result.segments[0]?.explanation).toContain("7 to 2");
+  });
 });
 
 describe("handleRequest", () => {

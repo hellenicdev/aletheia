@@ -4,6 +4,7 @@ import {
   markdownToText,
   PIPELINE_VERSION,
   scrapeCacheKey,
+  searchCacheKey,
   scrapeArticle,
   searchWeb,
   verificationCacheKey,
@@ -47,7 +48,8 @@ describe("searchWeb", () => {
 
     expect(authorization).toBe("Bearer secret-firecrawl-key");
     expect(JSON.stringify(payload)).not.toContain("secret-firecrawl-key");
-    expect(payload).toMatchObject({ query: "council vote", sources: ["web"], highlights: false });
+    expect(payload).toMatchObject({ query: "council vote", sources: ["web"], highlights: true });
+    expect(payload.scrapeOptions).toBeUndefined();
     expect(hits).toEqual([
       {
         url: "https://example.com/minutes/",
@@ -76,6 +78,36 @@ describe("searchWeb", () => {
     });
     expect(payload.country).toBe("GR");
     expect(hits[0]?.snippet).toBe("Snippet");
+  });
+
+  it("keeps a figure that sits past the first 400 characters of a highlight", async () => {
+    clearSearchCache();
+    const filler = "Site navigation and newsletter signup. ".repeat(20);
+    const fetchImpl: typeof fetch = async () =>
+      new Response(
+        JSON.stringify({
+          success: true,
+          data: {
+            web: [
+              {
+                url: "https://example.com/minutes",
+                title: "Minutes # heading",
+                description: `# Harbour\n\n${filler}\n\nThe council voted 7 to 2 on Monday and published the minutes.`,
+              },
+            ],
+          },
+        }),
+      );
+    const hits = await searchWeb({
+      apiKey: "k",
+      query: "council voted 7 to 2",
+      claim: "The council voted 7 to 2 on Monday.",
+      language: "en",
+      fetchImpl,
+    });
+    expect(hits[0]?.snippet).toContain("voted 7 to 2");
+    expect(hits[0]?.snippet.length).toBeLessThan(filler.length);
+    expect(hits[0]?.snippet).not.toContain("#");
   });
 });
 
@@ -349,6 +381,9 @@ describe("scrape cache key", () => {
     const key = scrapeCacheKey("https://www.bbc.com/news/articles/vaping");
     expect(key).toContain(`v${PIPELINE_VERSION}`);
     expect(key).toBe(`scrape:v${PIPELINE_VERSION}:https://www.bbc.com/news/articles/vaping`);
+    expect(searchCacheKey("en", "council vote", "The council voted 7 to 2.")).toBe(
+      `search:v${PIPELINE_VERSION}:en:council vote:The council voted 7 to 2.`,
+    );
     expect(key).not.toBe("https://www.bbc.com/news/articles/vaping");
   });
 });
