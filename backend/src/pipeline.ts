@@ -16,9 +16,10 @@ import {
 } from "../../shared/citations";
 import { detectLanguage, languageMatches } from "../../shared/language";
 import type { ClaimType, DetectedLanguage, Label, UiLanguage } from "../../shared/labels";
-import { CLAIM_TYPES, LABELS, isUiLanguage } from "../../shared/labels";
+import { CLAIM_TYPES, LABELS, VERDICT_LABELS, isUiLanguage } from "../../shared/labels";
 import {
   anecdoteExplanation,
+  notCheckedExplanation,
   opinionExplanation,
   rhetoricalExplanation,
   unverifiableExplanation,
@@ -563,12 +564,11 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
       verified.set(
         segment.id,
         finishSegment(segment, {
-          label: "Unverifiable",
-          confidence: 0.3,
-          explanation: unverifiableExplanation(uiLanguage, "budget"),
+          label: "Not checked",
+          confidence: 0,
+          explanation: notCheckedExplanation(uiLanguage),
           sources: [],
-          evidenceMode: searchEnabled ? "web-search" : "model-knowledge-only",
-          unverifiableReason: "not_searched_cap",
+          evidenceMode: "not-applicable",
         }),
       );
       continue;
@@ -649,9 +649,9 @@ export async function analyze(input: AnalyzeInput, deps: AnalyzeDeps): Promise<A
     confidence: segment.confidence,
     hasValidSource: segment.sources.length > 0,
     tone: blendTone(segment.text, rhetoricOf(segment.label, draftById.get(segment.id)?.claimType)),
-    inCoverage: !overBudget.has(segment.id),
+    inCoverage: segment.label !== "Not checked" && !overBudget.has(segment.id),
     countsAsGap: overBudget.has(segment.id),
-    countsTowardScore: !cutShort.has(segment.id),
+    countsTowardScore: segment.label !== "Not checked" && !cutShort.has(segment.id),
   }));
   const coverage = coverageOf(scoredSegments);
   const claimsVerified = coverage.verified;
@@ -1187,7 +1187,7 @@ function validateVerdicts(
       : [];
     return {
       id: expectString(item.id, `result ${index} id`),
-      label: expectOneOf(item.label, LABELS, `result ${index} label`),
+      label: expectOneOf(item.label, VERDICT_LABELS, `result ${index} label`),
       confidence: expectNumber(item.confidence, `result ${index} confidence`, 0, 1),
       explanation,
       sourceUrls,

@@ -1752,8 +1752,12 @@ describe("analyze", () => {
     expect(binance?.label).toBe("True");
     expect(binance?.unverifiableReason).toBeNull();
     expect(binance?.sources.map((source) => source.url)).toEqual([page]);
-    const capped = result.segments.filter((segment) => segment.unverifiableReason === "not_searched_cap");
+    const capped = result.segments.filter((segment) => segment.label === "Not checked");
     expect(capped.length).toBeGreaterThan(0);
+    expect(capped.every((segment) => segment.unverifiableReason == null)).toBe(true);
+    expect(capped.every((segment) => segment.explanation.includes("save search credits"))).toBe(true);
+    expect(result.score.counts["Not checked"]).toBe(capped.length);
+    expect(result.score.counts.Unverifiable).not.toBe(result.segments.length);
     expect(result.segments.every((segment) => segment.label !== "Unverifiable" || segment.unverifiableReason)).toBe(
       true,
     );
@@ -2539,8 +2543,13 @@ describe("handleRequest", () => {
     };
     const result = await analyze({ text: claims.join(" "), uiLanguage: "en" }, { env, fetchImpl });
     const skipped = result.segments.find((segment) => segment.text.includes("rudder"));
-    expect(skipped?.explanation).toBe("This claim was not selected for checking.");
-    expect(skipped?.explanation).not.toContain("budget");
+    expect(skipped?.label).toBe("Not checked");
+    expect(skipped?.explanation).toBe("Not checked in this analysis to save search credits.");
+    expect(skipped?.unverifiableReason).toBeNull();
+    expect(result.score.counts["Not checked"]).toBeGreaterThan(0);
+    expect(result.segments.filter((segment) => segment.label === "Unverifiable").length).toBe(
+      result.segments.length - (result.score.counts["Not checked"] ?? 0),
+    );
     expect(result.meta.warnings.join(" ")).not.toContain("subrequest limit");
   });
 

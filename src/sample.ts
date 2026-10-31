@@ -1,4 +1,5 @@
 import type { EvidenceMode, Label, UiLanguage } from "../shared/labels";
+import { notCheckedExplanation } from "../shared/messages";
 import { aggregateScore } from "../shared/score";
 import type { AnalysisResult, Contradiction, SearchOutageReason, SegmentResult, SourceCitation } from "../shared/types";
 
@@ -70,6 +71,14 @@ function englishSeeds(): Seed[] {
       evidenceMode: "web-search",
     },
     {
+      text: "The harbour master counted 18 visiting yachts on the Tuesday before the vote.",
+      label: "Not checked",
+      confidence: 0,
+      explanation: notCheckedExplanation("en"),
+      sources: [],
+      evidenceMode: "not-applicable",
+    },
+    {
       text: "At 33, she falls in the age range most likely to keep a boat, and she started sailing at university.",
       label: "Personal",
       confidence: 0.7,
@@ -137,6 +146,14 @@ function greekSeeds(): Seed[] {
       explanation: "Τα αποτελέσματα αναζήτησης δεν αναφέρουν πώληση της δεξαμενής και η ανώνυμη πηγή δεν ελέγχεται.",
       sources: [],
       evidenceMode: "web-search",
+    },
+    {
+      text: "Ο λιμενάρχης μέτρησε 18 επισκέπτες ιστιοπλόους την Τρίτη πριν από την ψηφοφορία.",
+      label: "Not checked",
+      confidence: 0,
+      explanation: notCheckedExplanation("el"),
+      sources: [],
+      evidenceMode: "not-applicable",
     },
     {
       text: "Στα 33 της, η ίδια πέφτει στην ηλικιακή ομάδα που κρατά πιο συχνά βάρκα και ξεκίνησε ιστιοπλοΐα στο πανεπιστήμιο.",

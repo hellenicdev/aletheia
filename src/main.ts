@@ -596,6 +596,7 @@ function renderSummary(segments: SegmentResult[]) {
     const swatch = document.createElement("span");
     swatch.className = "swatch";
     swatch.setAttribute("aria-hidden", "true");
+    button.title = labelHelp(state.lang, label);
     button.append(swatch, document.createTextNode(`${count} ${labelName(state.lang, label)}`));
     row.append(button);
   }
@@ -640,6 +641,7 @@ function claimCard(segment: SegmentResult): HTMLElement {
   const pill = document.createElement("span");
   pill.className = "pill";
   pill.dataset.label = segment.label;
+  pill.title = labelHelp(state.lang, segment.label);
   const swatch = document.createElement("span");
   swatch.className = "swatch";
   swatch.setAttribute("aria-hidden", "true");
@@ -651,6 +653,7 @@ function claimCard(segment: SegmentResult): HTMLElement {
   confidenceName.className = "visually-hidden";
   confidenceName.textContent = `${t(state.lang, "confidence")} `;
   confidence.append(confidenceName, document.createTextNode(`${percent}%`));
+  if (segment.label === "Not checked") confidence.hidden = true;
   top.append(pill, confidence);
   const text = document.createElement("p");
   text.className = "claim-text";
@@ -683,6 +686,10 @@ function claimReason(segment: SegmentResult): DocumentFragment {
   const explanation = document.createElement("p");
   explanation.className = "explanation";
   explanation.textContent = segment.explanation;
+  if (segment.label === "Not checked") {
+    fragment.append(explanation);
+    return fragment;
+  }
   const mode = document.createElement("p");
   mode.className = "mode";
   mode.textContent = t(

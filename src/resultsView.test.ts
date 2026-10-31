@@ -26,6 +26,7 @@ describe("results view", () => {
     ]);
     expect(visibleClaims(items, "False", false).visible).toEqual([{ label: "False" }]);
     expect(parseFilter("Opinion")).toBe("Opinion");
+    expect(parseFilter("Not checked")).toBe("Not checked");
     expect(parseFilter("nope")).toBe("all");
   });
 
@@ -38,6 +39,8 @@ describe("results view", () => {
     ];
     expect(sortClaims(items, "reading").map((item) => item.start)).toEqual([0, 10, 20, 5].sort((a, b) => a - b));
     expect(sortClaims(items, "verdict").map((item) => item.label)).toEqual(["False", "Misleading", "True", "Opinion"]);
+    const withSkipped = [...items, { label: "Not checked" as const, confidence: 1, start: 1 }];
+    expect(sortClaims(withSkipped, "verdict").at(-1)?.label).toBe("Not checked");
     expect(sortClaims(items, "confidence").map((item) => item.confidence)).toEqual([0.9, 0.5, 0.4, 0.2]);
     expect(parseSort("verdict")).toBe("verdict");
     expect(parseSort("nope")).toBe("reading");
