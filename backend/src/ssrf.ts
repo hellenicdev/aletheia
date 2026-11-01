@@ -32,12 +32,31 @@ export function isBlockedHost(hostname: string): boolean {
     return true;
   }
 
-  const mapped = host.startsWith("::ffff:") ? host.slice(7) : host;
-  if (isBlockedIPv4(mapped)) return true;
+  if (isBlockedIPv4(host)) return true;
 
   if (host.includes(":")) {
-    if (host === "::1" || host === "0:0:0:0:0:0:0:1") return true;
-    if (host.startsWith("fe80:") || host.startsWith("fc") || host.startsWith("fd")) return true;
+    // URL parsing canonicalizes dotted IPv4 tails and expanded IPv6 forms.
+    // In particular, ::ffff:127.0.0.1 becomes ::ffff:7f00:1.
+    let canonical: string;
+    try {
+      canonical = new URL(`http://[${host}]/`).hostname.slice(1, -1);
+    } catch {
+      return true;
+    }
+    if (canonical === "::" || canonical === "::1") return true;
+    const first = Number.parseInt(canonical.split(":")[0] || "0", 16);
+    if (
+      (first & 0xfe00) === 0xfc00 ||
+      (first & 0xffc0) === 0xfe80 ||
+      (first & 0xffc0) === 0xfec0 ||
+      (first & 0xff00) === 0xff00
+    ) return true;
+    const mapped = canonical.match(/^::ffff:([\da-f]+):([\da-f]+)$/);
+    if (mapped) {
+      const high = Number.parseInt(mapped[1], 16);
+      const low = Number.parseInt(mapped[2], 16);
+      return isBlockedIPv4(`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`);
+    }
   }
   return false;
 }
