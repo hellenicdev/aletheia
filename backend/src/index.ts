@@ -142,10 +142,7 @@ export async function handleRequest(
 
   let input: AnalyzeInput;
   try {
-    const raw = await request.text();
-    if (raw.length > LIMITS.maxBodyBytes) {
-      return jsonResponse({ error: "Request body is too large." }, 413, cors);
-    }
+    const raw = await readRequestBody(request, LIMITS.maxBodyBytes);
     const parsed = JSON.parse(raw) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return jsonResponse({ error: "Expected a JSON object." }, 400, cors);
@@ -156,7 +153,10 @@ export async function handleRequest(
       url: typeof record.url === "string" ? record.url : undefined,
       uiLanguage: typeof record.uiLanguage === "string" ? record.uiLanguage : undefined,
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof HttpError && error.status === 413) {
+      return jsonResponse({ error: error.message }, 413, cors);
+    }
     return jsonResponse({ error: "Expected JSON." }, 400, cors);
   }
 
@@ -398,6 +398,30 @@ export async function handleRequest(
   headers.set("Cache-Control", "no-cache, no-store");
   headers.set("x-aletheia-cache", "miss");
   return new Response(stream, { status: 200, headers });
+}
+
+/** Enforce the byte cap while streaming, before decoding or parsing untrusted JSON. */
+async function readRequestBody(request: Request, maxBytes: number): Promise<string> {
+  const reader = request.body?.getReader();
+  if (!reader) return "";
+  const decoder = new TextDecoder();
+  let received = 0;
+  let text = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) return text + decoder.decode();
+      received += value.byteLength;
+      if (received > maxBytes) {
+        // Do not wait for an untrusted producer's cancellation hook.
+        void reader.cancel().catch(() => undefined);
+        throw new HttpError(413, "Request body is too large.");
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 function errorEvent(
