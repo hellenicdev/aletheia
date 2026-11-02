@@ -995,6 +995,13 @@ input::placeholder {
   font-size: 13px;
 }
 
+.limits-note {
+  margin-top: 12px;
+  color: var(--faint);
+  font-size: 13px;
+  max-width: var(--content);
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;
